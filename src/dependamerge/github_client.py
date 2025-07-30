@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 import os
-from typing import List, Optional
+from typing import Dict, List, Optional
 
+import requests
+import urllib3.exceptions
 from github import Github, GithubException
+from github.CommitStatus import CommitStatus
 from github.PullRequest import PullRequest
 from github.Repository import Repository
 
@@ -81,10 +84,20 @@ class GitHubClient:
                 repository_full_name=repository.full_name,
                 html_url=pr.html_url,
             )
+        except (
+            urllib3.exceptions.NameResolutionError,
+            urllib3.exceptions.MaxRetryError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.RequestException,
+        ) as e:
+            raise RuntimeError(f"Network error while fetching PR info: {e}") from e
         except GithubException as e:
             raise RuntimeError(f"Failed to fetch PR info: {e}") from e
 
-    def get_pull_request_commits(self, owner: str, repo: str, pr_number: int) -> List[str]:
+    def get_pull_request_commits(
+        self, owner: str, repo: str, pr_number: int
+    ) -> List[str]:
         """Get commit messages from a pull request."""
         try:
             repository = self.github.get_repo(f"{owner}/{repo}")
@@ -98,6 +111,14 @@ class GitHubClient:
                     commit_messages.append(commit.commit.message)
 
             return commit_messages
+        except (
+            urllib3.exceptions.NameResolutionError,
+            urllib3.exceptions.MaxRetryError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.RequestException,
+        ) as e:
+            raise RuntimeError(f"Network error while fetching PR commits: {e}") from e
         except GithubException as e:
             raise RuntimeError(f"Failed to fetch PR commits: {e}") from e
 
@@ -106,6 +127,16 @@ class GitHubClient:
         try:
             org = self.github.get_organization(org_name)
             return list(org.get_repos())
+        except (
+            urllib3.exceptions.NameResolutionError,
+            urllib3.exceptions.MaxRetryError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.RequestException,
+        ) as e:
+            raise RuntimeError(
+                f"Network error while fetching organization repositories: {e}"
+            ) from e
         except GithubException as e:
             raise RuntimeError(f"Failed to fetch organization repositories: {e}") from e
 
@@ -113,6 +144,16 @@ class GitHubClient:
         """Get all open pull requests for a repository."""
         try:
             return list(repository.get_pulls(state="open"))
+        except (
+            urllib3.exceptions.NameResolutionError,
+            urllib3.exceptions.MaxRetryError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.RequestException,
+        ) as e:
+            raise RuntimeError(
+                f"Network error while fetching PRs for {repository.full_name}: {e}"
+            ) from e
         except GithubException as e:
             print(f"Warning: Failed to fetch PRs for {repository.full_name}: {e}")
             return []
@@ -137,15 +178,13 @@ class GitHubClient:
     def merge_pull_request(
         self, owner: str, repo: str, pr_number: int, merge_method: str = "merge"
     ) -> bool:
-        """Merge a pull request."""
+        """Merge a pull request with detailed error handling."""
         try:
             repository = self.github.get_repo(f"{owner}/{repo}")
             pr = repository.get_pull(pr_number)
 
-            if not pr.mergeable:
-                print(f"PR {pr_number} is not mergeable")
-                return False
-
+            # Attempt merge even if mergeable is False for blocked PRs
+            # (branch protection might resolve after approval)
             result = pr.merge(merge_method=merge_method)
             return bool(result.merged)
         except GithubException as e:
@@ -172,6 +211,13 @@ class GitHubClient:
         if pr_info.mergeable_state == "draft":
             return "Draft PR"
 
+        # Handle blocked state - need to determine why it's blocked
+        if pr_info.mergeable_state == "blocked" and pr_info.mergeable is True:
+            # This means technically mergeable but blocked by branch protection
+            # We need to check what's blocking it to provide intelligent status
+            block_reason = self._analyze_block_reason(pr_info)
+            return block_reason
+
         if pr_info.mergeable is False:
             # Check for specific reasons why it's not mergeable
             if pr_info.mergeable_state == "dirty":
@@ -186,7 +232,81 @@ class GitHubClient:
         if pr_info.mergeable_state == "behind":
             return "Rebase required"
 
-        return "Ready to merge"
+        # If mergeable is True and mergeable_state is clean, it's ready
+        if pr_info.mergeable is True and pr_info.mergeable_state == "clean":
+            return "Ready to merge"
+
+        # For any other combination where mergeable is True but state is unclear
+        if pr_info.mergeable is True:
+            return "Ready to merge"
+
+        # Fallback for unclear states
+        return f"Status unclear ({pr_info.mergeable_state or 'unknown'})"
+
+    def _analyze_block_reason(self, pr_info: PullRequestInfo) -> str:
+        """Analyze why a PR is blocked and return appropriate status."""
+        try:
+            repo_owner, repo_name = pr_info.repository_full_name.split("/")
+            repository = self.github.get_repo(f"{repo_owner}/{repo_name}")
+            pr = repository.get_pull(pr_info.number)
+
+            # Check if there are any reviews
+            reviews = list(pr.get_reviews())
+            approved_reviews = [r for r in reviews if r.state == "APPROVED"]
+
+            # Check commit status and check runs
+            commit = repository.get_commit(pr.head.sha)
+
+            # Get commit statuses (legacy status API) and get latest per context
+            all_statuses = list(commit.get_statuses())
+            latest_statuses: Dict[str, CommitStatus] = {}
+            for status in all_statuses:
+                context = status.context
+                if (
+                    context not in latest_statuses
+                    or status.updated_at > latest_statuses[context].updated_at
+                ):
+                    latest_statuses[context] = status
+
+            failing_statuses = [
+                s for s in latest_statuses.values() if s.state in ["failure", "error"]
+            ]
+            pending_statuses = [
+                s for s in latest_statuses.values() if s.state == "pending"
+            ]
+
+            # Get check runs (GitHub Actions, etc.)
+            check_runs = list(commit.get_check_runs())
+            failing_checks = [
+                c
+                for c in check_runs
+                if c.conclusion in ["failure", "cancelled", "timed_out"]
+            ]
+            pending_checks = [
+                c for c in check_runs if c.status in ["queued", "in_progress"]
+            ]
+
+            # Determine the primary blocking reason - prioritize review requirements
+            if failing_statuses or failing_checks:
+                return "Blocked by failing checks"
+            elif not approved_reviews:
+                # Check if there are any real pending checks (not just stale statuses)
+                if (
+                    pending_checks
+                ):  # Only consider pending check runs, not stale statuses
+                    return "Blocked by pending checks"
+                else:
+                    # All checks passed but no approval - needs review
+                    return "Requires approval"
+            elif pending_statuses or pending_checks:
+                return "Blocked by pending checks"
+            else:
+                # Has approvals but still blocked - might be other branch protection rules
+                return "Blocked by branch protection"
+
+        except Exception:
+            # Fallback if we can't analyze the specific reason
+            return "Blocked"
 
     def fix_out_of_date_pr(self, owner: str, repo: str, pr_number: int) -> bool:
         """Fix an out-of-date PR by updating the branch."""

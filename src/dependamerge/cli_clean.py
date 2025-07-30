@@ -3,7 +3,9 @@
 
 from typing import List, Optional, Tuple
 
+import requests
 import typer
+import urllib3.exceptions
 from github.Repository import Repository
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -16,7 +18,7 @@ from .pr_comparator import PRComparator
 app = typer.Typer(
     help="Automatically merge pull requests created by automation tools across GitHub organizations"
 )
-console = Console()
+console = Console(markup=False)
 
 
 @app.command()
@@ -51,16 +53,33 @@ def merge(
         github_client = GitHubClient(token)
         comparator = PRComparator(similarity_threshold)
 
-        console.print(f"[bold blue]Analyzing PR: {pr_url}[/bold blue]")
+        console.print(f"Analyzing PR: {pr_url}")
 
         # Parse PR URL and get info
         owner, repo_name, pr_number = github_client.parse_pr_url(pr_url)
-        source_pr: PullRequestInfo = github_client.get_pull_request_info(
-            owner, repo_name, pr_number
-        )
+
+        try:
+            source_pr: PullRequestInfo = github_client.get_pull_request_info(
+                owner, repo_name, pr_number
+            )
+        except (
+            urllib3.exceptions.NameResolutionError,
+            urllib3.exceptions.MaxRetryError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.RequestException,
+        ) as e:
+            console.print(
+                "[red]Network Error: Failed to connect to GitHub API while fetching source PR.[/red]"
+            )
+            console.print(f"[red]Details: {e}[/red]")
+            console.print(
+                "[red]Please check your internet connection and try again.[/red]"
+            )
+            raise typer.Exit(1) from e
 
         # Display source PR info
-        _display_pr_info(source_pr, "Source PR")
+        _display_pr_info(source_pr, "Source PR", github_client)
 
         # Check if source PR is from automation
         if not github_client.is_automation_author(source_pr.author):
@@ -70,7 +89,7 @@ def merge(
             raise typer.Exit(1)
 
         # Get organization repositories
-        console.print(f"\n[bold blue]Scanning organization: {owner}[/bold blue]")
+        console.print(f"\nScanning organization: {owner}")
 
         with Progress(
             SpinnerColumn(),
@@ -78,9 +97,25 @@ def merge(
             console=console,
         ) as progress:
             task = progress.add_task("Fetching repositories...", total=None)
-            repositories: List[Repository] = (
-                github_client.get_organization_repositories(owner)
-            )
+            try:
+                repositories: List[Repository] = (
+                    github_client.get_organization_repositories(owner)
+                )
+            except (
+                urllib3.exceptions.NameResolutionError,
+                urllib3.exceptions.MaxRetryError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+                requests.exceptions.RequestException,
+            ) as e:
+                console.print(
+                    "[red]Network Error: Failed to connect to GitHub API while fetching organization repositories.[/red]"
+                )
+                console.print(f"[red]Details: {e}[/red]")
+                console.print(
+                    "[red]Please check your internet connection and try again.[/red]"
+                )
+                raise typer.Exit(1) from e
             progress.update(task, description=f"Found {len(repositories)} repositories")
 
         # Find similar PRs
@@ -116,6 +151,21 @@ def merge(
                         if comparison.is_similar:
                             similar_prs.append((target_pr, comparison))
 
+                    except (
+                        urllib3.exceptions.NameResolutionError,
+                        urllib3.exceptions.MaxRetryError,
+                        requests.exceptions.ConnectionError,
+                        requests.exceptions.Timeout,
+                        requests.exceptions.RequestException,
+                    ) as e:
+                        console.print(
+                            "[red]Network Error: Failed to connect to GitHub API while analyzing PRs.[/red]"
+                        )
+                        console.print(f"[red]Details: {e}[/red]")
+                        console.print(
+                            "[red]Please check your internet connection and try again.[/red]"
+                        )
+                        raise typer.Exit(1) from e
                     except Exception as e:
                         console.print(
                             f"[yellow]Warning: Failed to analyze PR {pr.number} in {repo.full_name}: {e}[/yellow]"
@@ -125,11 +175,9 @@ def merge(
 
         # Display results
         if not similar_prs:
-            console.print("\n[yellow]No similar PRs found in the organization[/yellow]")
+            console.print("\nNo similar PRs found in the organization")
         else:
-            console.print(
-                f"\n[bold green]Found {len(similar_prs)} similar PR(s)[/bold green]"
-            )
+            console.print(f"\nFound {len(similar_prs)} similar PR(s)")
 
             # Display similar PRs table
             table = Table(title="Similar Pull Requests")
@@ -160,7 +208,7 @@ def merge(
 
         # Merge PRs
         if dry_run:
-            console.print("\n[yellow]Dry run mode - no changes will be made[/yellow]")
+            console.print("\nDry run mode - no changes will be made")
             return
 
         success_count = 0
@@ -170,7 +218,7 @@ def merge(
                 success_count += 1
 
         # Always merge source PR (whether similar PRs were found or not)
-        console.print(f"\n[bold blue]Merging source PR {source_pr.number}[/bold blue]")
+        console.print(f"\nMerging source PR {source_pr.number}")
         source_pr_merged = _merge_single_pr(
             source_pr, github_client, merge_method, fix, console
         )
@@ -179,26 +227,29 @@ def merge(
 
         total_prs = len(similar_prs) + 1  # similar PRs + source PR
         console.print(
-            f"\n[bold green]Successfully merged {success_count}/{total_prs} PRs (including source PR)[/bold green]"
+            f"\nSuccessfully merged {success_count}/{total_prs} PRs (including source PR)"
         )
 
     except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"Error: {e}")
         raise typer.Exit(1) from e
 
 
-def _display_pr_info(pr: PullRequestInfo, title: str):
+def _display_pr_info(pr: PullRequestInfo, title: str, github_client: GitHubClient):
     """Display pull request information in a formatted table."""
     table = Table(title=title)
     table.add_column("Property", style="cyan")
     table.add_column("Value", style="green")
+
+    # Get proper status instead of raw mergeable field
+    status = github_client.get_pr_status_details(pr)
 
     table.add_row("Repository", pr.repository_full_name)
     table.add_row("PR Number", str(pr.number))
     table.add_row("Title", pr.title)
     table.add_row("Author", pr.author)
     table.add_row("State", pr.state)
-    table.add_row("Mergeable", str(pr.mergeable))
+    table.add_row("Status", status)
     table.add_row("Files Changed", str(len(pr.files_changed)))
     table.add_row("URL", pr.html_url)
 
