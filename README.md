@@ -83,13 +83,74 @@ pip install typer requests PyGithub rich pydantic
 
 ## Authentication
 
-You need a GitHub personal access token with appropriate permissions:
+### Quick Start
 
-1. Go to GitHub Settings → Developer settings → Personal access tokens
-2. Create a token with these scopes:
-   - `repo` (for private repositories)
-   - `public_repo` (for public repositories)
-   - `read:org` (to list organization repositories)
+**You need a GitHub personal access token with these permissions:**
+
+- **Organization access**: Read organization repositories
+- **Repository access**: Read pull requests, contents, metadata, and checks
+- **Pull request management**: Write access to approve and merge pull requests
+
+### Token Types
+
+GitHub offers two types of personal access tokens: **fine-grained**
+(recommended) and **classic**.
+
+### Fine-Grained Personal Access Tokens (Recommended)
+
+Fine-grained tokens provide more precise control and better security.
+Create one at:
+GitHub Settings → Developer settings → Personal access tokens → Fine-grained tokens
+
+#### Required Repository Permissions
+
+Your token needs these permissions on **all repositories** in the target organization:
+
+- **Pull requests**: Read and Write
+  - Read: View PR details, status, files, commits, and reviews
+    (for finding blocked PRs and similarity matching)
+  - Write: Approve and merge pull requests (for automated bulk operations)
+- **Contents**: Read
+  - Read repository files and commit information (for analyzing file changes in PRs)
+- **Metadata**: Read
+  - Basic repository information and access (required for all GitHub API operations)
+- **Checks**: Read
+  - View status checks and workflow results
+    (for identifying blocked PRs due to failing checks)
+- **Actions**: Read *(if using GitHub Actions for CI/CD)*
+  - Read workflow run status and check results
+    (for comprehensive status analysis)
+
+#### Required Account Permissions
+
+- **Organization permissions** → **Members**: Read
+  - List repositories in the organization (required for organization-wide scanning)
+
+#### Repository Access
+
+Choose one of:
+
+- **Selected repositories**: Grant access to specific repositories you want to
+manage
+- **All repositories**: Grant access to all repositories in organizations
+you're a member of
+
+*Note: The tool scans entire organizations, so it needs access to all
+repositories you want to include in the analysis.*
+
+### Classic Personal Access Tokens (Legacy)
+
+If you prefer classic tokens, create one at:
+GitHub Settings → Developer settings → Personal access tokens →
+Tokens (classic)
+
+Required scopes:
+
+- `repo` (Full control of private repositories)
+- `public_repo` (Access public repositories)
+- `read:org` (Read organization membership and repositories)
+
+### Setting Your Token
 
 Set the token as an environment variable:
 
@@ -98,6 +159,29 @@ export GITHUB_TOKEN=your_token_here
 ```
 
 Or pass it directly to the command using `--token`.
+
+### Verifying Your Token
+
+Before running operations, test your token permissions:
+
+```bash
+# Test basic access - should list organization repositories
+dependamerge blocked myorganization --dry-run
+
+# Test with a small operation first
+dependamerge merge https://github.com/myorg/testrepo/pull/123 --dry-run
+```
+
+If these commands work without permission errors, your token is properly configured.
+
+### Security Best Practices
+
+- Use fine-grained tokens when possible for better security
+- Set appropriate expiry dates (GitHub recommends 90 days or less)
+- Store tokens securely (environment variables, secret managers)
+- Never commit tokens to version control
+- Rotate tokens periodically
+- Use the fewest required permissions for your use case
 
 ## Usage
 
@@ -372,13 +456,59 @@ Error: GitHub token needed
 
 Solution: Set `GITHUB_TOKEN` environment variable or use `--token` flag.
 
-#### Permission Error
+#### Permission Errors
+
+**Organization Access Error:**
 
 ```text
 Failed to fetch organization repositories
 ```
 
-Solution: Ensure your token has `read:org` scope.
+Solutions:
+
+- **Fine-grained tokens**: Ensure "Members: Read" permission under Organization permissions
+- **Classic tokens**: Ensure your token has `read:org` scope
+- Verify you're a member of the organization or have appropriate access
+
+**Repository Access Error:**
+
+```text
+403 Forbidden when accessing repository
+```
+
+Solutions:
+
+- **Fine-grained tokens**: Add the repository to your token's
+  "Selected repositories" or use "All repositories"
+- **Classic tokens**: Ensure your token has `repo` scope for private repos
+  or `public_repo` for public repos
+- Verify the repository exists and you have access to it
+
+**Pull Request Operation Error:**
+
+```text
+403 Forbidden when approving/merging pull request
+```
+
+Solutions:
+
+- **Fine-grained tokens**: Enable "Pull requests: Write" permission
+- **Classic tokens**: Ensure your token has `repo` scope
+- Verify you have push/admin access to the target repository
+- Check if branch protection rules require specific reviewers
+
+**GraphQL Permission Error:**
+
+```text
+Resource not accessible by integration
+```
+
+Solutions:
+
+- Verify you have granted all required repository permissions
+- For fine-grained tokens, ensure the token has access to all repositories
+  in the organization
+- Some GraphQL operations require higher permissions than REST API equivalents
 
 #### No Similar PRs Found
 
@@ -400,6 +530,61 @@ Solution: Ensure your token has `read:org` scope.
 - Enable verbose output with environment variables
 - Review the similarity scoring in dry-run mode for merge operations
 - Use JSON output format for programmatic processing of blocked PR results
+
+## GitHub API Operations
+
+For transparency, here are the specific GitHub API operations that dependamerge
+performs with your token:
+
+### Organization Scanning Operations
+
+**GraphQL Queries:**
+
+- List all repositories in an organization
+- Retrieve open pull requests across all repositories
+- Fetch PR metadata (title, author, state, files changed, status checks)
+- Get commit information and check run results
+
+**REST API Calls:**
+
+- `GET /orgs/{org}/repos` - List organization repositories (paginated)
+
+### Pull Request Analysis Operations
+
+**REST API Calls:**
+
+- `GET /repos/{owner}/{repo}/pulls/{number}` - Get detailed PR information
+- `GET /repos/{owner}/{repo}/pulls/{number}/files` - Get files changed in PR
+- `GET /repos/{owner}/{repo}/pulls/{number}/commits` - Get PR commit history
+- `GET /repos/{owner}/{repo}/pulls/{number}/reviews` - Get existing PR reviews
+- `GET /repos/{owner}/{repo}/commits/{sha}/check-runs` - Get status check results
+
+### Pull Request Management Operations
+
+**REST API Calls:**
+
+- `POST /repos/{owner}/{repo}/pulls/{number}/reviews` - Approve pull requests
+- `PUT /repos/{owner}/{repo}/pulls/{number}/merge` - Merge pull requests
+- `PUT /repos/{owner}/{repo}/pulls/{number}/update-branch` - Update out-of-date branches
+
+### Data Usage
+
+The tool:
+
+- **Reads** organization and repository information
+- **Reads** pull request details, files, commits, and status
+- **Writes** pull request approvals and merges
+- **Does not** access repository code content beyond PR diffs
+- **Does not** change repository settings or configurations
+- **Does not** access user personal information beyond public profile data
+
+### Rate Limiting
+
+The tool implements:
+
+- Automatic rate limit detection and backoff
+- Concurrent request limiting to respect GitHub's API limits
+- Progress tracking to show operation status during long-running scans
 
 ## Security Considerations
 
