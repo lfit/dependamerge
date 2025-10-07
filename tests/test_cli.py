@@ -14,6 +14,12 @@ class TestCLI:
     def setup_method(self):
         self.runner = CliRunner()
 
+    def test_top_level_version(self):
+        result = self.runner.invoke(app, ["--version"])
+        assert result.exit_code == 0
+        # Should contain the version banner
+        assert "dependamerge version" in result.stdout
+
     @patch("dependamerge.cli.GitHubClient")
     @patch("dependamerge.cli.PRComparator")
     @patch("dependamerge.github_service.GitHubService")

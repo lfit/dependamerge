@@ -46,6 +46,26 @@ class CustomTyper(typer.Typer):
 app = CustomTyper(
     help="Find blocked PRs in GitHub organizations and automatically merge pull requests"
 )
+
+
+@app.callback()
+def main(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=version_callback,
+        is_eager=True,
+        help="Show version and exit",
+    ),
+):
+    """
+    Dependamerge command line interface.
+    """
+    # The actual handling is done via the version_callback.
+    # This callback exists only to expose --version at the top level.
+    pass
+
+
 console = Console(markup=False)
 
 
@@ -186,13 +206,6 @@ def merge(
         False,
         "--dismiss-copilot",
         help="Automatically dismiss unresolved GitHub Copilot review comments",
-    ),
-    version: bool = typer.Option(
-        False,
-        "--version",
-        callback=version_callback,
-        is_eager=True,
-        help="Show version and exit",
     ),
 ):
     """
