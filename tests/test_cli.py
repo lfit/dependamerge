@@ -618,3 +618,104 @@ class TestCLI:
         assert "Dependamerge Evaluation" not in result.stdout
         # Should show direct merge output
         assert "📈 Final Results:" in result.stdout
+
+    @patch("dependamerge.cli.GitHubClient")
+    @patch("dependamerge.cli.PRComparator")
+    @patch("dependamerge.github_service.GitHubService")
+    def test_close_command_automation_pr(
+        self, mock_service_class, mock_comparator_class, mock_client_class
+    ):
+        """Test close command with automation PR."""
+        mock_client = Mock()
+        mock_client_class.return_value = mock_client
+
+        mock_comparator = Mock()
+        mock_comparator_class.return_value = mock_comparator
+
+        mock_service = Mock()
+        mock_service_class.return_value = mock_service
+
+        mock_client.parse_pr_url.return_value = ("owner", "repo", 22)
+        mock_client.is_automation_author.return_value = True
+
+        mock_pr = PullRequestInfo(
+            number=22,
+            title="Bump package from 1.0 to 2.0",
+            body="Bumps package from 1.0 to 2.0",
+            author="dependabot[bot]",
+            head_sha="abc123",
+            base_branch="main",
+            head_branch="dependabot/package",
+            state="open",
+            mergeable=True,
+            mergeable_state="clean",
+            behind_by=0,
+            files_changed=[],
+            repository_full_name="owner/repo",
+            html_url="https://github.com/owner/repo/pull/22",
+        )
+
+        mock_client.get_pull_request_info.return_value = mock_pr
+        mock_client.get_pr_status_details.return_value = "Ready to merge"
+
+        # Mock async methods
+        async def mock_find_similar_prs(*args, **kwargs):
+            return []
+
+        async def mock_close():
+            return None
+
+        mock_service.find_similar_prs = mock_find_similar_prs
+        mock_service.close = mock_close
+
+        result = self.runner.invoke(
+            app,
+            [
+                "close",
+                "https://github.com/owner/repo/pull/22",
+                "--no-confirm",
+                "--token",
+                "test_token",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "closed" in result.stdout.lower()
+
+    @patch("dependamerge.cli.GitHubClient")
+    def test_close_command_non_automation_pr_no_override(self, mock_client_class):
+        """Test that close command for non-automation PR without override shows SHA."""
+        mock_client = Mock()
+        mock_client_class.return_value = mock_client
+
+        mock_client.parse_pr_url.return_value = ("owner", "repo", 22)
+        mock_client.is_automation_author.return_value = False
+
+        mock_pr = PullRequestInfo(
+            number=22,
+            title="Manual update",
+            body="Test body",
+            author="human-user",
+            head_sha="abc123",
+            base_branch="main",
+            head_branch="fix-bug",
+            state="open",
+            mergeable=True,
+            mergeable_state="clean",
+            behind_by=0,
+            files_changed=[],
+            repository_full_name="owner/repo",
+            html_url="https://github.com/owner/repo/pull/22",
+        )
+        mock_client.get_pull_request_info.return_value = mock_pr
+        mock_client.get_pull_request_commits.return_value = ["Manual update"]
+        mock_client.get_pr_status_details.return_value = "Ready"
+
+        result = self.runner.invoke(
+            app,
+            ["close", "https://github.com/owner/repo/pull/22", "--token", "test_token"],
+        )
+
+        assert result.exit_code == 0
+        assert "not from a recognized automation tool" in result.stdout
+        assert "--override" in result.stdout

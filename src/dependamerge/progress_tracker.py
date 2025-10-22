@@ -306,11 +306,13 @@ class ProgressTracker:
 class MergeProgressTracker(ProgressTracker):
     """Specialized progress tracker for merge operations."""
 
-    def __init__(self, organization: str):
+    def __init__(self, organization: str, is_close_operation: bool = False):
         super().__init__(organization)
         self.similar_prs_found = 0
         self.prs_merged = 0
         self.merge_failures = 0
+        self.prs_closed = 0
+        self.is_close_operation = is_close_operation
 
     def found_similar_pr(self):
         """Mark that a similar PR was found."""
@@ -327,6 +329,11 @@ class MergeProgressTracker(ProgressTracker):
         self.merge_failures += 1
         self._refresh_display()
 
+    def increment_closed(self):
+        """Mark a successful close."""
+        self.prs_closed += 1
+        self._refresh_display()
+
     def _generate_display_text(self) -> Text:
         """Generate merge-specific display text."""
         if not self.rich_available:
@@ -334,10 +341,16 @@ class MergeProgressTracker(ProgressTracker):
 
         text = Text()
 
-        # Main progress line for merge operations
+        # Main progress line for merge/close operations
         if self.total_repositories > 0:
             progress_pct = (self.completed_repositories / self.total_repositories) * 100
-            text.append("🔀 Searching for similar PRs ", style="bold blue")
+            operation_icon = "🚪" if self.is_close_operation else "🔀"
+            operation_text = (
+                "Searching for similar PRs"
+                if not self.is_close_operation
+                else "Searching for similar PRs"
+            )
+            text.append(f"{operation_icon} {operation_text} ", style="bold blue")
             text.append(
                 f"({self.completed_repositories}/{self.total_repositories} repos, ",
                 style="white",
@@ -350,7 +363,8 @@ class MergeProgressTracker(ProgressTracker):
                 text.append("🔍 Examining source pull request in ", style="bold blue")
                 text.append(f"{self.organization}", style="bold cyan")
             else:
-                text.append("🔀 Analyzing PRs in ", style="bold blue")
+                operation_icon = "🚪" if self.is_close_operation else "🔀"
+                text.append(f"{operation_icon} Analyzing PRs in ", style="bold blue")
                 text.append(f"{self.organization}", style="bold cyan")
 
         # Stats for merge operations (only when repo count is known)
@@ -387,6 +401,7 @@ class MergeProgressTracker(ProgressTracker):
                 "similar_prs_found": self.similar_prs_found,
                 "prs_merged": self.prs_merged,
                 "merge_failures": self.merge_failures,
+                "prs_closed": self.prs_closed,
             }
         )
         return summary

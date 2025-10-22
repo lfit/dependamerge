@@ -105,6 +105,7 @@ def test_final_verification():
                 similarity_threshold=0.8,
                 merge_method="merge",
                 token="test_token",
+                force="none",
             )
 
             # Test passes if we reach this point - the merge was successful

@@ -9,10 +9,11 @@ Command-line tool for the management of pull requests in a GitHub organization.
 
 <!-- markdownlint-disable MD013 -->
 
-| Command | Description                                                   |
-| ------- | ------------------------------------------------------------- |
-| merge   | Bulk approve/merge pull requests across a GitHub organization |
-| blocked | Reports blocked pull requests in a GitHub organization        |
+| Command | Description                                                    |
+| ------- | -------------------------------------------------------------- |
+| merge   | Bulk approve/merge pull requests across a GitHub organization  |
+| close   | Bulk close pull requests across a GitHub organization          |
+| blocked | Reports blocked pull requests in a GitHub organization         |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -41,15 +42,32 @@ successive merges have created conflicts or the need to rebase. Also
 lists pull requests blocked by branch protection rules, such as those
 with failed CI jobs, tests, etc.
 
+## Close
+
+Bulk closes similar pull requests across different repositories in a
+GitHub organisation. Works with the same automation tools as merge:
+
+- Dependabot
+- pre-commit.ci
+- Renovate
+
+Also works for individual GitHub users when provided with an override flag.
+
+Uses the same matching heuristic as merge to find similar PRs. Unlike merge,
+it requires PRs to be in the open state (no mergeable state checks needed).
+
 ## Overview
 
-Dependamerge provides two main functions:
+Dependamerge provides three main functions:
 
 1. **Finding Blocked PRs**: Check entire GitHub organizations to identify
    pull requests with conflicts, failing checks, or other blocking issues
 2. **Automated Merging**: Analyze a source pull request and find similar pull
    requests across all repositories in the same GitHub organization, then
    automatically approve and merge the matching PRs
+3. **Bulk Closing**: Analyze a source pull request and find similar pull
+   requests across all repositories in the same GitHub organization, then
+   close all matching open PRs
 
 This saves time on routine dependency updates, maintenance tasks, and
 coordinated changes across all repositories while providing visibility into
@@ -268,6 +286,35 @@ curl -H "Authorization: token $GITHUB_TOKEN" \
 
 ## Usage
 
+### Closing Pull Requests
+
+Close pull requests across an entire GitHub organization:
+
+```bash
+# Close similar PRs from automation tools (dependabot, pre-commit.ci)
+dependamerge close https://github.com/myorg/repo1/pull/45
+
+# Close with no confirmation (immediate closing)
+dependamerge close https://github.com/myorg/repo1/pull/45 --no-confirm
+
+# Close with custom similarity threshold
+dependamerge close https://github.com/myorg/repo1/pull/45 --threshold 0.9
+
+# Close user-generated PRs with override SHA
+dependamerge close https://github.com/myorg/repo1/pull/45 --override a1b2c3d4e5f6g7h8
+```
+
+The close command will:
+
+- Analyze the provided PR
+- Find similar PRs across the organization
+- Close all matching PRs that are in the open state
+- Skip PRs that are already closed or are drafts
+
+**Note:** Unlike the merge command, the close command does not need to check
+mergeable state or branch protection rules. It requires PRs to be in the open
+state.
+
 ### Finding Blocked PRs
 
 Find blocked pull requests in an entire GitHub organization:
@@ -291,7 +338,7 @@ The blocked command will:
 - Count unresolved GitHub Copilot feedback comments (displayed when present)
 - Exclude standard code review requirements from blocking reasons
 
-### Basic Pull Request Merging
+### Merging Pull Requests
 
 For any pull request from any author:
 
@@ -314,13 +361,6 @@ The SHA hash derives from:
 - The PR author's GitHub username
 - The first line of the commit message
 - This provides an extra layer of validation for sensitive operations
-
-### Basic Merge Usage
-
-```bash
-dependamerge merge \
-  https://github.com/lfreleng-actions/python-project-name-action/pull/22
-```
 
 ### Dry Run (Interactive Preview Mode)
 
@@ -393,10 +433,24 @@ dependamerge merge https://github.com/owner/repo/pull/123 \
   (default: automatic fixing enabled)
 - `--dismiss-copilot`: Automatically resolve unresolved GitHub Copilot reviews
   (dismissal + thread resolution)
+- `--force TEXT`: Override level for bypassing safety checks - `none` (default),
+  `code-owners`, `protection-rules`, or `all`. See [Force Override System](docs/FORCE_OVERRIDE_SYSTEM.md)
+  for detailed documentation
 - `--progress/--no-progress`: Show real-time progress updates (default:
   progress)
 - `--token TEXT`: GitHub token (alternative to GITHUB_TOKEN env var)
 - `--override TEXT`: SHA hash for extra security validation
+
+#### Close Command Options
+
+- `--no-confirm`: Skip confirmation prompt and close without dry-run
+- `--threshold FLOAT`: Similarity threshold for matching PRs (0.0-1.0,
+  default: 0.8)
+- `--progress/--no-progress`: Show real-time progress updates (default:
+  progress)
+- `--debug-matching`: Show detailed scoring information for PR matching
+- `--token TEXT`: GitHub token (alternative to GITHUB_TOKEN env var)
+- `--override TEXT`: SHA hash to override non-automation PR restriction
 
 ## How It Works
 
@@ -519,6 +573,34 @@ coverage without requiring user intervention.
 dependamerge merge https://github.com/myorg/repo1/pull/78 \
   --threshold 0.9 --progress
 ```
+
+#### Bypassing Branch Protection with Force Levels
+
+The `--force` option provides tiered override levels for bypassing safety checks
+when you have appropriate permissions.
+
+```bash
+# Bypass code owner review requirements (you are a code owner)
+dependamerge merge https://github.com/myorg/repo1/pull/45 --force=code-owners
+
+# Bypass branch protection validation (you have admin/bypass permissions)
+dependamerge merge https://github.com/myorg/repo1/pull/67 --force=protection-rules
+
+# Emergency override - attempt merge despite most warnings (use with caution)
+dependamerge merge https://github.com/myorg/repo1/pull/89 --force=all
+```
+
+**Force Levels**:
+
+- `none` (default): Respect all protections
+- `code-owners`: Bypass code owner review requirements
+- `protection-rules`: Bypass branch protection checks (requires permissions)
+- `all`: Attempt merge despite most warnings (not recommended)
+
+**⚠️ Important**: Force levels bypass tool-level checks. GitHub API will still
+enforce actual merge restrictions based on your permissions. In some cases,
+and when branch protection rules are in place, this will result in failed merge
+attempts.
 
 ## Safety Features
 

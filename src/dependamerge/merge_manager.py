@@ -64,6 +64,7 @@ class AsyncMergeManager:
         progress_tracker: MergeProgressTracker | None = None,
         dry_run: bool = False,
         dismiss_copilot: bool = False,
+        force_level: str = "none",
     ):
         self.token = token
         self.default_merge_method = merge_method
@@ -73,6 +74,7 @@ class AsyncMergeManager:
         self.progress_tracker = progress_tracker
         self.dry_run = dry_run
         self.dismiss_copilot = dismiss_copilot
+        self.force_level = force_level
         self.log = logging.getLogger(__name__)
 
         # Track merge operations
@@ -295,15 +297,23 @@ class AsyncMergeManager:
 
             # Check for blocking reviews (changes requested)
             if self._has_blocking_reviews(pr_info):
-                result.status = MergeStatus.SKIPPED
-                result.error = "PR has reviews requesting changes - will not override human feedback"
-                self._console.print(
-                    f"⏭️ Skipped: {pr_info.html_url} \\[has reviews requesting changes]"
-                )
-                self.log.info(
-                    f"⏭️  Skipping {pr_info.repository_full_name}#{pr_info.number}: {result.error}"
-                )
-                return result
+                # Only skip if not forcing with 'all' level
+                if self.force_level != "all":
+                    result.status = MergeStatus.SKIPPED
+                    result.error = "PR has reviews requesting changes - will not override human feedback"
+                    self._console.print(
+                        f"⏭️ Skipped: {pr_info.html_url} \\[has reviews requesting changes]"
+                    )
+                    self.log.info(
+                        f"⏭️  Skipping {pr_info.repository_full_name}#{pr_info.number}: {result.error}"
+                    )
+                    return result
+                else:
+                    # Only log during dry-run evaluation to avoid duplicate messages
+                    if self.dry_run:
+                        self.log.warning(
+                            f"⚠️  Overriding blocking reviews for {pr_info.repository_full_name}#{pr_info.number} (--force=all)"
+                        )
 
             # Step 1: Check merge requirements (including branch protection)
             can_merge, merge_check_reason = await self._check_merge_requirements(
@@ -504,7 +514,7 @@ class AsyncMergeManager:
                     if self.progress_tracker:
                         self.progress_tracker.merge_success()
                     self._console.print(
-                        f"⚠️ Rebase/merge: {pr_info.html_url} \\[behind base branch]"
+                        f"⚠️  Rebase/merge: {pr_info.html_url} \\[behind base branch]"
                     )
                 elif pr_info.mergeable_state == "dirty":
                     result.status = MergeStatus.BLOCKED
@@ -682,10 +692,22 @@ class AsyncMergeManager:
 
                     # If code owner reviews are required, our automated approval might not be sufficient
                     if require_code_owner:
-                        return (
-                            False,
-                            "code owner reviews are required - cannot auto-approve",
-                        )
+                        # Check if user wants to bypass code owner checks
+                        if self.force_level in [
+                            "code-owners",
+                            "protection-rules",
+                            "all",
+                        ]:
+                            # Only log during dry-run evaluation to avoid duplicate messages
+                            if self.dry_run:
+                                self.log.warning(
+                                    f"⚠️  Bypassing code owner review requirement for {repo_owner}/{repo_name}#{pr_info.number} (--force={self.force_level})"
+                                )
+                        else:
+                            return (
+                                False,
+                                "code owner reviews are required - cannot auto-approve",
+                            )
 
         except Exception:
             # Don't fail the merge attempt if we can't check protection rules
@@ -705,7 +727,15 @@ class AsyncMergeManager:
                     repo_owner, repo_name, pr_info.number, merge_method
                 )
                 if not test_result[0]:
-                    return False, test_result[1]
+                    # Check if we should bypass protection rules
+                    if self.force_level in ["protection-rules", "all"]:
+                        # Only log during dry-run evaluation to avoid duplicate messages
+                        if self.dry_run:
+                            self.log.warning(
+                                f"⚠️  Bypassing branch protection check for {repo_owner}/{repo_name}#{pr_info.number}: {test_result[1]} (--force={self.force_level})"
+                            )
+                    else:
+                        return False, test_result[1]
 
             except Exception as e:
                 # If we can't test merge, continue with other checks
@@ -731,14 +761,34 @@ class AsyncMergeManager:
                 return True, "PR ready for approval and merge"
             else:
                 # If mergeable is False and state is blocked, it's blocked by failing checks
-                return False, "blocked by failing status checks"
+                if self.force_level == "all":
+                    # Only log during dry-run evaluation to avoid duplicate messages
+                    if self.dry_run:
+                        self.log.warning(
+                            f"⚠️  Bypassing failing status checks for {repo_owner}/{repo_name}#{pr_info.number} (--force=all)"
+                        )
+                    return True, "PR blocked but forcing merge attempt (--force=all)"
+                else:
+                    return False, "blocked by failing status checks"
         elif pr_info.mergeable_state == "behind":
             if not self.fix_out_of_date:
-                return False, "PR is behind base branch and --no-fix option is set"
+                if self.force_level == "all":
+                    self.log.warning(
+                        f"⚠️  Attempting merge despite being behind for {repo_owner}/{repo_name}#{pr_info.number} (--force=all)"
+                    )
+                    return True, "PR behind but forcing merge attempt (--force=all)"
+                else:
+                    return False, "PR is behind base branch and --no-fix option is set"
             else:
                 return True, "PR is behind - will rebase before merge"
         elif pr_info.mergeable_state == "dirty":
-            return (False, "merge conflicts")
+            if self.force_level == "all":
+                self.log.warning(
+                    f"⚠️  Attempting merge despite conflicts for {repo_owner}/{repo_name}#{pr_info.number} (--force=all)"
+                )
+                return True, "PR has conflicts but forcing merge attempt (--force=all)"
+            else:
+                return (False, "merge conflicts")
 
         return True, "All merge requirements appear to be met"
 

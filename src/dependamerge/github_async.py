@@ -432,6 +432,14 @@ class GitHubAsync:
             return {}
         return r.json()  # type: ignore[no-any-return]
 
+    async def patch(
+        self, path: str, json: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        r = await self._request("PATCH", f"{self.api_url}{path}", json=json)
+        if r.status_code == 204:
+            return {}
+        return r.json()  # type: ignore[no-any-return]
+
     async def graphql(
         self, query: str, variables: dict[str, Any] | None = None
     ) -> dict[str, Any]:
@@ -604,6 +612,24 @@ class GitHubAsync:
         REST: PUT /repos/{owner}/{repo}/pulls/{pull_number}/update-branch
         """
         await self.put(f"/repos/{owner}/{repo}/pulls/{number}/update-branch")
+
+    async def close_pull_request(
+        self, owner: str, repo: str, number: int
+    ) -> dict[str, Any]:
+        """
+        Close a pull request.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            number: Pull request number
+
+        Returns:
+            Updated pull request data
+        """
+        return await self.patch(
+            f"/repos/{owner}/{repo}/pulls/{number}", json={"state": "closed"}
+        )
 
     async def analyze_block_reason(
         self, owner: str, repo: str, number: int, head_sha: str
