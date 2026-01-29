@@ -130,18 +130,15 @@ class TestCLI:
         assert result.exit_code == 0
         assert "Dependamerge Evaluation" in result.stdout
 
-    @patch("dependamerge.cli.GitHubClient")
-    def test_merge_command_invalid_url(self, mock_client_class):
-        mock_client = Mock()
-        mock_client_class.return_value = mock_client
-        mock_client.parse_pr_url.side_effect = ValueError("Invalid GitHub PR URL")
-
+    def test_merge_command_invalid_url(self):
+        """Test that invalid URLs are caught by the URL parser."""
         result = self.runner.invoke(
             app, ["merge", "https://invalid-url.com", "--token", "test_token"]
         )
 
         assert result.exit_code == 1
-        assert "❌ Error during merge operation" in result.stdout
+        assert "❌ Invalid URL:" in result.stdout
+        assert "Cannot determine platform" in result.stdout
 
     @patch("dependamerge.cli.GitHubClient")
     def test_merge_command_non_automation_pr(self, mock_client_class):

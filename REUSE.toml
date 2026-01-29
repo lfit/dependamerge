@@ -11,7 +11,9 @@ path = [
 	 "img/**",
 	 "*.lock",
          "docs/*.png",
-         "test_coverage_report*"
+         "test_coverage_report*",
+         "**/__pycache__/**",
+         ".secrets.**"
 ]
 SPDX-License-Identifier = "Apache-2.0"
 SPDX-FileCopyrightText = "2025 The Linux Foundation"

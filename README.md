@@ -5,24 +5,29 @@ SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 # Dependamerge
 
-Command-line tool for the management of pull requests in a GitHub organization.
+Command-line tool for the management of pull requests in a GitHub organization
+and changes on Gerrit Code Review servers.
 
 <!-- markdownlint-disable MD013 -->
 
-| Command | Description                                                    |
-| ------- | -------------------------------------------------------------- |
-| merge   | Bulk approve/merge pull requests across a GitHub organization  |
-| close   | Bulk close pull requests across a GitHub organization          |
-| blocked | Reports blocked pull requests in a GitHub organization         |
-| status  | Reports repository statistics for tags, releases, and PRs      |
+| Command | Description                                                              |
+| ------- | ------------------------------------------------------------------------ |
+| merge   | Bulk approve/merge pull requests (GitHub) or changes (Gerrit)            |
+| close   | Bulk close pull requests across a GitHub organization                    |
+| blocked | Reports blocked pull requests in a GitHub organization                   |
+| status  | Reports repository statistics for tags, releases, and PRs                |
 
 <!-- markdownlint-enable MD013 -->
 
 ## Merge
 
 Bulk approves/merges similar pull requests across different repositories in a
-GitHub organisation. By default, bypasses code owner review requirements to
-enable automated merging of dependency updates. Supports common automation tools:
+GitHub organisation, or similar changes on a Gerrit Code Review server.
+
+### GitHub Mode
+
+By default, bypasses code owner review requirements to enable automated merging
+of dependency updates. Supports common automation tools:
 
 - Dependabot
 - pre-commit.ci
@@ -36,6 +41,25 @@ Matches pull requests based on a heuristic that considers the criteria:
 - Pull requests with the same title/body content
 - Pull requests containing the same package updates
 - Pull requests changing the same files
+
+### Gerrit Mode
+
+When provided with a Gerrit change URL, the tool will:
+
+- Detect the Gerrit server and authenticate using credentials
+- Fetch details of the source change
+- Search for similar open changes on the same server
+- Apply +2 Code-Review and submit matching changes
+
+Gerrit URL format:
+
+```text
+https://gerrit.example.org/c/project/name/+/12345
+https://gerrit.example.org/base/c/project/name/+/12345
+```
+
+The tool automatically detects whether a URL is for GitHub or Gerrit based on
+the URL pattern (`/pull/` for GitHub, `/c/.../+/` for Gerrit).
 
 ## Status
 
@@ -72,14 +96,17 @@ it requires PRs to be in the open state (no mergeable state checks needed).
 
 ## Overview
 
-Dependamerge provides three main functions:
+Dependamerge provides four main functions:
 
 1. **Finding Blocked PRs**: Check entire GitHub organizations to identify
    pull requests with conflicts, failing checks, or other blocking issues
-2. **Automated Merging**: Analyze a source pull request and find similar pull
-   requests across all repositories in the same GitHub organization, then
-   automatically approve and merge the matching PRs
-3. **Bulk Closing**: Analyze a source pull request and find similar pull
+2. **Automated Merging (GitHub)**: Analyze a source pull request and find
+   similar pull requests across all repositories in the same GitHub
+   organization, then automatically approve and merge the matching PRs
+3. **Automated Merging (Gerrit)**: Analyze a source change on a Gerrit Code
+   Review server, find similar open changes, then apply +2 Code-Review and
+   submit matching changes
+4. **Bulk Closing**: Analyze a source pull request and find similar pull
    requests across all repositories in the same GitHub organization, then
    close all matching open PRs
 
@@ -87,8 +114,9 @@ This saves time on routine dependency updates, maintenance tasks, and
 coordinated changes across all repositories while providing visibility into
 unmergeable PRs that need attention.
 
-**Works with any pull request** regardless of author, automation tool, or
-origin.
+**Works with any pull request or change** regardless of author, automation
+tool, or origin. The tool automatically detects whether a URL is for GitHub
+or Gerrit based on the URL pattern.
 
 ## Features
 
@@ -232,6 +260,11 @@ uvx dependamerge==0.1.0 --help
 
 ## Authentication
 
+Dependamerge supports both GitHub and Gerrit platforms, each with different
+authentication requirements.
+
+### GitHub Authentication
+
 You need a GitHub personal access token with appropriate permissions. The tool
 performs both read and write operations on GitHub repositories and pull
 requests.
@@ -325,6 +358,50 @@ curl -H "Authorization: token $GITHUB_TOKEN" \
   https://api.github.com/orgs/YOUR_ORG/repos
 ```
 
+### Gerrit Authentication
+
+Gerrit Code Review servers require HTTP credentials for API access. These are
+typically different from your SSO/LDAP login credentials.
+
+#### Obtaining Gerrit HTTP Credentials
+
+1. Log into your Gerrit server web interface
+2. Navigate to: **Settings** → **HTTP Credentials**
+3. Generate a new HTTP password if you don't have one
+4. Note your HTTP username (often your email or username)
+
+#### Setting Up Gerrit Authentication
+
+Set the credentials as environment variables:
+
+```bash
+export GERRIT_USERNAME="your_username"
+export GERRIT_PASSWORD="your_http_password"
+```
+
+Alternative environment variable names are also supported for compatibility:
+
+```bash
+export GERRIT_HTTP_USER="your_username"
+export GERRIT_HTTP_PASSWORD="your_http_password"
+```
+
+**Note:** The `GERRIT_USERNAME`/`GERRIT_PASSWORD` variables take precedence
+over `GERRIT_HTTP_USER`/`GERRIT_HTTP_PASSWORD` when you configure both.
+
+#### Gerrit Permission Verification
+
+To verify your Gerrit credentials:
+
+```bash
+# Test basic access (replace with your Gerrit server)
+curl -u "$GERRIT_USERNAME:$GERRIT_PASSWORD" \
+  "https://gerrit.example.org/a/accounts/self"
+```
+
+A successful response returns your account details in JSON format (with a
+`)]}'\n` XSSI guard prefix that Gerrit adds to all JSON responses).
+
 ## Usage
 
 ### Closing Pull Requests
@@ -415,11 +492,26 @@ The blocked command will:
 
 ### Merging Pull Requests
 
-For any pull request from any author:
+The merge command supports both GitHub PRs and Gerrit changes. The platform
+is automatically detected from the URL format.
+
+#### GitHub Pull Requests
 
 ```bash
 dependamerge merge \
   https://github.com/lfreleng-actions/python-project-name-action/pull/22
+```
+
+#### Gerrit Changes
+
+```bash
+# Set credentials first
+export GERRIT_USERNAME="your_username"
+export GERRIT_PASSWORD="your_http_password"
+
+# Merge similar changes
+dependamerge merge \
+  https://gerrit.linuxfoundation.org/infra/c/releng/lftools/+/12345
 ```
 
 ### Optional Security Validation
@@ -504,10 +596,18 @@ dependamerge merge https://github.com/owner/repo/pull/123 \
 
 #### Merge Command Options
 
+**General Options:**
+
 - `--no-confirm`: Skip confirmation prompt and merge without delay (default is
   interactive mode)
-- `--threshold FLOAT`: Similarity threshold for matching PRs (0.0-1.0,
+- `--threshold FLOAT`: Similarity threshold for matching PRs/changes (0.0-1.0,
   default: 0.8)
+- `--progress/--no-progress`: Show real-time progress updates (default:
+  progress)
+- `--verbose`, `-v`: Enable verbose debug logging
+
+**GitHub-Specific Options:**
+
 - `--merge-method TEXT`: Merge method - merge, squash, or rebase (default:
   merge)
 - `--no-fix`: Disable automatic fixing of out-of-date branches
@@ -517,10 +617,18 @@ dependamerge merge https://github.com/owner/repo/pull/123 \
 - `--force TEXT`: Override level for bypassing safety checks - `none` (default),
   `code-owners`, `protection-rules`, or `all`. See [Force Override System](docs/FORCE_OVERRIDE_SYSTEM.md)
   for detailed documentation
-- `--progress/--no-progress`: Show real-time progress updates (default:
-  progress)
 - `--token TEXT`: GitHub token (alternative to GITHUB_TOKEN env var)
 - `--override TEXT`: SHA hash for extra security validation
+
+**Gerrit Environment Variables:**
+
+- `GERRIT_USERNAME`: HTTP username for Gerrit authentication
+- `GERRIT_PASSWORD`: HTTP password for Gerrit authentication
+
+Fallback variables:
+
+- `GERRIT_HTTP_USER`: HTTP username (fallback)
+- `GERRIT_HTTP_PASSWORD`: HTTP password (fallback)
 
 #### Close Command Options
 
@@ -617,6 +725,39 @@ dependamerge merge https://github.com/myorg/repo1/pull/12 --threshold 0.85
 dependamerge merge https://github.com/myorg/repo1/pull/89 \
   --override f1a2b3c4d5e6f7g8
 ```
+
+### Example: Gerrit Merge
+
+#### Basic Gerrit Change Merge
+
+```bash
+# Set up Gerrit credentials
+export GERRIT_USERNAME="your_username"
+export GERRIT_PASSWORD="your_http_password"
+
+# Merge similar changes on a Gerrit server
+dependamerge merge \
+  https://gerrit.linuxfoundation.org/infra/c/releng/lftools/+/12345
+```
+
+#### Gerrit Change with Custom Threshold
+
+```bash
+# Merge with higher similarity threshold
+dependamerge merge \
+  https://gerrit.example.org/c/project/name/+/67890 \
+  --threshold 0.9
+```
+
+#### Non-Interactive Gerrit Merge
+
+```bash
+# Skip confirmation prompt for automation
+dependamerge merge --no-confirm \
+  https://gerrit.linuxfoundation.org/infra/c/releng/global-jjb/+/74080
+```
+
+### Example: GitHub Merge (continued)
 
 #### Resolving Copilot Comments
 
@@ -899,14 +1040,63 @@ Solution: Add workflow/actions permissions:
 - Check that you have write permissions to the target repositories
 - Verify the repository settings permit the merge method
 
+### Gerrit Authentication Error
+
+```text
+❌ Gerrit credentials not found in environment.
+```
+
+Solution: Set the required environment variables:
+
+```bash
+export GERRIT_USERNAME="your_username"
+export GERRIT_PASSWORD="your_http_password"
+```
+
+Note: These are your **HTTP credentials** from Gerrit, not your SSO/LDAP
+password. Generate them in Gerrit under Settings → HTTP Credentials.
+
+### Gerrit API Error
+
+```text
+❌ Gerrit authentication failed
+```
+
+Solution:
+
+- Verify your HTTP credentials are correct
+- Check that you have permission to access the Gerrit server
+- Ensure the server URL is correct and accessible
+- Try testing with curl:
+
+```bash
+curl -u "$GERRIT_USERNAME:$GERRIT_PASSWORD" \
+  "https://gerrit.example.org/a/accounts/self"
+```
+
+### Gerrit URL Not Recognized
+
+```text
+❌ Invalid URL: Cannot determine platform for URL
+```
+
+Solution: Ensure your Gerrit URL follows the correct format:
+
+- `https://gerrit.example.org/c/project/name/+/12345`
+- `https://gerrit.example.org/base/c/project/name/+/12345`
+
+The URL must contain `/c/` and `/+/` for the tool to recognize it as a Gerrit change.
+
 ### Getting Help
 
 - Check the command help (local dev): `uv run dependamerge --help`
 - For PyPI usage: `uvx dependamerge --help`
-- Enable verbose output with environment variables
+- Enable verbose output with `--verbose` or `-v`
 - Review similarity scoring in interactive mode (default behavior)
 
 ## Security Considerations
+
+### GitHub
 
 - Store GitHub tokens securely (environment variables, not in code)
 - Use tokens with minimal required permissions for your use case
@@ -916,3 +1106,15 @@ Solution: Add workflow/actions permissions:
 - Consider using repository-specific tokens instead of organization-wide access
   when possible
 - Audit token permissions and revoke unused tokens periodically
+
+### Gerrit
+
+- Store Gerrit HTTP credentials securely (environment variables, not in code)
+- Use HTTP credentials generated specifically for API access, not your main
+  password
+- Regenerate HTTP credentials periodically in Gerrit Settings → HTTP Credentials
+- Review changes in interactive preview mode before submitting
+- Be aware that the tool performs +2 Code-Review and submit operations using
+  your credentials
+- Ensure you have appropriate permissions on the Gerrit server before running
+  bulk operations
