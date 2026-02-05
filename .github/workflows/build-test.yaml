@@ -69,6 +69,7 @@ jobs:
       matrix_json: "${{ steps.python-build.outputs.matrix_json }}"
       artefact_name: "${{ steps.python-build.outputs.artefact_name }}"
       artefact_path: "${{ steps.python-build.outputs.artefact_path }}"
+      path_prefix: "${{ steps.python-build.outputs.path_prefix }}"
     permissions:
       contents: read
       actions: write  # Required for cache deletion when clear_cache is true
@@ -118,6 +119,7 @@ jobs:
         uses: lfreleng-actions/python-test-action@92d4110d44ebc18fa4575c6b00203ff67d01a1cb  # v1.0.1
         with:
           python_version: ${{ matrix.python-version }}
+          path_prefix: ${{ needs.python-build.outputs.path_prefix }}
 
   python-audit:
     name: 'Python Audit'
@@ -145,6 +147,7 @@ jobs:
         uses: lfreleng-actions/python-audit-action@ec8d84ca14c0413a2b2c6612a3e15b9803f9de75  # v0.2.5
         with:
           python_version: "${{ matrix.python-version }}"
+          path_prefix: ${{ needs.python-build.outputs.path_prefix }}
 
   sbom:
     name: 'Generate SBOM'
@@ -164,6 +167,7 @@ jobs:
         with:
           include_dev: "false"
           sbom_format: "both"
+          path_prefix: ${{ needs.python-build.outputs.path_prefix }}
 
       - name: "Upload SBOM artifacts"
         # yamllint disable-line rule:line-length
