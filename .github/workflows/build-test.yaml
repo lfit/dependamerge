@@ -15,7 +15,7 @@ on:
         default: false
         required: false
   pull_request:
-    types: [opened, reopened, edited, synchronize]
+    types: [opened, reopened, synchronize]
     branches:
       - main
       - master
@@ -61,8 +61,44 @@ jobs:
           artifact_upload: 'true'
           artifact_formats: 'json'
 
+  clear-cache:
+    name: 'Clear Python Caches'
+    # Only runs on manual dispatch with clear_cache enabled
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      && github.event.inputs.clear_cache == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write  # Required for gh cache delete
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594  # v2.16.0
+        with:
+          egress-policy: 'audit'
+
+      - name: 'Clear Python dependency caches'
+        run: |
+          # Clear Python dependency caches
+          echo "Clearing Python dependency caches 🗑️"
+          output="$(gh cache delete --all 2>&1)" || exit_code=$?
+          if [ -z "${exit_code:-}" ]; then
+            echo "Cache clearing completed ✅" >> "$GITHUB_STEP_SUMMARY"
+          else
+            # Cache clearing should not be fatal; minimal output to summary
+            echo "Cache clearing was not successful 💬" >> "$GITHUB_STEP_SUMMARY"
+            # More detailed information goes to the console/log output
+            echo "gh cache exit code: ${exit_code} 💬"
+            echo "$output"
+          fi
+
   python-build:
     name: 'Python Build'
+    needs: 'clear-cache'
+    # Run even when clear-cache is skipped (i.e. on PR triggers)
+    if: ${{ !failure() && !cancelled() }}
     runs-on: 'ubuntu-latest'
     outputs:
       matrix_json: "${{ steps.python-build.outputs.matrix_json }}"
@@ -70,10 +106,7 @@ jobs:
       artefact_path: "${{ steps.python-build.outputs.artefact_path }}"
     permissions:
       contents: read
-      actions: write  # Required for cache deletion when clear_cache is true
     timeout-minutes: 12
-    env:
-      GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
     steps:
       # Harden the runner used by this workflow
       # yamllint disable-line rule:line-length
@@ -88,8 +121,6 @@ jobs:
         id: python-build
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/python-build-action@7ff456c72f1dd50ef212ea7222efc12693221af3  # v1.0.4
-        with:
-          clear_cache: ${{ github.event.inputs.clear_cache || 'false' }}
 
   python-tests:
     name: 'Python Tests'
@@ -154,6 +185,12 @@ jobs:
     permissions:
       contents: read
     steps:
+      # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594  # v2.16.0
+        with:
+          egress-policy: 'audit'
+
       # yamllint disable-line rule:line-length
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
