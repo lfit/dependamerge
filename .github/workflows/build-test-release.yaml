@@ -49,7 +49,7 @@ jobs:
     runs-on: 'ubuntu-latest'
     permissions:
       contents: write  # Needed to draft a release
-    timeout-minutes: 1
+    timeout-minutes: 5
     outputs:
       tag: "${{ steps.tag-validate.outputs.tag_name }}"
     steps:
