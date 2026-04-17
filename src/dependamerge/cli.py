@@ -319,6 +319,7 @@ class _MergeContext:
     token: str | None
     override: str | None
     no_fix: bool
+    merge_timeout: float
     show_progress: bool
     debug_matching: bool
     dismiss_copilot: bool
@@ -734,6 +735,7 @@ def _run_parallel_merge(
             max_retries=MAX_RETRIES,
             concurrency=concurrency,
             fix_out_of_date=not ctx.no_fix,
+            merge_timeout=ctx.merge_timeout,
             progress_tracker=ctx.progress_tracker,
             preview_mode=preview,
             dismiss_copilot=ctx.dismiss_copilot,
@@ -1458,6 +1460,11 @@ def merge(
         "--no-fix",
         help="Do not attempt to automatically fix out-of-date branches",
     ),
+    merge_timeout: float = typer.Option(
+        300.0,
+        "--merge-timeout",
+        help="Timeout in seconds for async merge operations (rebase, pre-commit.ci, recreate). Default: 300",
+    ),
     show_progress: bool = typer.Option(
         True, "--progress/--no-progress", help="Show real-time progress updates"
     ),
@@ -1655,6 +1662,7 @@ def merge(
             token=token,
             override=override,
             no_fix=no_fix,
+            merge_timeout=merge_timeout,
             show_progress=show_progress,
             debug_matching=debug_matching,
             dismiss_copilot=dismiss_copilot,
@@ -1720,6 +1728,7 @@ def merge(
         token=token,
         override=override,
         no_fix=no_fix,
+        merge_timeout=merge_timeout,
         show_progress=show_progress,
         debug_matching=debug_matching,
         dismiss_copilot=dismiss_copilot,

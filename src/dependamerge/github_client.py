@@ -136,6 +136,7 @@ class GitHubClient:
 
                 return PullRequestInfo(
                     number=int(pr.get("number", pr_number)),
+                    node_id=pr.get("node_id"),  # REST API uses "node_id" key
                     title=pr.get("title") or "",
                     body=pr.get("body"),
                     author=((pr.get("user") or {}).get("login") or ""),

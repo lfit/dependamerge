@@ -49,6 +49,7 @@ class PullRequestInfo(BaseModel):
     """Represents pull request information."""
 
     number: int
+    node_id: str | None = None
     title: str
     body: str | None
     author: str

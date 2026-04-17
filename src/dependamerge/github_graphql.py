@@ -18,6 +18,7 @@ __all__ = [
     "ORG_REPOS_ONLY",
     "ORG_REPOS_WITH_OPEN_PRS",
     "REPO_OPEN_PRS_PAGE",
+    "ENABLE_AUTO_MERGE",
     "GET_BRANCH_PROTECTION",
 ]
 
@@ -68,6 +69,7 @@ query($org: String!, $reposCursor: String) {
             endCursor
           }
           nodes {
+            id
             number
             title
             body
@@ -155,6 +157,7 @@ query($owner: String!, $name: String!, $prsCursor: String, $prsPageSize: Int!, $
         endCursor
       }
       nodes {
+        id
         number
         title
         body
@@ -297,6 +300,24 @@ mutation DismissPullRequestReview($reviewId: ID!, $message: String!) {
       id
       state
       author { login }
+    }
+  }
+}
+"""
+
+# GraphQL mutation to enable auto-merge on a pull request
+ENABLE_AUTO_MERGE = """
+mutation EnableAutoMerge($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod) {
+  enablePullRequestAutoMerge(input: {
+    pullRequestId: $pullRequestId
+    mergeMethod: $mergeMethod
+  }) {
+    pullRequest {
+      autoMergeRequest {
+        enabledAt
+        enabledBy { login }
+        mergeMethod
+      }
     }
   }
 }
