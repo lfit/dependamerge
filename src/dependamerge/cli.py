@@ -53,7 +53,11 @@ from .github_async import (
 )
 from .github_client import GitHubClient
 from .github_service import AUTOMATION_TOOLS
-from .merge_manager import AsyncMergeManager, MergeResult
+from .merge_manager import (
+    DEFAULT_MERGE_TIMEOUT,
+    AsyncMergeManager,
+    MergeResult,
+)
 from .models import ComparisonResult, PullRequestInfo
 from .netrc import (
     NetrcParseError,
@@ -854,14 +858,20 @@ def _execute_confirmed_merge(
     final_blocked = sum(
         1 for r in real_results if r.status.value == "blocked"
     )
-    console.print(
-        f"\n🚀 Final Results: {final_merged} merged, "
-        f"{final_failed} failed"
+    final_auto_merge = sum(
+        1 for r in real_results if r.status.value == "auto_merge_pending"
     )
+    parts = [f"{final_merged} merged"]
+    if final_auto_merge > 0:
+        parts.append(f"{final_auto_merge} auto-merge pending")
+    parts.append(f"{final_failed} failed")
+    console.print(f"\n🚀 Final Results: {', '.join(parts)}")
     if final_skipped > 0:
         console.print(f"⏭️  Skipped {final_skipped} PRs")
     if final_blocked > 0:
         console.print(f"🛑 Blocked {final_blocked} PRs")
+    if final_auto_merge > 0:
+        console.print(f"⏳ Auto-merge pending for {final_auto_merge} PRs")
 
 
 def _display_merge_results(
@@ -881,6 +891,9 @@ def _display_merge_results(
     blocked_count = sum(
         1 for r in merge_results if r.status.value == "blocked"
     )
+    auto_merge_count = sum(
+        1 for r in merge_results if r.status.value == "auto_merge_pending"
+    )
 
     if failed_count > 0:
         if not no_confirm:
@@ -893,12 +906,15 @@ def _display_merge_results(
         console.print(f"⏭️  Skipped {skipped_count} PRs")
     if blocked_count > 0:
         console.print(f"🛑 Blocked {blocked_count} PRs")
+    if auto_merge_count > 0:
+        console.print(f"⏳ Auto-merge pending for {auto_merge_count} PRs")
 
     if no_confirm:
-        console.print(
-            f"📈 Final Results: {merged_count} merged, "
-            f"{failed_count} failed"
-        )
+        parts = [f"{merged_count} merged"]
+        if auto_merge_count > 0:
+            parts.append(f"{auto_merge_count} auto-merge pending")
+        parts.append(f"{failed_count} failed")
+        console.print(f"📈 Final Results: {', '.join(parts)}")
 
 
 def _handle_repo_merge(
@@ -1215,14 +1231,20 @@ def _execute_repo_confirmed_merge(
     final_blocked = sum(
         1 for r in real_results if r.status.value == "blocked"
     )
-    console.print(
-        f"\n🚀 Final Results: {final_merged} merged, "
-        f"{final_failed} failed"
+    final_auto_merge = sum(
+        1 for r in real_results if r.status.value == "auto_merge_pending"
     )
+    parts = [f"{final_merged} merged"]
+    if final_auto_merge > 0:
+        parts.append(f"{final_auto_merge} auto-merge pending")
+    parts.append(f"{final_failed} failed")
+    console.print(f"\n🚀 Final Results: {', '.join(parts)}")
     if final_skipped > 0:
         console.print(f"⏭️  Skipped {final_skipped} PRs")
     if final_blocked > 0:
         console.print(f"🛑 Blocked {final_blocked} PRs")
+    if final_auto_merge > 0:
+        console.print(f"⏳ Auto-merge pending for {final_auto_merge} PRs")
 
 
 def _handle_gerrit_merge(
@@ -1461,9 +1483,13 @@ def merge(
         help="Do not attempt to automatically fix out-of-date branches",
     ),
     merge_timeout: float = typer.Option(
-        300.0,
+        DEFAULT_MERGE_TIMEOUT,
         "--merge-timeout",
-        help="Timeout in seconds for async merge operations (rebase, pre-commit.ci, recreate). Default: 300",
+        help=(
+            "Timeout in seconds for async merge operations (rebase, "
+            "pre-commit.ci, recreate). Default: "
+            f"{DEFAULT_MERGE_TIMEOUT:.0f}"
+        ),
     ),
     show_progress: bool = typer.Option(
         True, "--progress/--no-progress", help="Show real-time progress updates"
