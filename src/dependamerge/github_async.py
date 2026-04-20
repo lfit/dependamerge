@@ -817,6 +817,75 @@ class GitHubAsync:
                 else:
                     raise e from inner_e
 
+
+    async def enable_auto_merge(
+        self, pull_request_node_id: str, merge_method: str = "MERGE"
+    ) -> bool:
+        """
+        Enable auto-merge on a pull request via GraphQL.
+
+        Auto-merge will automatically merge the PR once all required
+        branch protection rules are satisfied.
+
+        Args:
+            pull_request_node_id: The GraphQL node ID of the pull request.
+            merge_method: Merge method - "MERGE", "SQUASH", or "REBASE".
+                Lowercase values ("merge", "squash", "rebase") are
+                automatically uppercased.
+
+        Returns:
+            True if auto-merge was successfully enabled, False otherwise.
+        """
+        from .github_graphql import ENABLE_AUTO_MERGE
+
+        # Normalise to the GraphQL enum (uppercase)
+        graphql_method = merge_method.upper()
+        if graphql_method not in ("MERGE", "SQUASH", "REBASE"):
+            self.log.warning(
+                "Invalid merge method for auto-merge: %s; defaulting to MERGE",
+                merge_method,
+            )
+            graphql_method = "MERGE"
+
+        try:
+            result = await self.graphql(
+                ENABLE_AUTO_MERGE,
+                {
+                    "pullRequestId": pull_request_node_id,
+                    "mergeMethod": graphql_method,
+                },
+            )
+            auto_merge_data = (
+                result.get("enablePullRequestAutoMerge", {})
+                .get("pullRequest", {})
+                .get("autoMergeRequest")
+            )
+            if auto_merge_data:
+                self.log.debug(
+                    "Auto-merge enabled for PR %s (method=%s, enabledAt=%s)",
+                    pull_request_node_id,
+                    auto_merge_data.get("mergeMethod"),
+                    auto_merge_data.get("enabledAt"),
+                )
+                return True
+            self.log.debug(
+                "Auto-merge response missing autoMergeRequest for PR %s",
+                pull_request_node_id,
+            )
+            return False
+        except Exception as e:
+            error_msg = str(e)
+            # Common reasons auto-merge can't be enabled:
+            # - Repository doesn't have auto-merge enabled in settings
+            # - PR has conflicts
+            # - Required status checks not configured
+            self.log.debug(
+                "Could not enable auto-merge for PR %s: %s",
+                pull_request_node_id,
+                error_msg,
+            )
+            return False
+
     async def get_pull_request_review_comments(
         self, owner: str, repo: str, number: int
     ) -> list[dict[str, Any]]:

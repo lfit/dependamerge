@@ -500,6 +500,7 @@ class GitHubService:
 
         return PullRequestInfo(
             number=int(pr.get("number", 0)),
+            node_id=pr.get("id"),  # GraphQL node ID for mutations
             title=pr.get("title") or "",
             body=(pr.get("body") or None),
             author=((pr.get("author") or {}).get("login") or "unknown"),
