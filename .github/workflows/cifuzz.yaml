@@ -1,0 +1,96 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# OSS-Fuzz CIFuzz workflow.
+#
+# Builds and runs the project's fuzz targets on every pull request, using the
+# corpora and regressions maintained by OSS-Fuzz. See:
+#   https://google.github.io/oss-fuzz/getting-started/continuous-integration/
+#
+# Note: this workflow only does useful work once the project has been
+# onboarded to OSS-Fuzz (i.e. there is a `projects/dependamerge/` directory in
+# https://github.com/google/oss-fuzz). Until then the build step will fail
+# fast with a clear "project not found" error.
+
+name: 'CIFuzz'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches:
+      - main
+      - master
+    paths:
+      - 'src/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/cifuzz.yaml'
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+# Default to no permissions; grant per job below.
+permissions: {}
+
+jobs:
+  fuzzing:
+    name: 'CIFuzz'
+    runs-on: ubuntu-latest
+    permissions:
+      # Required by CIFuzz to check out the PR source.
+      contents: read
+      # Required to upload SARIF results to the code-scanning dashboard.
+      security-events: write
+    timeout-minutes: 20
+    steps:
+      # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: 'audit'
+
+      - name: 'Build fuzzers'
+        id: build
+        # yamllint disable-line rule:line-length
+        uses: google/oss-fuzz/infra/cifuzz/actions/build_fuzzers@24ff08d68e5047048b66dd9661f955d4379ec905  # master @ 2026-04-27
+        with:
+          oss-fuzz-project-name: 'dependamerge'
+          language: python
+
+      - name: 'Run fuzzers'
+        # yamllint disable-line rule:line-length
+        uses: google/oss-fuzz/infra/cifuzz/actions/run_fuzzers@24ff08d68e5047048b66dd9661f955d4379ec905  # master @ 2026-04-27
+        with:
+          oss-fuzz-project-name: 'dependamerge'
+          language: python
+          fuzz-seconds: 600
+          output-sarif: true
+
+      - name: 'Upload crash artefacts'
+        if: failure() && steps.build.outcome == 'success'
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: cifuzz-artifacts
+          path: ./out/artifacts
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: 'Upload SARIF results'
+        # SARIF upload requires security-events: write on GITHUB_TOKEN, which
+        # is not granted on pull_request runs from forks. Skip the upload in
+        # that case so the fuzzing job itself can still succeed.
+        if: >-
+          always() &&
+          steps.build.outcome == 'success' &&
+          (github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.fork == false)
+        # yamllint disable-line rule:line-length
+        uses: github/codeql-action/upload-sarif@ce64ddcb0d8d890d2df4a9d1c04ff297367dea2a  # v3.35.2
+        with:
+          sarif_file: cifuzz-sarif/results.sarif
+          checkout_path: cifuzz-sarif
