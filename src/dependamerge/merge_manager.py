@@ -860,10 +860,6 @@ class AsyncMergeManager:
             if pr_info.state != "open":
                 result.status = MergeStatus.FAILED
                 result.error = "PR is already closed"
-                # Log warning separately to avoid duplicate console output
-                self.log.warning(
-                    f"PR {pr_info.repository_full_name}#{pr_info.number} is already closed"
-                )
                 self._console.print(f"🛑 Failed: {pr_info.html_url} [already closed]")
                 return result
 
@@ -1031,10 +1027,6 @@ class AsyncMergeManager:
             if not copilot_processing_successful:
                 result.status = MergeStatus.FAILED
                 result.error = "Copilot review processing incomplete - not approving to avoid pollution"
-                # Log error separately to avoid duplicate console output
-                self.log.error(
-                    f"Failed to process PR {pr_info.repository_full_name}#{pr_info.number}: Copilot review processing incomplete"
-                )
                 self._console.print(
                     f"❌ Failed: {pr_info.html_url} [copilot processing incomplete]"
                 )
@@ -1102,7 +1094,7 @@ class AsyncMergeManager:
 
                         # Wait for GitHub to process the update and run checks
                         self._console.print(
-                            "⏳ Auto-merge requested, pending checks after rebase..."
+                            f"⏳ Waiting: {pr_info.html_url}"
                         )
                         await asyncio.sleep(self._merge_recheck_interval)
 
@@ -1146,15 +1138,24 @@ class AsyncMergeManager:
                                     )
                                     await asyncio.sleep(self._merge_recheck_interval)
                                 else:
-                                    self.log.warning(
-                                        "Timeout waiting for status checks to "
-                                        "complete for PR %s#%s. %s",
-                                        pr_info.repository_full_name,
-                                        pr_info.number,
-                                        "Auto-merge is enabled."
-                                        if auto_merge_ok
-                                        else "Proceeding with merge attempt.",
-                                    )
+                                    if auto_merge_ok:
+                                        log_and_print(
+                                            self.log,
+                                            self._console,
+                                            f"⏳ Auto-merge will complete: "
+                                            f"{pr_info.html_url} "
+                                            "[timeout waiting for checks]",
+                                            level="warning",
+                                        )
+                                    else:
+                                        log_and_print(
+                                            self.log,
+                                            self._console,
+                                            f"⚠️ Proceeding without checks: "
+                                            f"{pr_info.html_url} "
+                                            "[timeout waiting for checks]",
+                                            level="warning",
+                                        )
                                     break
                             else:
                                 break
@@ -1182,7 +1183,7 @@ class AsyncMergeManager:
                             log_and_print(
                                 self.log,
                                 self._console,
-                                f"⏳ Rebased: {pr_info.html_url} [waiting for status checks]",
+                                f"⬆️ Rebased: {pr_info.html_url} [waiting for status checks]",
                                 level="debug",
                             )
                         else:
@@ -1199,10 +1200,6 @@ class AsyncMergeManager:
 
                         if self.progress_tracker:
                             self.progress_tracker.merge_failure()
-                        # Log error separately to avoid duplicate console output
-                        self.log.error(
-                            f"Failed to rebase PR {pr_info.repository_full_name}#{pr_info.number}: {e}"
-                        )
                         self._console.print(
                             f"❌ Failed: {pr_info.html_url} [rebase error: {e}]"
                         )
@@ -1237,8 +1234,7 @@ class AsyncMergeManager:
                         log_and_print(
                             self.log,
                             self._console,
-                            f"⏳ Auto-merge enabled, waiting for checks: "
-                            f"{pr_info.html_url}",
+                            f"🤖 Auto-merge: {pr_info.html_url}",
                             level="debug",
                         )
 
@@ -1439,12 +1435,16 @@ class AsyncMergeManager:
                     )
 
                 if merged is None:
-                    # Auto-merge is active — PR will merge asynchronously
+                    # Auto-merge is active — PR will merge asynchronously.
+                    # The enable was already announced earlier ("🤖 Auto-merge:
+                    # <url>" or via the rebase path); use a neutral
+                    # "Waiting" line here to avoid duplicating that
+                    # announcement.
                     result.status = MergeStatus.AUTO_MERGE_PENDING
                     log_and_print(
                         self.log,
                         self._console,
-                        f"⏳ Auto-merge enabled: {pr_info.html_url} [waiting for checks]",
+                        f"⏳ Waiting: {pr_info.html_url} [pending checks]",
                         level="debug",
                     )
                 elif merged:
@@ -1533,10 +1533,6 @@ class AsyncMergeManager:
                         result.error = "Failed to merge after all retry attempts"
                         if self.progress_tracker:
                             self.progress_tracker.merge_failure()
-                        # Log error separately to avoid duplicate console output
-                        self.log.error(
-                            f"Failed to merge PR {pr_info.repository_full_name}#{pr_info.number}: {failure_reason}"
-                        )
                         self._console.print(
                             f"❌ Failed: {pr_info.html_url} [{failure_reason}]"
                         )
@@ -1550,10 +1546,6 @@ class AsyncMergeManager:
 
             # Extract operation-specific error message
             operation_desc = e.operation.replace("_", " ")
-            # Log error separately to avoid duplicate console output
-            self.log.error(
-                f"Failed to process PR {pr_info.repository_full_name}#{pr_info.number}: Permission denied for {operation_desc}"
-            )
             self._console.print(
                 f"❌ Failed: {pr_info.html_url} [permission denied: {operation_desc}]"
             )
@@ -1576,9 +1568,6 @@ class AsyncMergeManager:
                     self._console.print(f"   • {e.token_type_guidance['fix']}")
 
             self._console.print()
-            self.log.error(
-                f"Permission error processing PR {pr_info.repository_full_name}#{pr_info.number}: {e}"
-            )
 
         except Exception as e:
             result.status = MergeStatus.FAILED
@@ -1587,11 +1576,9 @@ class AsyncMergeManager:
                 self.progress_tracker.merge_failure()
 
             # Provide clean single-line error messages for other errors
-            # Log error separately to avoid duplicate console output
-            self.log.error(
-                f"Failed to process PR {pr_info.repository_full_name}#{pr_info.number}: {e}"
+            self._console.print(
+                f"❌ Failed: {pr_info.html_url} [processing error: {e}]"
             )
-            self._console.print(f"❌ Failed: {pr_info.html_url} [processing error]")
 
         finally:
             result.duration = time.time() - start_time
@@ -1666,6 +1653,61 @@ class AsyncMergeManager:
                 return True
         return False
 
+    async def _post_pr_comment_with_retry(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        html_url: str,
+        body: str,
+    ) -> bool:
+        """Post a PR comment with one retry after a 5s pause.
+
+        Used for audit-trail comments (approval, auto-merge enable)
+        that should be visible on the PR. If both attempts fail,
+        emit a single user-visible warning to the console rather
+        than silently failing.
+
+        Args:
+            owner: Repository owner.
+            repo: Repository name.
+            pr_number: Pull request number.
+            html_url: Full PR URL, used for the warning message.
+            body: Markdown body of the comment.
+
+        Returns:
+            True if the comment posted successfully (first or
+            second attempt), False otherwise.
+        """
+        if not self._github_client:
+            return False
+
+        for attempt in (1, 2):
+            try:
+                await self._github_client.post_issue_comment(
+                    owner, repo, pr_number, body
+                )
+                return True
+            except Exception as exc:
+                self.log.debug(
+                    "Audit comment post attempt %d failed for %s: %s",
+                    attempt,
+                    html_url,
+                    exc,
+                )
+                if attempt == 1:
+                    await asyncio.sleep(5.0)
+
+        # Both attempts failed — surface a single line so the
+        # user knows the PR-side audit trail is incomplete.
+        try:
+            self._console.print(
+                f"⚠️ Unable to add pull request comment: {html_url}"
+            )
+        except Exception:
+            pass
+        return False
+
     async def _enable_auto_merge_for_pr(
         self, pr_info: PullRequestInfo, owner: str, repo: str
     ) -> bool:
@@ -1717,27 +1759,16 @@ class AsyncMergeManager:
                 pr_key,
                 merge_method,
             )
-            # Post a visible audit-trail comment so reviewers can see
-            # at a glance that dependamerge enabled auto-merge on the
-            # PR. Best-effort: a failure here must not abort the
-            # merge flow, since auto-merge itself is already active.
+            # Post a visible audit-trail comment so reviewers can
+            # see at a glance that dependamerge enabled auto-merge
+            # on the PR.
             audit_comment = (
-                "🤖 dependamerge: auto-merge enabled "
-                f"(method=`{merge_method}`). The PR will merge "
-                "automatically once all required status checks "
-                "pass and branch protection requirements are met."
+                "🤖 Dependamerge\n"
+                "Enabled auto-merge due to pending updates/checks ⏳"
             )
-            try:
-                await self._github_client.post_issue_comment(
-                    owner, repo, pr_info.number, audit_comment
-                )
-            except Exception as comment_exc:
-                self.log.debug(
-                    "Failed to post auto-merge audit comment on "
-                    "%s: %s",
-                    pr_key,
-                    comment_exc,
-                )
+            await self._post_pr_comment_with_retry(
+                owner, repo, pr_info.number, pr_info.html_url, audit_comment
+            )
         return enabled
 
     async def _check_merge_requirements(
@@ -1990,7 +2021,8 @@ class AsyncMergeManager:
         log_and_print(
             self.log,
             self._console,
-            f"⏳ Triggering pre-commit.ci re-run for {pr_info.repository_full_name}#{pr_info.number} [status never reported]",
+            f"⏳ Triggering pre-commit.ci re-run: {pr_info.html_url} "
+            "[status never reported]",
             level="info",
         )
 
@@ -2027,7 +2059,7 @@ class AsyncMergeManager:
                             log_and_print(
                                 self.log,
                                 self._console,
-                                f"✅ pre-commit.ci passed for {pr_info.repository_full_name}#{pr_info.number}",
+                                f"✅ pre-commit.ci passed: {pr_info.html_url}",
                                 level="info",
                             )
                             return True
@@ -2035,7 +2067,7 @@ class AsyncMergeManager:
                             log_and_print(
                                 self.log,
                                 self._console,
-                                f"❌ pre-commit.ci failed for {pr_info.repository_full_name}#{pr_info.number}",
+                                f"❌ pre-commit.ci failed: {pr_info.html_url}",
                                 level="warning",
                             )
                             return False
@@ -2170,7 +2202,7 @@ class AsyncMergeManager:
         log_and_print(
             self.log,
             self._console,
-            f"🔄 Requesting dependabot recreate for {pr_info.repository_full_name}#{pr_info.number} "
+            f"🔄 Requesting dependabot recreate: {pr_info.html_url} "
             f"[unverified commits: {', '.join(unverified_shas)}]",
             level="info",
         )
@@ -2209,8 +2241,9 @@ class AsyncMergeManager:
                             log_and_print(
                                 self.log,
                                 self._console,
-                                f"✅ Old PR {pr_info.repository_full_name}#{pr_info.number} "
-                                f"closed by dependabot ({(attempt + 1) * self._merge_recheck_interval:.0f}s elapsed)",
+                                f"✅ Old PR closed by dependabot: "
+                                f"{pr_info.html_url} "
+                                f"({(attempt + 1) * self._merge_recheck_interval:.0f}s elapsed)",
                                 level="info",
                             )
                 except Exception as e:
@@ -2319,7 +2352,7 @@ class AsyncMergeManager:
         log_and_print(
             self.log,
             self._console,
-            f"🔍 Found recreated PR {full_name}#{new_number}, waiting for checks...",
+            f"🔍 Found recreated PR, waiting for checks: {html_url}",
             level="info",
         )
 
@@ -2367,7 +2400,7 @@ class AsyncMergeManager:
                     log_and_print(
                         self.log,
                         self._console,
-                        f"✅ Recreated PR {full_name}#{new_number} is ready to merge",
+                        f"✅ Recreated PR is ready to merge: {html_url}",
                         level="info",
                     )
                     # Build a PullRequestInfo for the new PR
@@ -2524,7 +2557,10 @@ class AsyncMergeManager:
                             return False
 
             await self._github_client.approve_pull_request(
-                owner, repo, pr_number, "Auto-approved by dependamerge"
+                owner,
+                repo,
+                pr_number,
+                "🤖 Dependamerge\nApproved this pull request ✅",
             )
             return True
         except Exception as e:
