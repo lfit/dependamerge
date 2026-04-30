@@ -697,8 +697,11 @@ class TestAutoMergeSkipGateBlockReason:
 
         assert result.status == MergeStatus.MERGED
         mock_merge_retry.assert_called_once()
-        # analyze_block_reason was consulted before deciding to proceed
-        client.analyze_block_reason.assert_awaited_once()
+        # analyze_block_reason was consulted before deciding to proceed.
+        # It is now called by both the Step 5.5 pre-check (to decide
+        # whether to wait) and the Step 6 skip gate, so we assert it
+        # was awaited at least once rather than exactly once.
+        assert client.analyze_block_reason.await_count >= 1
 
     @pytest.mark.asyncio
     async def test_manual_merge_runs_when_analyze_block_reason_fails(
@@ -765,3 +768,200 @@ class TestAutoMergeSkipGateBlockReason:
         # silently marking as AUTO_MERGE_PENDING.
         assert result.status == MergeStatus.MERGED
         mock_merge_retry.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 16. Step 5.5 end-to-end: auto-merge not yet enabled, gets enabled
+# ---------------------------------------------------------------------------
+
+
+class TestStep5_5EnablesAutoMergeAndTimesOut:
+    """Step 5.5 end-to-end coverage.
+
+    Starts with ``_auto_merge_enabled`` empty so the wait phase must
+    invoke ``_enable_auto_merge_for_pr`` itself, then times out while
+    the PR is still blocked, and asserts the resulting status is
+    ``AUTO_MERGE_PENDING`` (not ``FAILED``).
+    """
+
+    @pytest.mark.asyncio
+    async def test_step_5_5_enables_auto_merge_then_times_out_pending(
+        self,
+    ) -> None:
+        """Step 5.5 enables auto-merge and yields AUTO_MERGE_PENDING."""
+        mgr, client = make_merge_manager(preview_mode=False, merge_timeout=0.1)
+        pr = _DEFAULT_PR.model_copy(
+            update={
+                "mergeable_state": "blocked",
+                "mergeable": True,
+                "state": "open",
+            }
+        )
+
+        # IMPORTANT: do NOT pre-populate ``_auto_merge_enabled`` —
+        # this is the path Copilot flagged as untested. The set
+        # stores ``"{owner}/{repo}#{number}"`` keys, not URLs.
+        assert "owner/repo#42" not in mgr._auto_merge_enabled
+
+        # GraphQL enable succeeds; subsequent .get() in the wait
+        # loop returns the PR still blocked so we time out.
+        client.enable_auto_merge = AsyncMock(return_value=True)
+        client.post_issue_comment = AsyncMock()
+        client.get = AsyncMock(
+            return_value={
+                "mergeable": True,
+                "mergeable_state": "blocked",
+                "state": "open",
+            }
+        )
+        client.get_required_status_checks = AsyncMock(return_value=[])
+        client.analyze_block_reason = AsyncMock(
+            return_value="Blocked by pending required check: pre-commit.ci"
+        )
+
+        no_g2g = GitHub2GerritDetectionResult()
+        with (
+            patch.object(
+                mgr,
+                "_detect_github2gerrit",
+                new_callable=AsyncMock,
+                return_value=no_g2g,
+            ),
+            patch.object(
+                mgr,
+                "_get_merge_method_for_repo",
+                new_callable=AsyncMock,
+                return_value="merge",
+            ),
+            patch.object(
+                mgr,
+                "_trigger_stale_precommit_ci",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                mgr,
+                "_check_merge_requirements",
+                new_callable=AsyncMock,
+                return_value=(True, ""),
+            ),
+            patch.object(
+                mgr,
+                "_approve_pr",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                mgr,
+                "_merge_pr_with_retry",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_merge_retry,
+        ):
+            result = await mgr._merge_single_pr(pr)
+
+        # Auto-merge was enabled by Step 5.5 itself.
+        client.enable_auto_merge.assert_awaited_once_with("PR_kwDOTestNode42", "merge")
+        assert "owner/repo#42" in mgr._auto_merge_enabled
+
+        # Wait timed out while still blocked, so the skip gate
+        # routes us to AUTO_MERGE_PENDING and the manual merge
+        # is NOT attempted.
+        assert result.status == MergeStatus.AUTO_MERGE_PENDING
+        mock_merge_retry.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 17. Step 5.5 + skip gate: mergeable=None (still computing) is treated as
+#     still-computing rather than 'not mergeable'
+# ---------------------------------------------------------------------------
+
+
+class TestStep5_5HandlesMergeableNone:
+    """Both gates must accept mergeable=None as 'still computing'.
+
+    GitHub returns ``mergeable: null`` transiently while it is still
+    computing the value. The Step 5.5 entry condition and the Step 6
+    auto-merge skip gate must NOT bypass auto-merge handling on this
+    transient state — doing so reintroduces the original 405 failure
+    mode this PR was raised to fix.
+    """
+
+    @pytest.mark.asyncio
+    async def test_step_5_5_runs_when_mergeable_is_none(self) -> None:
+        """mergeable=None + blocked + pending checks → AUTO_MERGE_PENDING."""
+        mgr, client = make_merge_manager(preview_mode=False, merge_timeout=0.1)
+        pr = _DEFAULT_PR.model_copy(
+            update={
+                "mergeable_state": "blocked",
+                "mergeable": None,  # GitHub still computing
+                "state": "open",
+            }
+        )
+
+        client.enable_auto_merge = AsyncMock(return_value=True)
+        client.post_issue_comment = AsyncMock()
+        # Refresh keeps mergeable null + state blocked so the
+        # wait loop exhausts the timeout.
+        client.get = AsyncMock(
+            return_value={
+                "mergeable": None,
+                "mergeable_state": "blocked",
+                "state": "open",
+            }
+        )
+        client.get_required_status_checks = AsyncMock(return_value=[])
+        client.analyze_block_reason = AsyncMock(
+            return_value="Blocked by pending required check: pre-commit.ci"
+        )
+
+        no_g2g = GitHub2GerritDetectionResult()
+        with (
+            patch.object(
+                mgr,
+                "_detect_github2gerrit",
+                new_callable=AsyncMock,
+                return_value=no_g2g,
+            ),
+            patch.object(
+                mgr,
+                "_get_merge_method_for_repo",
+                new_callable=AsyncMock,
+                return_value="merge",
+            ),
+            patch.object(
+                mgr,
+                "_trigger_stale_precommit_ci",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                mgr,
+                "_check_merge_requirements",
+                new_callable=AsyncMock,
+                return_value=(True, ""),
+            ),
+            patch.object(
+                mgr,
+                "_approve_pr",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                mgr,
+                "_merge_pr_with_retry",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_merge_retry,
+        ):
+            result = await mgr._merge_single_pr(pr)
+
+        # Step 5.5 entry gate accepted mergeable=None and enabled
+        # auto-merge.
+        client.enable_auto_merge.assert_awaited_once_with("PR_kwDOTestNode42", "merge")
+        assert "owner/repo#42" in mgr._auto_merge_enabled
+        # Step 6 skip gate also accepted mergeable=None and routed
+        # to AUTO_MERGE_PENDING instead of the manual merge
+        # fall-through (which would 405 against pending checks).
+        assert result.status == MergeStatus.AUTO_MERGE_PENDING
+        mock_merge_retry.assert_not_called()
