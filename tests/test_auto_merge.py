@@ -149,7 +149,7 @@ class TestMergeSkippedWhenAutoMergeActiveAndBlocked:
         self,
     ) -> None:
         """Auto-merge pending: _merge_pr_with_retry is NOT called."""
-        mgr, client = make_merge_manager(preview_mode=False)
+        mgr, client = make_merge_manager(preview_mode=False, merge_timeout=0.1)
         pr = _DEFAULT_PR.model_copy(
             update={
                 "mergeable_state": "blocked",
@@ -363,7 +363,7 @@ class TestAutoMergeSkipGateMergeableFalse:
         self,
     ) -> None:
         """Failing checks: auto-merge gate must not override; retry is called."""
-        mgr, client = make_merge_manager(preview_mode=False)
+        mgr, client = make_merge_manager(preview_mode=False, merge_timeout=0.1)
         pr = _DEFAULT_PR.model_copy(
             update={
                 "mergeable_state": "blocked",
@@ -433,7 +433,9 @@ class TestAutoMergeSkipGateForceAll:
     @pytest.mark.asyncio
     async def test_manual_merge_runs_with_force_all(self) -> None:
         """force_level='all': auto-merge gate must not override."""
-        mgr, client = make_merge_manager(preview_mode=False, force_level="all")
+        mgr, client = make_merge_manager(
+            preview_mode=False, force_level="all", merge_timeout=0.1
+        )
         pr = _DEFAULT_PR.model_copy(
             update={
                 "mergeable_state": "blocked",
@@ -551,7 +553,11 @@ class TestAutoMergePendingCompletesProgress:
     async def test_auto_merge_pending_calls_pr_completed(self) -> None:
         """pr_completed() is called so PR progress reaches 100%."""
         tracker = MagicMock()
-        mgr, client = make_merge_manager(preview_mode=False, progress_tracker=tracker)
+        mgr, client = make_merge_manager(
+            preview_mode=False,
+            progress_tracker=tracker,
+            merge_timeout=0.1,
+        )
         pr = _DEFAULT_PR.model_copy(
             update={
                 "mergeable_state": "blocked",
@@ -630,7 +636,7 @@ class TestAutoMergeSkipGateBlockReason:
         self,
     ) -> None:
         """Block reason = 'requires approval': manual merge must still run."""
-        mgr, client = make_merge_manager(preview_mode=False)
+        mgr, client = make_merge_manager(preview_mode=False, merge_timeout=0.1)
         pr = _DEFAULT_PR.model_copy(
             update={
                 "mergeable_state": "blocked",
@@ -699,7 +705,7 @@ class TestAutoMergeSkipGateBlockReason:
         self,
     ) -> None:
         """If analyze_block_reason raises, fall back to manual merge attempt."""
-        mgr, client = make_merge_manager(preview_mode=False)
+        mgr, client = make_merge_manager(preview_mode=False, merge_timeout=0.1)
         pr = _DEFAULT_PR.model_copy(
             update={
                 "mergeable_state": "blocked",
