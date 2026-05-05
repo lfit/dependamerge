@@ -1304,9 +1304,10 @@ class AsyncMergeManager:
                         return result
 
             # Step 5.5: If the PR is still blocked (e.g. by a pending
-            # required status check such as pre-commit.ci) or behind
-            # base branch, enable auto-merge and wait for required
-            # checks to complete. Skipped when:
+            # required status check such as pre-commit.ci), behind
+            # base branch, or unstable (a non-required check failed),
+            # enable auto-merge and wait for required checks to
+            # complete. Skipped when:
             #   * preview_mode (no side effects)
             #   * force_level == "all" (force semantics bypass wait)
             #   * Step 5 already ran a rebase + wait for this PR
@@ -1326,6 +1327,15 @@ class AsyncMergeManager:
             # window after Dependabot/pre-commit-ci rebase a PR where
             # GitHub still reports ``behind`` while it recomputes
             # mergeability.
+            #
+            # We accept any ``mergeable`` value (including ``False``)
+            # when the state is one of these auto-merge-rescuable
+            # states, because GitHub returns ``mergeable=False``
+            # transiently while computing the value or when a
+            # non-required check failed. The block-reason pre-check
+            # below still weeds out genuinely-stuck cases (missing
+            # approvals, etc.) so we don't burn ``merge_timeout`` on
+            # them.
             pr_key_for_wait = (
                 f"{repo_owner}/{repo_name}#{pr_info.number}"
             )
@@ -1333,14 +1343,7 @@ class AsyncMergeManager:
             base_should_wait = (
                 not self.preview_mode
                 and self._github_client is not None
-                # Treat ``mergeable is None`` as 'still computing'
-                # rather than 'not mergeable'. GitHub returns ``null``
-                # transiently while computing mergeability; we only
-                # want to exclude the explicit ``False`` case here so
-                # PRs blocked by pending checks aren't misrouted to
-                # the manual-merge fall-through.
-                and pr_info.mergeable is not False
-                and pr_info.mergeable_state in ("blocked", "behind")
+                and pr_info.mergeable_state in ("blocked", "behind", "unstable")
                 and self.force_level != "all"
                 and not already_rebased
             )
@@ -1484,10 +1487,10 @@ class AsyncMergeManager:
                                 # ``mergeable_state`` for the same
                                 # reason as ``mergeable`` above. The
                                 # subsequent ``not in ("blocked",
-                                # "behind")`` check would otherwise
-                                # break the wait loop early on a
-                                # transient ``null`` returned while
-                                # GitHub is still computing.
+                                # "behind", "unstable")`` check would
+                                # otherwise break the wait loop early
+                                # on a transient ``null`` returned
+                                # while GitHub is still computing.
                                 refreshed_state = refreshed_wait.get(
                                     "mergeable_state"
                                 )
@@ -1514,7 +1517,20 @@ class AsyncMergeManager:
                                 )
                                 pr_info.state = "closed"
                                 break
-                        if pr_info.mergeable_state not in ("blocked", "behind"):
+                        # Continue waiting only while the PR is in a
+                        # state that auto-merge can still rescue. The
+                        # set must mirror the ``base_should_wait``
+                        # entry condition above (blocked / behind /
+                        # unstable); any other value means the PR has
+                        # either become mergeable, has been closed,
+                        # or has hit a state Step 5.5 cannot help
+                        # with, so we should exit the wait loop and
+                        # let downstream steps decide.
+                        if pr_info.mergeable_state not in (
+                            "blocked",
+                            "behind",
+                            "unstable",
+                        ):
                             break
                 finally:
                     async with self._waiting_lock:
@@ -1601,51 +1617,56 @@ class AsyncMergeManager:
                         f"Merging PR {pr_info.number} in {pr_info.repository_full_name}"
                     )
 
-                # If auto-merge is enabled and the PR is blocked
-                # *specifically* by pending required checks, skip
-                # the manual merge attempt — GitHub will merge
-                # automatically once those checks complete.
+                # If auto-merge is enabled and the PR is in a state
+                # that auto-merge can rescue (blocked, behind, or
+                # unstable), skip the manual merge attempt — GitHub
+                # will merge automatically once branch protection is
+                # satisfied.
                 #
-                # The ``mergeable_state == "blocked"`` +
-                # ``mergeable is True`` combination is necessary
-                # but not sufficient: the same combination also
-                # applies when the block reason is "requires
-                # approval" or similar branch-protection rules
-                # that auto-merge cannot satisfy on its own.
-                # Consult ``analyze_block_reason()`` so we only
-                # skip when the reason mentions pending required
-                # checks.
+                # We accept any ``mergeable`` value (including
+                # ``False``) here for the same reason Step 5.5 does:
+                # ``mergeable=False`` from the API can mean
+                # "definitely failing", "still computing", or "a
+                # non-required check failed". Letting auto-merge
+                # decide whether the failing thing actually blocks
+                # merge is more accurate than us treating
+                # ``False`` as terminal here.
+                #
+                # For ``blocked`` PRs we still consult
+                # ``analyze_block_reason()`` to weed out cases
+                # auto-merge cannot resolve (missing approvals,
+                # code-owner reviews, etc.). For ``behind`` and
+                # ``unstable`` we accept directly: ``behind``
+                # resolves once GitHub re-runs checks against the
+                # rebased commit, and ``unstable`` means a
+                # non-required check failed (which doesn't actually
+                # block auto-merge).
                 #
                 # Do NOT skip when:
-                #   * mergeable is False (blocked by failing
-                #     checks) — the user may want a forced
-                #     manual attempt to surface the failure.
                 #   * force_level == "all" — force semantics
-                #     intentionally proceed despite blocked
+                #     intentionally proceed despite the blocked
                 #     state and must not be overridden by
                 #     auto-merge.
-                #   * the block reason is something other than
-                #     pending required checks (for example,
-                #     missing approvals or other branch
-                #     protection requirements).
+                #   * the block reason (for ``blocked`` PRs) is
+                #     something other than pending required
+                #     checks (e.g. missing approvals).
                 pr_key = f"{repo_owner}/{repo_name}#{pr_info.number}"
                 auto_merge_pending_checks = False
                 if (
                     pr_key in self._auto_merge_enabled
-                    and pr_info.mergeable_state in ("blocked", "behind")
-                    # Same rationale as Step 5.5: treat
-                    # ``mergeable is None`` as still-computing so
-                    # we don't bypass the auto-merge skip gate on
-                    # a transient null. Only the explicit ``False``
-                    # case (blocked by failing checks) should fall
-                    # through to the manual merge attempt.
-                    and pr_info.mergeable is not False
+                    and pr_info.mergeable_state
+                    in ("blocked", "behind", "unstable")
                     and self.force_level != "all"
                 ):
-                    if pr_info.mergeable_state == "behind":
-                        # Still behind after rebase polling timed out;
-                        # auto-merge will pick the PR up once GitHub
-                        # finishes the rebase + required checks.
+                    if pr_info.mergeable_state in ("behind", "unstable"):
+                        # ``behind``: still behind after rebase polling
+                        # timed out; auto-merge will pick the PR up
+                        # once GitHub finishes rebase + required
+                        # checks.
+                        # ``unstable``: a non-required check failed but
+                        # required checks may still be pending or
+                        # passing; auto-merge will fire when branch
+                        # protection allows.
                         auto_merge_pending_checks = True
                     else:
                         block_reason: str | None = None
@@ -1670,7 +1691,7 @@ class AsyncMergeManager:
                         # only the literal substring "pending required
                         # check", but analyze_block_reason returns a
                         # range of phrasings (e.g. "required status
-                        # check\u2026 pending") depending on which
+                        # check… pending") depending on which
                         # checks are outstanding. The same predicate is
                         # used by the Step 5.5 pre-check.
                         auto_merge_pending_checks = (
@@ -1691,12 +1712,26 @@ class AsyncMergeManager:
                     # The enable was already announced earlier ("🤖 Auto-merge:
                     # <url>" or via the rebase path); use a neutral
                     # "Waiting" line here to avoid duplicating that
-                    # announcement.
+                    # announcement. Tailor the bracketed reason to
+                    # the actual ``mergeable_state`` so users see
+                    # what auto-merge is waiting on, rather than
+                    # always reporting "pending checks".
                     result.status = MergeStatus.AUTO_MERGE_PENDING
+                    if pr_info.mergeable_state == "behind":
+                        wait_reason = "behind base branch"
+                    elif pr_info.mergeable_state == "unstable":
+                        wait_reason = "non-required check failure"
+                    else:
+                        # ``blocked`` (the only other state that
+                        # reaches this branch) routed through
+                        # ``analyze_block_reason()`` and was
+                        # classified as pending required checks by
+                        # ``_block_reason_indicates_pending_checks``.
+                        wait_reason = "pending checks"
                     log_and_print(
                         self.log,
                         self._console,
-                        f"⏳ Waiting: {pr_info.html_url} [pending checks]",
+                        f"⏳ Waiting: {pr_info.html_url} [{wait_reason}]",
                         level="debug",
                     )
                 elif merged:
@@ -1862,6 +1897,20 @@ class AsyncMergeManager:
         Centralising the predicate here keeps the two call sites
         consistent so a new phrasing only has to be added once.
 
+        The predicate matches **only** wording that explicitly
+        signals a check is still in progress / waiting to start.
+        It deliberately excludes:
+
+        - ``Blocked by failing check: …`` — the check has run and
+          reported a non-pending failure; auto-merge will not
+          rescue this.
+        - ``Blocked by missing required status: …`` — the check
+          has not been registered against the commit at all;
+          auto-merge will not retry it on its own.
+        - any reason where ``failing`` or ``missing`` appears
+          before a service name (defensive: covers future GitHub
+          phrasing changes that include both keywords).
+
         Args:
             block_reason: The string returned by
                 ``analyze_block_reason()``, or ``None`` if the
@@ -1875,57 +1924,85 @@ class AsyncMergeManager:
         if block_reason is None:
             return False
         reason_lower = block_reason.lower()
+
+        # Defensive negative gate: never classify a reason as
+        # 'pending' if it explicitly says the check has failed or
+        # is missing. This guards the bare-substring matches
+        # below against future phrasings that combine both terms
+        # (e.g. "failing check (pending retry): pre-commit.ci").
+        if "failing check" in reason_lower:
+            return False
+        if "missing required status" in reason_lower:
+            return False
+        if "missing required check" in reason_lower:
+            return False
+
         return (
             "pending required check" in reason_lower
             or ("required" in reason_lower and "pending" in reason_lower)
-            or "pre-commit.ci" in reason_lower
             or "waiting for status" in reason_lower
+            or "queued" in reason_lower
         )
 
     def _is_pr_mergeable(self, pr_info: PullRequestInfo) -> bool:
+        """Check whether a PR is worth attempting to merge.
+
+        This returns ``True`` for any state where dependamerge can
+        plausibly make progress — either by approving + merging,
+        rebasing, or enabling auto-merge and waiting (Step 5.5).
+        We deliberately err on the side of letting Step 5.5 see the
+        PR: it has finer-grained logic (block-reason analysis,
+        merge-timeout-bounded waits) than this gate, so a False here
+        denies a PR the chance to be auto-merge-rescued.
+
+        Returns False only for states where no amount of waiting,
+        approving, or auto-merging can help:
+
+        - ``dirty``: real merge conflict; the branch must be
+          rebased by a human (or by ``--fix``).
+        - ``draft``: GitHub blocks merging draft PRs by design.
+
+        For all other states (``blocked``, ``behind``, ``unstable``,
+        empty/``"unknown"``) we return True regardless of the
+        ``mergeable`` boolean. ``mergeable=False`` from the API can
+        mean "definitely failing", but it can also mean "GitHub is
+        still computing" or "a non-required check failed" — the
+        downstream Step 5.5 + Step 6 gates have the context to make
+        the right call.
         """
-        Check if a PR is mergeable.
-
-        Args:
-            pr_info: Pull request information
-
-        Returns:
-            True if the PR can be merged, False otherwise
-        """
-        # Handle different types of blocks intelligently - matches original logic
-        if pr_info.mergeable_state == "blocked" and pr_info.mergeable is True:
-            # This is blocked by branch protection but tool can handle it (approval, etc.)
-            return True
-        elif pr_info.mergeable_state == "blocked" and pr_info.mergeable is False:
-            # Blocked by failing checks - we can try merging anyway
-            return True
-        elif pr_info.mergeable is False:
-            # Only skip if mergeable is explicitly False (not None/UNKNOWN)
-            # Use appropriate icon based on state - only truly unmergeable PRs get blocked
-            if pr_info.mergeable_state == "dirty" or (
-                pr_info.mergeable_state == "behind" and pr_info.mergeable is False
-            ):
-                icon = "🛑"
-                action = "Blocking"
-            else:
-                icon = "⏭️"
-                action = "Skipping"
-
-            # Just log internally, don't show verbose messages
-            skip_msg = f"{icon}  {action} unmergeable PR {pr_info.number} in {pr_info.repository_full_name} (mergeable: {pr_info.mergeable}, state: {pr_info.mergeable_state})"
-            self.log.debug(skip_msg)
-            return False
-        elif pr_info.mergeable is None:
-            # Handle UNKNOWN mergeable state - treat as potentially mergeable
-            # GitHub is still calculating mergeable state, but we can attempt merge
+        # Hard skips: states where merging is impossible regardless
+        # of mergeable value or downstream rescue logic.
+        if pr_info.mergeable_state == "dirty":
             self.log.debug(
-                f"ℹ️ PR {pr_info.number} in {pr_info.repository_full_name} has unknown mergeable state - treating as potentially mergeable"
+                "🛑 Skipping PR %s/%s#%s: merge conflict (dirty)",
+                pr_info.repository_full_name.split("/", 1)[0]
+                if "/" in pr_info.repository_full_name
+                else pr_info.repository_full_name,
+                pr_info.repository_full_name.split("/", 1)[-1],
+                pr_info.number,
             )
-            return True
+            return False
+        if pr_info.mergeable_state == "draft":
+            self.log.debug(
+                "⏭️ Skipping draft PR %s#%s",
+                pr_info.repository_full_name,
+                pr_info.number,
+            )
+            return False
 
-        # All other cases are considered mergeable
+        # Everything else — ``blocked``, ``behind``, ``unstable``,
+        # ``clean``, empty/None state, plus any ``mergeable`` value
+        # — reaches the merge flow. Step 5.5 will route
+        # not-yet-merge-ready cases to AUTO_MERGE_PENDING after
+        # consulting block-reason analysis and bounded by
+        # ``merge_timeout``, which is a much friendlier outcome than
+        # a hard skip from here.
         self.log.debug(
-            f"✅ PR {pr_info.number} in {pr_info.repository_full_name} is considered mergeable (mergeable: {pr_info.mergeable}, state: {pr_info.mergeable_state})"
+            "✅ PR %s#%s eligible for merge flow (mergeable=%s, state=%s)",
+            pr_info.repository_full_name,
+            pr_info.number,
+            pr_info.mergeable,
+            pr_info.mergeable_state,
         )
         return True
 
@@ -2317,7 +2394,20 @@ class AsyncMergeManager:
                         )
                     return True, "PR blocked but forcing merge attempt (--force=all)"
                 else:
-                    return False, "blocked by failing status checks"
+                    # Don't hard-fail here: let Step 5.5 enable
+                    # auto-merge and route to AUTO_MERGE_PENDING.
+                    # The block reason might be "failing required
+                    # check" right now but the check could still
+                    # complete successfully — GitHub returns
+                    # ``mergeable=False`` transiently for several
+                    # reasons (still computing, non-required check
+                    # failed). Step 5.5's analyze_block_reason
+                    # pre-check still weeds out genuinely-stuck
+                    # cases (missing approvals, etc.).
+                    return (
+                        True,
+                        "PR blocked — Step 5.5 will enable auto-merge",
+                    )
         elif pr_info.mergeable_state == "behind":
             if not self.fix_out_of_date:
                 if self.force_level == "all":
@@ -2326,9 +2416,27 @@ class AsyncMergeManager:
                     )
                     return True, "PR behind but forcing merge attempt (--force=all)"
                 else:
-                    return False, "PR is behind base branch and --no-fix option is set"
+                    # Don't hard-fail when behind + --no-fix: the
+                    # user opted out of *us* rebasing the branch,
+                    # but enabling auto-merge in Step 5.5 is a
+                    # separate, non-rewriting operation. If a third
+                    # party (Dependabot, pre-commit-ci) rebases the
+                    # PR while we wait, auto-merge will fire.
+                    return (
+                        True,
+                        "PR behind — Step 5.5 will enable auto-merge",
+                    )
             else:
                 return True, "PR is behind - will rebase before merge"
+        elif pr_info.mergeable_state == "unstable":
+            # ``unstable`` means a non-required check failed but
+            # the PR is otherwise mergeable. Auto-merge can still
+            # fire because non-required checks don't block branch
+            # protection. Let Step 5.5 handle it.
+            return (
+                True,
+                "PR unstable — Step 5.5 will enable auto-merge",
+            )
         elif pr_info.mergeable_state == "dirty":
             if self.force_level == "all":
                 self.log.warning(

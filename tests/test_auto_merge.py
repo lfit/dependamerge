@@ -356,13 +356,22 @@ class TestInvalidMergeTimeoutFallback:
 
 
 class TestAutoMergeSkipGateMergeableFalse:
-    """Blocked + mergeable=False (failing checks) must NOT skip manual merge."""
+    """Blocked + mergeable=False routes to AUTO_MERGE_PENDING when checks pending.
+
+    Previously this case fell through to a manual merge (which would
+    typically 405 against unfinished required checks). The current
+    behaviour treats ``mergeable=False`` the same as ``True`` / ``None``
+    when ``mergeable_state`` is auto-merge-rescuable: GitHub returns
+    ``mergeable=False`` transiently for several reasons (still
+    computing, non-required check failed) so we let Step 5.5's
+    block-reason pre-check make the routing decision.
+    """
 
     @pytest.mark.asyncio
-    async def test_manual_merge_runs_when_blocked_by_failing_checks(
+    async def test_blocked_mergeable_false_pending_checks_routes_to_pending(
         self,
     ) -> None:
-        """Failing checks: auto-merge gate must not override; retry is called."""
+        """blocked + mergeable=False + pending checks → AUTO_MERGE_PENDING."""
         mgr, client = make_merge_manager(preview_mode=False, merge_timeout=0.1)
         pr = _DEFAULT_PR.model_copy(
             update={
@@ -374,8 +383,21 @@ class TestAutoMergeSkipGateMergeableFalse:
 
         mgr._auto_merge_enabled.add("owner/repo#42")
 
-        client.get = AsyncMock(return_value={})
+        # Refresh keeps the PR in the same state for the duration
+        # of the (very short) wait loop.
+        client.get = AsyncMock(
+            return_value={
+                "mergeable": False,
+                "mergeable_state": "blocked",
+                "state": "open",
+            }
+        )
         client.get_required_status_checks = AsyncMock(return_value=[])
+        client.analyze_block_reason = AsyncMock(
+            return_value="Blocked by pending required check: pre-commit.ci"
+        )
+        client.enable_auto_merge = AsyncMock(return_value=True)
+        client.post_issue_comment = AsyncMock()
 
         no_g2g = GitHub2GerritDetectionResult()
         with (
@@ -418,8 +440,13 @@ class TestAutoMergeSkipGateMergeableFalse:
         ):
             result = await mgr._merge_single_pr(pr)
 
-        assert result.status == MergeStatus.MERGED
-        mock_merge_retry.assert_called_once()
+        # mergeable=False with pending-checks block reason now
+        # routes through Step 5.5 → AUTO_MERGE_PENDING instead of
+        # the previous manual-merge fall-through. The user gets a
+        # friendlier outcome (auto-merge will fire when checks
+        # complete) than a 405 hard fail.
+        assert result.status == MergeStatus.AUTO_MERGE_PENDING
+        mock_merge_retry.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1073,3 +1100,272 @@ class TestStep5_5BehindWithoutFix:
         # required checks).
         assert result.status == MergeStatus.AUTO_MERGE_PENDING
         mock_merge_retry.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 19. Step 5.5: ``unstable`` (non-required check failed) routes to auto-merge
+# ---------------------------------------------------------------------------
+
+
+class TestStep5_5UnstableRoutesToAutoMerge:
+    """``unstable`` PRs route through Step 5.5 (auto-merge can rescue).
+
+    ``mergeable_state == "unstable"`` means a non-required status
+    check failed but the PR is otherwise mergeable. Branch protection
+    only blocks on *required* checks, so auto-merge can fire — we
+    should not hard-fail this case.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unstable_routes_to_auto_merge_pending(self) -> None:
+        """unstable + mergeable=False → AUTO_MERGE_PENDING."""
+        mgr, client = make_merge_manager(preview_mode=False, merge_timeout=0.1)
+        pr = _DEFAULT_PR.model_copy(
+            update={
+                "mergeable_state": "unstable",
+                "mergeable": False,
+                "state": "open",
+            }
+        )
+
+        client.enable_auto_merge = AsyncMock(return_value=True)
+        client.post_issue_comment = AsyncMock()
+        client.get = AsyncMock(
+            return_value={
+                "mergeable": False,
+                "mergeable_state": "unstable",
+                "state": "open",
+            }
+        )
+        client.get_required_status_checks = AsyncMock(return_value=[])
+        # ``unstable`` doesn't trigger the analyze_block_reason
+        # pre-check (only ``blocked`` does), so this mock is just
+        # defensive.
+        client.analyze_block_reason = AsyncMock(
+            return_value="a non-required check failed"
+        )
+
+        no_g2g = GitHub2GerritDetectionResult()
+        with (
+            patch.object(
+                mgr,
+                "_detect_github2gerrit",
+                new_callable=AsyncMock,
+                return_value=no_g2g,
+            ),
+            patch.object(
+                mgr,
+                "_get_merge_method_for_repo",
+                new_callable=AsyncMock,
+                return_value="merge",
+            ),
+            patch.object(
+                mgr,
+                "_trigger_stale_precommit_ci",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                mgr,
+                "_check_merge_requirements",
+                new_callable=AsyncMock,
+                return_value=(True, ""),
+            ),
+            patch.object(
+                mgr,
+                "_approve_pr",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                mgr,
+                "_merge_pr_with_retry",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_merge_retry,
+        ):
+            result = await mgr._merge_single_pr(pr)
+
+        # Auto-merge enabled; Step 6 skip gate routes ``unstable``
+        # straight to AUTO_MERGE_PENDING (no analyze_block_reason
+        # needed for this state).
+        client.enable_auto_merge.assert_awaited_once_with("PR_kwDOTestNode42", "merge")
+        assert "owner/repo#42" in mgr._auto_merge_enabled
+        assert result.status == MergeStatus.AUTO_MERGE_PENDING
+        mock_merge_retry.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 20. ``dirty`` PRs are still blocked (genuine merge conflict invariant)
+# ---------------------------------------------------------------------------
+
+
+class TestDirtyStillBlocksAtIsPrMergeable:
+    """``dirty`` PRs (real merge conflict) must NOT reach Step 5.5.
+
+    The widening of ``_is_pr_mergeable`` should not lose its hard-skip
+    for genuine merge conflicts: those need a human (or ``--fix``) to
+    rebase, and auto-merge cannot resolve them.
+    """
+
+    def test_dirty_returns_false(self) -> None:
+        """_is_pr_mergeable returns False for dirty (merge conflict)."""
+        mgr, _client = make_merge_manager()
+        pr = _DEFAULT_PR.model_copy(
+            update={
+                "mergeable_state": "dirty",
+                "mergeable": False,
+            }
+        )
+        assert mgr._is_pr_mergeable(pr) is False
+
+    def test_draft_returns_false(self) -> None:
+        """_is_pr_mergeable returns False for draft PRs."""
+        mgr, _client = make_merge_manager()
+        pr = _DEFAULT_PR.model_copy(
+            update={
+                "mergeable_state": "draft",
+                "mergeable": True,
+            }
+        )
+        assert mgr._is_pr_mergeable(pr) is False
+
+    def test_blocked_mergeable_false_returns_true(self) -> None:
+        """_is_pr_mergeable now returns True for blocked + mergeable=False.
+
+        This is the rescue path: previously this combination short-
+        circuited as 'unmergeable', now it reaches the merge flow so
+        Step 5.5 can route to AUTO_MERGE_PENDING.
+        """
+        mgr, _client = make_merge_manager()
+        pr = _DEFAULT_PR.model_copy(
+            update={
+                "mergeable_state": "blocked",
+                "mergeable": False,
+            }
+        )
+        assert mgr._is_pr_mergeable(pr) is True
+
+    def test_behind_mergeable_false_returns_true(self) -> None:
+        """_is_pr_mergeable now returns True for behind + mergeable=False."""
+        mgr, _client = make_merge_manager()
+        pr = _DEFAULT_PR.model_copy(
+            update={
+                "mergeable_state": "behind",
+                "mergeable": False,
+            }
+        )
+        assert mgr._is_pr_mergeable(pr) is True
+
+    def test_unstable_mergeable_false_returns_true(self) -> None:
+        """_is_pr_mergeable now returns True for unstable + mergeable=False."""
+        mgr, _client = make_merge_manager()
+        pr = _DEFAULT_PR.model_copy(
+            update={
+                "mergeable_state": "unstable",
+                "mergeable": False,
+            }
+        )
+        assert mgr._is_pr_mergeable(pr) is True
+
+
+# ---------------------------------------------------------------------------
+# 21. Pending-checks predicate distinguishes pending from failing/missing
+# ---------------------------------------------------------------------------
+
+
+class TestBlockReasonIndicatesPendingChecks:
+    """Predicate must classify pending vs. failing/missing accurately.
+
+    ``GitHubAsync.analyze_block_reason()`` produces several phrasings:
+
+    - ``Blocked by pending required check: …``  → pending
+    - ``Blocked by failing check: …``           → NOT pending
+    - ``Blocked by missing required status: …`` → NOT pending
+
+    A predicate that misclassifies failing or missing reasons as
+    pending would route doomed PRs to AUTO_MERGE_PENDING and mask
+    real failures, so this test pins the boundary explicitly.
+    """
+
+    def test_none_returns_false(self) -> None:
+        """None block reason is never pending."""
+        from dependamerge.merge_manager import AsyncMergeManager
+
+        assert AsyncMergeManager._block_reason_indicates_pending_checks(None) is False
+
+    def test_pending_required_check_returns_true(self) -> None:
+        """Canonical pending phrasings are recognised."""
+        from dependamerge.merge_manager import AsyncMergeManager
+
+        for reason in (
+            "Blocked by pending required check: pre-commit.ci",
+            "Blocked by 2 pending required checks: ci/build, ci/lint",
+            "required status check is still pending",
+            "waiting for status checks",
+            "check queued",
+        ):
+            assert (
+                AsyncMergeManager._block_reason_indicates_pending_checks(reason) is True
+            ), reason
+
+    def test_failing_check_returns_false(self) -> None:
+        """Failing check is NOT classified as pending."""
+        from dependamerge.merge_manager import AsyncMergeManager
+
+        for reason in (
+            "Blocked by failing check: pre-commit.ci",
+            "Blocked by failing check: ci/build",
+            "Blocked by 3 failing checks",
+        ):
+            assert (
+                AsyncMergeManager._block_reason_indicates_pending_checks(reason)
+                is False
+            ), reason
+
+    def test_missing_required_status_returns_false(self) -> None:
+        """Missing required status is NOT classified as pending."""
+        from dependamerge.merge_manager import AsyncMergeManager
+
+        for reason in (
+            "Blocked by missing required status: pre-commit.ci",
+            "Blocked by 2 missing required statuses: pre-commit.ci, ci/lint",
+            "Blocked by missing required check: pre-commit.ci",
+        ):
+            assert (
+                AsyncMergeManager._block_reason_indicates_pending_checks(reason)
+                is False
+            ), reason
+
+    def test_other_block_reasons_return_false(self) -> None:
+        """Non-check block reasons (approvals, conflicts, etc.) return False."""
+        from dependamerge.merge_manager import AsyncMergeManager
+
+        for reason in (
+            "Blocked by branch protection (requires approval)",
+            "Blocked by branch protection",
+            "Human reviewer requested changes",
+            "Blocked by 2 unresolved Copilot comments",
+            "",
+        ):
+            assert (
+                AsyncMergeManager._block_reason_indicates_pending_checks(reason)
+                is False
+            ), reason
+
+    def test_failing_with_pending_keyword_returns_false(self) -> None:
+        """Defensive: 'failing' wins even when 'pending' also appears.
+
+        Guards against future GitHub phrasings that combine both
+        keywords (e.g. "failing check (pending retry): pre-commit.ci").
+        We never want a failing check to be treated as auto-merge
+        rescuable.
+        """
+        from dependamerge.merge_manager import AsyncMergeManager
+
+        assert (
+            AsyncMergeManager._block_reason_indicates_pending_checks(
+                "Blocked by failing check (pending retry): pre-commit.ci"
+            )
+            is False
+        )

@@ -326,8 +326,13 @@ class TestBehindPRHandling:
 
             can_merge, reason = await merge_manager._check_merge_requirements(pr_info)
 
-            assert can_merge is False
-            assert "no-fix" in reason.lower() or "behind" in reason.lower()
+            # behind + --no-fix no longer hard-fails. _check_merge_requirements
+            # now returns can_merge=True so the PR reaches Step 5.5, where
+            # auto-merge gets enabled and the wait loop runs (auto-merge
+            # is a non-rewriting operation, so it doesn't violate the
+            # user's --no-fix intent).
+            assert can_merge is True
+            assert "behind" in reason.lower() or "auto-merge" in reason.lower()
 
     @pytest.mark.asyncio
     async def test_proactive_rebase_success(self):
