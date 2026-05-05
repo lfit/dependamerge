@@ -1311,15 +1311,21 @@ class AsyncMergeManager:
             #   * force_level == "all" (force semantics bypass wait)
             #   * Step 5 already ran a rebase + wait for this PR
             #     (avoid doubling the configured merge_timeout)
-            #   * mergeable_state == "behind" but fix_out_of_date is
-            #     False — auto-merge cannot rebase, so waiting would
-            #     be futile and would mask the user's --no-fix intent
             #   * mergeable_state == "blocked" for a reason that
             #     cannot resolve on its own (e.g. "requires approval",
             #     missing code-owner reviews) — waiting would just
             #     delay the inevitable failure/merge by up to
-            #     merge_timeout. Pending required checks and behind
-            #     PRs DO benefit from waiting.
+            #     merge_timeout.
+            #
+            # Note that ``behind`` PRs go through Step 5.5 regardless
+            # of ``fix_out_of_date``: even when we will not rebase the
+            # PR ourselves, enabling auto-merge gives GitHub the chance
+            # to finish merging once required checks land, and the
+            # resulting AUTO_MERGE_PENDING outcome is friendlier than
+            # a 405 manual-merge failure. This also covers the brief
+            # window after Dependabot/pre-commit-ci rebase a PR where
+            # GitHub still reports ``behind`` while it recomputes
+            # mergeability.
             pr_key_for_wait = (
                 f"{repo_owner}/{repo_name}#{pr_info.number}"
             )
@@ -1337,10 +1343,6 @@ class AsyncMergeManager:
                 and pr_info.mergeable_state in ("blocked", "behind")
                 and self.force_level != "all"
                 and not already_rebased
-                and not (
-                    pr_info.mergeable_state == "behind"
-                    and not self.fix_out_of_date
-                )
             )
 
             # For ``blocked`` PRs (but not ``behind``, which only
