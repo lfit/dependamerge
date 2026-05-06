@@ -30,7 +30,9 @@ jobs:
       # yamllint disable-line rule:line-length
       - uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450  # v2.19.1
         with:
-          egress-policy: audit
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ vars.CONNECTION_WHITELIST }}
 
       # yamllint disable-line rule:line-length
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -61,7 +63,9 @@ jobs:
       # yamllint disable-line rule:line-length
       - uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450  # v2.19.1
         with:
-          egress-policy: 'audit'
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ vars.CONNECTION_WHITELIST }}
 
       - name: 'Checkout repository'
         # yamllint disable-line rule:line-length
@@ -127,7 +131,9 @@ jobs:
       # yamllint disable-line rule:line-length
       - uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450  # v2.19.1
         with:
-          egress-policy: 'audit'
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ vars.CONNECTION_WHITELIST }}
 
       # yamllint disable-line rule:line-length
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -156,7 +162,9 @@ jobs:
       # yamllint disable-line rule:line-length
       - uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450  # v2.19.1
         with:
-          egress-policy: 'audit'
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ vars.CONNECTION_WHITELIST }}
 
       # yamllint disable-line rule:line-length
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -183,7 +191,9 @@ jobs:
       # yamllint disable-line rule:line-length
       - uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450  # v2.19.1
         with:
-          egress-policy: 'audit'
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ vars.CONNECTION_WHITELIST }}
 
       # yamllint disable-line rule:line-length
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -207,7 +217,9 @@ jobs:
       # yamllint disable-line rule:line-length
       - uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450  # v2.19.1
         with:
-          egress-policy: 'audit'
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ vars.CONNECTION_WHITELIST }}
 
       # yamllint disable-line rule:line-length
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -251,7 +263,9 @@ jobs:
       # yamllint disable-line rule:line-length
       - uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450  # v2.19.1
         with:
-          egress-policy: 'audit'
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ vars.CONNECTION_WHITELIST }}
 
       - name: "Download SBOM artefact"
         # yamllint disable-line rule:line-length
@@ -422,7 +436,9 @@ jobs:
       # yamllint disable-line rule:line-length
       - uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450  # v2.19.1
         with:
-          egress-policy: 'audit'
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ vars.CONNECTION_WHITELIST }}
 
       - name: 'Test PyPI publishing'
         # yamllint disable-line rule:line-length
@@ -449,7 +465,9 @@ jobs:
       # yamllint disable-line rule:line-length
       - uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450  # v2.19.1
         with:
-          egress-policy: 'audit'
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ vars.CONNECTION_WHITELIST }}
 
       - name: 'PyPI release'
         # yamllint disable-line rule:line-length
@@ -486,7 +504,9 @@ jobs:
       # yamllint disable-line rule:line-length
       - uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450  # v2.19.1
         with:
-          egress-policy: 'audit'
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ vars.CONNECTION_WHITELIST }}
 
       # yamllint disable-line rule:line-length
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -524,7 +544,9 @@ jobs:
       # yamllint disable-line rule:line-length
       - uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450  # v2.19.1
         with:
-          egress-policy: 'audit'
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ vars.CONNECTION_WHITELIST }}
 
       # yamllint disable-line rule:line-length
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
