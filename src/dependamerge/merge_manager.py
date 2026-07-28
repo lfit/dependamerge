@@ -680,6 +680,34 @@ class AsyncMergeManager:
         pr_key = f"{pr_info.repository_full_name}#{pr_info.number}"
         tracker.track_pr_state(pr_key, state)
 
+    def _record_rebase(self) -> None:
+        """Count one rebase operation on the progress tracker.
+
+        Called wherever the run actually moves a branch onto its base:
+        the ``@dependabot rebase`` macro, the local ``git rebase`` +
+        force-push, and the REST ``update-branch`` path.  The counter
+        is cumulative, so the live display keeps reporting how many
+        rebases the run triggered after the PRs have reached their
+        terminal outcomes.
+        """
+        tracker = self.progress_tracker
+        if not tracker:
+            return
+        tracker.record_rebase()
+
+    def _record_retrigger(self) -> None:
+        """Count one comment macro on the progress tracker.
+
+        Called after successfully posting ``@dependabot rebase``,
+        ``@dependabot recreate`` or ``pre-commit.ci run``.  New macros
+        should call this too so the ``Retriggered`` total stays a
+        complete record of what the run poked.
+        """
+        tracker = self.progress_tracker
+        if not tracker:
+            return
+        tracker.record_retrigger()
+
     def _pr_status(self, message: str, *, level: str = "info") -> None:
         """Emit a per-PR status line to the log.
 
@@ -1490,6 +1518,7 @@ class AsyncMergeManager:
                     rebased_prs=self._rebased_prs,
                     enable_auto_merge=self._enable_auto_merge_with_approval,
                     track_pr_state=self._track_pr_state,
+                    record_rebase=self._record_rebase,
                     request_dependabot_rebase=self._request_dependabot_rebase,
                 )
                 outcome = await rebase.perform_step5_rebase(
@@ -3501,6 +3530,7 @@ class AsyncMergeManager:
             await self._github_client.post_issue_comment(
                 repo_owner, repo_name, pr_info.number, "pre-commit.ci run"
             )
+            self._record_retrigger()
         except Exception as e:
             self.log.warning(
                 f"Failed to post pre-commit.ci trigger comment on "
@@ -3916,6 +3946,7 @@ class AsyncMergeManager:
             await self._github_client.post_issue_comment(
                 repo_owner, repo_name, pr_info.number, "@dependabot recreate"
             )
+            self._record_retrigger()
         except Exception as e:
             self.log.warning(
                 "Failed to post @dependabot recreate comment on %s#%s: %s",
@@ -5223,6 +5254,11 @@ class AsyncMergeManager:
             await self._github_client.post_issue_comment(
                 owner, repo, pr_info.number, "@dependabot rebase"
             )
+            # One macro comment and one rebase request: both totals
+            # move.  The duplicate-guard path above deliberately does
+            # not count — that rebase was requested by an earlier run.
+            self._record_retrigger()
+            self._record_rebase()
             return True
         except Exception as exc:
             self.log.warning(
@@ -5459,7 +5495,12 @@ class AsyncMergeManager:
             )
         else:
             continue_states = ("blocked", "behind", "unstable", "unknown", "")
-        self._track_pr_state(pr_info, "rebased")
+        # The rebase landed; what remains is a wait on required checks.
+        # No counting here: ``_request_dependabot_rebase`` above owns
+        # the cumulative "Rebased" total, and deliberately counts
+        # nothing when its duplicate guard finds a macro an earlier run
+        # already posted.
+        self._track_pr_state(pr_info, "waiting")
         try:
             closed, merged = await self._wait_for_auto_merge(
                 pr_info,
@@ -5802,6 +5843,7 @@ class AsyncMergeManager:
                     f"PR {owner}/{repo}#{pr_info.number} is behind - updating branch"
                 )
                 await self._github_client.update_branch(owner, repo, pr_info.number)
+                self._record_rebase()
                 # Wait a moment for GitHub to process the update
                 await asyncio.sleep(min(2.0, self._merge_recheck_interval))
                 return True
