@@ -103,10 +103,18 @@ class RebaseContext:
     enable_auto_merge: Callable[[PullRequestInfo, str, str], Awaitable[bool]]
     # Optional callback (``manager._track_pr_state``) that moves the PR
     # between transitory states on the Rich progress tracker
-    # ("rebasing", "rebased", "waiting", or ``None`` to clear).
+    # ("rebasing", "waiting", or ``None`` to clear).
     # Default ``None`` keeps existing test constructions working and
     # makes the tracker strictly optional for isolated use.
     track_pr_state: Callable[[PullRequestInfo, str | None], None] | None = None
+    # Optional callback (``manager._record_rebase``) that increments the
+    # tracker's cumulative "Rebased" total.  Called once per rebase this
+    # module performs itself — the local force-push path and the REST
+    # ``update-branch`` path.  The ``@dependabot rebase`` macro path is
+    # *not* counted here: ``request_dependabot_rebase`` owns the
+    # accounting for the macro (including its duplicate guard, which
+    # counts nothing), and counting again would double it.
+    record_rebase: Callable[[], None] | None = None
     # Optional async callable equivalent to
     # ``manager._request_dependabot_rebase``: posts ``@dependabot
     # rebase`` on the PR (idempotent — the manager implementation
@@ -659,6 +667,18 @@ def _set_tracker_state(
         ctx.track_pr_state(pr_info, state)
 
 
+def _record_rebase(ctx: RebaseContext) -> None:
+    """Count one rebase operation on the progress tracker.
+
+    No-op when the context was constructed without a ``record_rebase``
+    callback (isolated tests).  Preview runs never reach here at all:
+    :func:`perform_step5_rebase` returns before dispatching to any
+    rebase path.
+    """
+    if ctx.record_rebase is not None:
+        ctx.record_rebase()
+
+
 async def _run_local_path(
     *,
     ctx: RebaseContext,
@@ -732,9 +752,18 @@ async def _run_local_path(
     if auto_merge_ok:
         ctx.rebased_prs.add(f"{owner}/{repo}#{pr_info.number}")
 
+    # Either way the rebase attempt is over, so clear the "rebasing"
+    # state ``perform_step5_rebase`` set before dispatch.  Leaving it
+    # set on the failure branch would strand the PR displaying as
+    # "Rebasing" for the rest of the run, since this path defers to
+    # auto-merge rather than reaching a terminal outcome that would
+    # clear it.
+    _set_tracker_state(ctx, pr_info, None)
     if local_rebase_ok:
         ctx.log.debug("Rebased (local): %s", pr_info.html_url)
-        _set_tracker_state(ctx, pr_info, "rebased")
+        # The cumulative "Rebased" total is what keeps a record of the
+        # rebase from here on.
+        _record_rebase(ctx)
     else:
         ctx.log.debug(
             "Local rebase failed; deferring to auto-merge: %s",
@@ -807,7 +836,12 @@ async def _run_dependabot_macro_path(
         ctx.rebased_prs.add(f"{owner}/{repo}#{pr_info.number}")
 
     ctx.log.debug("Rebase requested (dependabot macro): %s", pr_info.html_url)
-    _set_tracker_state(ctx, pr_info, "rebased")
+    # No counting here: ``ctx.request_dependabot_rebase`` owns the
+    # cumulative totals and records them only when it actually posts
+    # the macro (its duplicate guard returns True without posting when
+    # an earlier run already requested the rebase).  Counting again
+    # here would double the posted case and invent the guarded one.
+    _set_tracker_state(ctx, pr_info, None)
     return True
 
 
@@ -837,6 +871,7 @@ async def _run_rest_path(
 
     try:
         await client.update_branch(owner, repo, pr_info.number)
+        _record_rebase(ctx)
 
         # Enable auto-merge so the PR merges even if we time out
         # waiting for status checks.
@@ -897,7 +932,7 @@ async def _run_rest_path(
         # in ``blocked`` or ``behind`` state.
         ctx.rebased_prs.add(f"{owner}/{repo}#{pr_info.number}")
 
-        _set_tracker_state(ctx, pr_info, "rebased")
+        _set_tracker_state(ctx, pr_info, None)
         _log_post_rebase_status(ctx=ctx, pr_info=pr_info)
         return Step5Outcome()
 

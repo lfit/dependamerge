@@ -4,20 +4,24 @@
 """Tests for merge progress tracker state transitions and counters.
 
 The live merge display moved from per-PR console lines to counter-based
-reporting: PRs travel through transitory states (rebasing → rebased →
-waiting) rendered live on the stats line, then land in exactly one
-terminal counter (merged / pending / closed / failed / skipped /
-blocked).  ``AsyncMergeManager._record_terminal_outcome`` is the single
-accounting point mapping ``MergeStatus`` onto those counters.
+reporting.  Three families of counter feed it: transitory per-PR states
+(rebasing → waiting) rendered live on the stats line, cumulative
+activity totals (rebases triggered, comment macros issued) that survive
+the PR reaching a terminal outcome, and the terminal counters themselves
+(merged / pending / closed / failed / skipped / blocked).
+``AsyncMergeManager._record_terminal_outcome`` is the single accounting
+point mapping ``MergeStatus`` onto the terminal counters.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from dependamerge import rebase as rebase_module
 from dependamerge.merge_manager import MergeStatus
 from dependamerge.models import PullRequestInfo
 from dependamerge.progress_tracker import (
@@ -57,8 +61,8 @@ class TestTransitoryStates:
         assert tracker._pr_states == {"org/repo#1": "rebasing"}
 
         # Transition: the PR occupies exactly one state at a time.
-        tracker.track_pr_state("org/repo#1", "rebased")
-        assert tracker._pr_states == {"org/repo#1": "rebased"}
+        tracker.track_pr_state("org/repo#1", "recreating")
+        assert tracker._pr_states == {"org/repo#1": "recreating"}
 
         tracker.track_pr_state("org/repo#1", "waiting")
         assert tracker._pr_states == {"org/repo#1": "waiting"}
@@ -132,6 +136,8 @@ class TestTerminalCounters:
         dummy.merge_blocked("org/repo#1")
         dummy.merge_pending("org/repo#1")
         dummy.increment_closed("org/repo#1")
+        dummy.record_rebase()
+        dummy.record_retrigger()
 
     def test_concurrent_outcomes_lose_no_increments(self) -> None:
         """Counter updates from worker threads are never lost.
@@ -164,6 +170,94 @@ class TestTerminalCounters:
         assert tracker._pr_states == {}
 
 
+class TestActivityCounters:
+    """Cumulative rebase / re-trigger totals outlive the PRs they came from."""
+
+    def test_record_rebase_accumulates(self) -> None:
+        tracker = MergeProgressTracker("org")
+        tracker.record_rebase()
+        tracker.record_rebase()
+        assert tracker.rebases_triggered == 2
+
+    def test_record_retrigger_accumulates(self) -> None:
+        tracker = MergeProgressTracker("org")
+        tracker.record_retrigger()
+        tracker.record_retrigger(2)
+        assert tracker.retriggers_issued == 3
+
+    def test_non_positive_counts_are_ignored(self) -> None:
+        """The totals are monotonic whatever a caller passes.
+
+        A display counter must never abort a merge run, so a bad
+        argument is dropped rather than raised — but it must also
+        never walk the total backwards.
+        """
+        tracker = MergeProgressTracker("org")
+        tracker.record_rebase(3)
+        tracker.record_retrigger(3)
+
+        tracker.record_rebase(0)
+        tracker.record_rebase(-5)
+        tracker.record_retrigger(0)
+        tracker.record_retrigger(-5)
+
+        assert tracker.rebases_triggered == 3
+        assert tracker.retriggers_issued == 3
+
+    def test_totals_survive_terminal_outcomes(self) -> None:
+        """The whole point: the counts stay put once the PR lands.
+
+        Previously "rebased" was a per-PR transitory state, so the
+        moment a rebased PR merged or failed the display lost all
+        trace that a rebase had ever been requested.
+        """
+        tracker = MergeProgressTracker("org")
+        tracker.rich_available = True
+        tracker.set_total_prs(2)
+
+        tracker.track_pr_state("org/repo#1", "rebasing")
+        tracker.record_rebase()
+        tracker.record_retrigger()
+        tracker.merge_success("org/repo#1")
+
+        tracker.track_pr_state("org/repo#2", "rebasing")
+        tracker.record_rebase()
+        tracker.record_retrigger()
+        tracker.merge_failure("org/repo#2")
+
+        assert tracker._pr_states == {}
+        assert tracker.rebases_triggered == 2
+        assert tracker.retriggers_issued == 2
+        plain = tracker._generate_display_text().plain
+        assert "⬆️ Rebased: 2" in plain
+        assert "📣 Retriggered: 2" in plain
+        assert "✅ Merged: 1" in plain
+        assert "❌ Failed: 1" in plain
+
+    def test_summary_includes_activity_counters(self) -> None:
+        tracker = MergeProgressTracker("org")
+        tracker.record_rebase()
+        tracker.record_retrigger()
+        summary = tracker.get_summary()
+        assert summary["rebases_triggered"] == 1
+        assert summary["retriggers_issued"] == 1
+
+    def test_concurrent_activity_increments_are_serialised(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        tracker = MergeProgressTracker("org")
+
+        def _record(_index: int) -> None:
+            tracker.record_rebase()
+            tracker.record_retrigger()
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(_record, range(64)))
+
+        assert tracker.rebases_triggered == 64
+        assert tracker.retriggers_issued == 64
+
+
 class TestDisplayRendering:
     """Stats line renders transitory states then terminal counters."""
 
@@ -173,25 +267,32 @@ class TestDisplayRendering:
         tracker.set_total_prs(7)
         tracker.track_pr_state("org/repo#1", "waiting")
         tracker.track_pr_state("org/repo#2", "rebasing")
-        tracker.track_pr_state("org/repo#3", "rebased")
+        tracker.track_pr_state("org/repo#3", "recreating")
         tracker.track_pr_state("org/repo#7", "submitting")
+        tracker.record_rebase()
+        tracker.record_retrigger()
         tracker.merge_success("org/repo#4")
         tracker.merge_pending("org/repo#5")
         tracker.merge_failure("org/repo#6")
 
         plain = tracker._generate_display_text().plain
         assert "🔄 Rebasing: 1" in plain
-        assert "⬆️ Rebased: 1" in plain
+        assert "♻️ Recreating: 1" in plain
         assert "⏳ Waiting: 1" in plain
         assert "📤 Submitting: 1" in plain
+        assert "⬆️ Rebased: 1" in plain
+        assert "📣 Retriggered: 1" in plain
         assert "✅ Merged: 1" in plain
         assert "🤖 Pending: 1" in plain
         assert "❌ Failed: 1" in plain
-        # Pipeline order: transitory states precede terminal counters.
-        assert plain.index("Rebasing") < plain.index("Rebased")
-        assert plain.index("Rebased") < plain.index("Waiting")
+        # Pipeline order: transitory states, then cumulative activity
+        # totals, then terminal counters.
+        assert plain.index("Rebasing") < plain.index("Recreating")
+        assert plain.index("Recreating") < plain.index("Waiting")
         assert plain.index("Waiting") < plain.index("Submitting")
-        assert plain.index("Submitting") < plain.index("Merged")
+        assert plain.index("Submitting") < plain.index("Rebased")
+        assert plain.index("Rebased") < plain.index("Retriggered")
+        assert plain.index("Retriggered") < plain.index("Merged")
 
     def test_zero_counters_do_not_render(self) -> None:
         tracker = MergeProgressTracker("org")
@@ -202,6 +303,8 @@ class TestDisplayRendering:
         assert "Pending" not in plain
         assert "Blocked" not in plain
         assert "Rebasing" not in plain
+        assert "Rebased" not in plain
+        assert "Retriggered" not in plain
 
     def test_unit_label_defaults_to_prs(self) -> None:
         tracker = MergeProgressTracker("org")
@@ -343,3 +446,184 @@ class TestRecordTerminalOutcome:
         tracker.track_pr_state.reset_mock()
         mgr._track_pr_state(pr, None)
         tracker.track_pr_state.assert_called_once_with("org/repo#7", None)
+
+    def test_record_helpers_delegate_to_tracker(self) -> None:
+        tracker = MagicMock()
+        mgr, _client = make_merge_manager(progress_tracker=tracker)
+
+        mgr._record_rebase()
+        mgr._record_retrigger()
+
+        tracker.record_rebase.assert_called_once_with()
+        tracker.record_retrigger.assert_called_once_with()
+
+    def test_record_helpers_without_tracker_are_noops(self) -> None:
+        mgr, _client = make_merge_manager(progress_tracker=None)
+        # Must not raise.
+        mgr._record_rebase()
+        mgr._record_retrigger()
+
+
+class TestMacroSitesRecordActivity:
+    """Every comment macro and rebase feeds the cumulative counters."""
+
+    @pytest.mark.asyncio
+    async def test_dependabot_rebase_counts_rebase_and_retrigger(self) -> None:
+        """``@dependabot rebase`` is one macro *and* one rebase."""
+        tracker = MagicMock()
+        mgr, client = make_merge_manager(progress_tracker=tracker)
+        client.get = AsyncMock(return_value=[])
+        client.post_issue_comment = AsyncMock()
+
+        assert await mgr._request_dependabot_rebase(_make_pr(), "org", "repo")
+
+        tracker.record_rebase.assert_called_once_with()
+        tracker.record_retrigger.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_existing_rebase_comment_counts_nothing(self) -> None:
+        """A rebase requested by an earlier run is not ours to claim."""
+        tracker = MagicMock()
+        mgr, client = make_merge_manager(progress_tracker=tracker)
+        client.get = AsyncMock(return_value=[{"body": "@dependabot rebase"}])
+        client.post_issue_comment = AsyncMock()
+
+        assert await mgr._request_dependabot_rebase(_make_pr(), "org", "repo")
+
+        tracker.record_rebase.assert_not_called()
+        tracker.record_retrigger.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_failed_post_counts_nothing(self) -> None:
+        tracker = MagicMock()
+        mgr, client = make_merge_manager(progress_tracker=tracker)
+        client.get = AsyncMock(return_value=[])
+        client.post_issue_comment = AsyncMock(side_effect=RuntimeError("nope"))
+
+        assert not await mgr._request_dependabot_rebase(_make_pr(), "org", "repo")
+
+        tracker.record_rebase.assert_not_called()
+        tracker.record_retrigger.assert_not_called()
+
+
+class TestRebaseModuleRecordsRebases:
+    """The rebase orchestrator counts the rebases it performs itself."""
+
+    def _make_ctx(
+        self, client: Any, record: Any, track: Any = None
+    ) -> rebase_module.RebaseContext:
+        return rebase_module.RebaseContext(
+            github_client=client,
+            token="t",
+            rebase_local=False,
+            preview_mode=False,
+            merge_recheck_interval=0.0,
+            merge_poll_max_attempts=1,
+            log=logging.getLogger("test"),
+            console=MagicMock(),
+            rebased_prs=set(),
+            enable_auto_merge=AsyncMock(return_value=True),
+            track_pr_state=track,
+            record_rebase=record,
+        )
+
+    @pytest.mark.asyncio
+    async def test_local_path_counts_successful_rebase(self) -> None:
+        record = MagicMock()
+        ctx = self._make_ctx(AsyncMock(), record)
+
+        with patch.object(
+            rebase_module, "local_rebase_pr", new=AsyncMock(return_value=True)
+        ):
+            await rebase_module._run_local_path(
+                ctx=ctx,
+                pr_info=_make_pr(),
+                owner="org",
+                repo="repo",
+                local_reason="signatures required",
+            )
+
+        record.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_local_path_failure_counts_nothing(self) -> None:
+        record = MagicMock()
+        ctx = self._make_ctx(AsyncMock(), record)
+
+        with patch.object(
+            rebase_module, "local_rebase_pr", new=AsyncMock(return_value=False)
+        ):
+            await rebase_module._run_local_path(
+                ctx=ctx,
+                pr_info=_make_pr(),
+                owner="org",
+                repo="repo",
+                local_reason="signatures required",
+            )
+
+        record.assert_not_called()
+
+    @pytest.mark.parametrize("rebase_ok", [True, False])
+    @pytest.mark.asyncio
+    async def test_local_path_always_clears_rebasing_state(
+        self, rebase_ok: bool
+    ) -> None:
+        """A failed local rebase must not strand the PR in "Rebasing".
+
+        ``perform_step5_rebase`` sets "rebasing" before dispatch, and
+        this path defers to auto-merge rather than reaching a terminal
+        outcome, so nothing else would clear it.
+        """
+        track = MagicMock()
+        ctx = self._make_ctx(AsyncMock(), MagicMock(), track)
+        pr = _make_pr()
+
+        with patch.object(
+            rebase_module, "local_rebase_pr", new=AsyncMock(return_value=rebase_ok)
+        ):
+            await rebase_module._run_local_path(
+                ctx=ctx,
+                pr_info=pr,
+                owner="org",
+                repo="repo",
+                local_reason="signatures required",
+            )
+
+        track.assert_called_once_with(pr, None)
+
+    @pytest.mark.asyncio
+    async def test_rest_path_counts_update_branch(self) -> None:
+        record = MagicMock()
+        client = AsyncMock()
+        client.update_branch = AsyncMock()
+        ctx = self._make_ctx(client, record)
+
+        with patch.object(
+            rebase_module,
+            "_poll_post_rebase",
+            new=AsyncMock(return_value=(True, "clean")),
+        ):
+            outcome = await rebase_module._run_rest_path(
+                ctx=ctx, pr_info=_make_pr(), owner="org", repo="repo"
+            )
+
+        assert not outcome.failed
+        record.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_dependabot_macro_path_does_not_double_count(self) -> None:
+        """The macro path delegates to the manager, which already counts."""
+        record = MagicMock()
+        ctx = self._make_ctx(AsyncMock(), record)
+        ctx.request_dependabot_rebase = AsyncMock(return_value=True)
+
+        handled = await rebase_module._run_dependabot_macro_path(
+            ctx=ctx,
+            pr_info=_make_pr(),
+            owner="org",
+            repo="repo",
+            local_reason="signatures required",
+        )
+
+        assert handled is True
+        record.assert_not_called()

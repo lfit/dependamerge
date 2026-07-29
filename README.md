@@ -192,6 +192,13 @@ or user account in one command.
 - **Resilient Enumeration**: The run reports and skips a transient
   failure scanning one repository, then continues with the repositories
   it scanned
+- **Cumulative Activity Counters**: The live progress line reports
+  `⬆️ Rebased` (rebase operations triggered — local force-push, REST
+  `update-branch`, or the `@dependabot rebase` macro) and
+  `📣 Retriggered` (comment macros posted: `@dependabot rebase`,
+  `@dependabot recreate`, `pre-commit.ci run`). Both are running totals
+  of *operations*, so they keep reporting what the run did after the PRs
+  themselves have landed in `✅ Merged` / `❌ Failed`
 - **Grouped Preview**: The preview lists candidate PRs grouped by repository
   for readability, then prompts for a confirmation token before merging
 - **Human PR Safety**: The run excludes human-authored PRs by default;

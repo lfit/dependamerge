@@ -469,22 +469,34 @@ class ProgressTracker:
 class MergeProgressTracker(ProgressTracker):
     """Extended progress tracker with merge-specific metrics.
 
-    In addition to the terminal counters (merged / failed / skipped /
-    blocked / pending / closed), PRs move through **transitory**
-    display states while the merge pipeline operates on them
-    (``rebasing`` → ``rebased`` → ``waiting`` → terminal).  Transitory
-    states are keyed by PR so a PR occupies at most one state at a
-    time; recording a terminal outcome removes the PR from whatever
-    transitory state it was in.
+    Three families of counter feed the live display:
+
+    - **Transitory states** — where each PR is *right now* (one of
+      the keys in :attr:`_STATE_ORDER`).  Keyed by PR, so a PR
+      occupies at most one state at a time and recording a terminal
+      outcome removes it from whatever state it was in.
+    - **Activity counters** (``rebases_triggered``,
+      ``retriggers_issued``) — monotonic totals of *operations* the
+      run performed.  Unlike transitory states these never decrease
+      when a PR moves on, so the display keeps showing how many
+      rebases and comment macros the run issued even after every PR
+      has reached ``Merged`` / ``Failed``.
+    - **Terminal counters** (merged / failed / skipped / blocked /
+      pending / closed) — one per PR, recorded exactly once.
     """
 
     # Transitory display states in pipeline order.  Each entry is
     # ``(state_key, display_label)``; only non-zero states render.
     # ``submitting`` is recorded by the Gerrit submit manager while a
     # change's review + submit round-trips run.
+    #
+    # NOTE: there is deliberately no ``rebased`` state here.  "A rebase
+    # happened" is a completed operation, not a place a PR sits, and
+    # keying it per PR made the count vanish the moment the PR moved
+    # on; it is tracked by the cumulative ``rebases_triggered`` counter
+    # instead.  Post-rebase waiting is reported as ``waiting``.
     _STATE_ORDER: tuple[tuple[str, str], ...] = (
         ("rebasing", "🔄 Rebasing"),
-        ("rebased", "⬆️ Rebased"),
         ("recreating", "♻️ Recreating"),
         ("waiting", "⏳ Waiting"),
         ("submitting", "📤 Submitting"),
@@ -533,6 +545,15 @@ class MergeProgressTracker(ProgressTracker):
         self.prs_pending = 0
         # PRs that are blocked and cannot be merged by this run.
         self.prs_blocked = 0
+        # Cumulative activity counters.  These count *operations*, not
+        # PRs: a single PR can contribute more than one (e.g. a
+        # ``@dependabot rebase`` macro counts as both a rebase and a
+        # re-trigger, and a PR rebased twice counts twice).  They are
+        # monotonic and survive the PR's transition to a terminal
+        # outcome, so the operator can still see what the run did after
+        # every PR has landed in Merged / Failed.
+        self.rebases_triggered = 0
+        self.retriggers_issued = 0
         self.is_close_operation = is_close_operation
         self.preview = preview
         self._custom_label = operation_label
@@ -567,16 +588,58 @@ class MergeProgressTracker(ProgressTracker):
             self.total_prs = total
         self._refresh_display()
 
+    def record_rebase(self, count: int = 1) -> None:
+        """Count a rebase operation triggered against a PR branch.
+
+        Covers every mechanism that brings a branch up to date: a
+        local ``git rebase`` + force-push, the REST ``update-branch``
+        call, and the ``@dependabot rebase`` comment macro.  The
+        counter is cumulative and never cleared — it records what the
+        run *did*, independently of where each PR ended up.
+
+        ``count`` must be positive; a zero or negative value is
+        ignored so the monotonic contract holds no matter what a
+        caller passes.  A display counter must never abort a merge
+        run, so a bad argument is dropped rather than raised.
+        """
+        if count <= 0:
+            return
+        with self._state_lock:
+            self.rebases_triggered += count
+        self._refresh_display()
+
+    def record_retrigger(self, count: int = 1) -> None:
+        """Count a comment macro posted to re-trigger external tooling.
+
+        Covers ``@dependabot rebase``, ``@dependabot recreate``,
+        ``pre-commit.ci run`` and any macro added later.  Like
+        :meth:`record_rebase` this is cumulative and never cleared.
+
+        A ``@dependabot rebase`` deliberately increments *both*
+        counters: it is one comment macro and one rebase request, and
+        the two counters answer different questions ("how many
+        branches did we move?" vs "how many times did we poke an
+        external bot?").
+
+        ``count`` is validated exactly as in :meth:`record_rebase`:
+        zero and negative values are ignored.
+        """
+        if count <= 0:
+            return
+        with self._state_lock:
+            self.retriggers_issued += count
+        self._refresh_display()
+
     def track_pr_state(self, pr_key: str, state: str | None) -> None:
         """Move a PR between transitory display states.
 
         ``state`` is one of the keys in ``_STATE_ORDER`` (e.g.
-        ``"rebasing"``, ``"rebased"``, ``"waiting"``) or ``None`` to
-        clear the PR's entry when an operation finishes without
-        reaching a terminal outcome.  Terminal outcomes are recorded
-        via ``merge_success`` / ``merge_failure`` / ``merge_skipped``
-        / ``merge_blocked`` / ``merge_pending``, which also clear the
-        transitory entry when given the PR key.
+        ``"rebasing"``, ``"waiting"``) or ``None`` to clear the PR's
+        entry when an operation finishes without reaching a terminal
+        outcome.  Terminal outcomes are recorded via ``merge_success``
+        / ``merge_failure`` / ``merge_skipped`` / ``merge_blocked`` /
+        ``merge_pending``, which also clear the transitory entry when
+        given the PR key.
         """
         if state is None:
             with self._state_lock:
@@ -696,6 +759,8 @@ class MergeProgressTracker(ProgressTracker):
             prs_failed = self.prs_failed
             prs_skipped = self.prs_skipped
             prs_blocked = self.prs_blocked
+            rebases_triggered = self.rebases_triggered
+            retriggers_issued = self.retriggers_issued
             pr_states = list(self._pr_states.values())
 
         # Main progress line for merge/close operations.
@@ -736,8 +801,9 @@ class MergeProgressTracker(ProgressTracker):
             text.append(f"\n   {self.current_operation}", style="dim")
 
         # Merge stats — transitory pipeline states first (in flow
-        # order), then terminal outcomes.  The per-PR states and the
-        # counters below were snapshotted under _state_lock above.
+        # order), then the cumulative activity totals, then terminal
+        # outcomes.  The per-PR states and the counters below were
+        # snapshotted under _state_lock above.
         stats_parts: list[str] = []
         if similar_prs_found > 0:
             stats_parts.append(f"🔁 Similar: {similar_prs_found}")
@@ -757,6 +823,14 @@ class MergeProgressTracker(ProgressTracker):
                 stats_parts.append(
                     f"{state_key.capitalize()}: {state_counts[state_key]}"
                 )
+        # Cumulative activity totals.  Rendered between the transitory
+        # states and the terminal outcomes so the line reads in
+        # pipeline order, and kept visible for the rest of the run
+        # once non-zero.
+        if rebases_triggered > 0:
+            stats_parts.append(f"⬆️ Rebased: {rebases_triggered}")
+        if retriggers_issued > 0:
+            stats_parts.append(f"📣 Retriggered: {retriggers_issued}")
         if prs_merged > 0:
             # A preview run merges nothing — the counter records PRs
             # judged mergeable, so label it accordingly.
@@ -812,6 +886,8 @@ class MergeProgressTracker(ProgressTracker):
                 "prs_blocked": self.prs_blocked,
                 "prs_pending": self.prs_pending,
                 "prs_closed": self.prs_closed,
+                "rebases_triggered": self.rebases_triggered,
+                "retriggers_issued": self.retriggers_issued,
                 "total_prs": self.total_prs,
                 "completed_prs": self.completed_prs,
             }
@@ -837,6 +913,8 @@ class DummyProgressTracker(ProgressTracker):
         self.prs_blocked = 0
         self.prs_pending = 0
         self.prs_closed = 0
+        self.rebases_triggered = 0
+        self.retriggers_issued = 0
         self.is_close_operation = False
         self.preview = False
         self._custom_label: str | None = None
@@ -886,6 +964,12 @@ class DummyProgressTracker(ProgressTracker):
         pass
 
     def track_pr_state(self, pr_key: str, state: str | None) -> None:
+        pass
+
+    def record_rebase(self, count: int = 1) -> None:
+        pass
+
+    def record_retrigger(self, count: int = 1) -> None:
         pass
 
     def merge_success(self, pr_key: str | None = None) -> None:
