@@ -23,7 +23,7 @@ pass".
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 __all__ = [
@@ -40,13 +40,22 @@ FAILING_CONCLUSIONS = frozenset({"failure", "cancelled", "timed_out"})
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
-    """Parse an ISO-8601 timestamp, tolerating ``Z`` and ``None``."""
+    """Parse an ISO-8601 timestamp, tolerating ``Z`` and ``None``.
+
+    A parsed value is always timezone-aware.  GitHub reports UTC, and a
+    payload that omits the offset is assumed to mean the same, so an
+    aware and a naive value can never meet in a comparison and raise
+    ``TypeError``.
+    """
     if not isinstance(value, str) or not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _run_timestamp(run: Mapping[str, Any]) -> datetime | None:
@@ -70,24 +79,26 @@ def _is_failing(run: Mapping[str, Any]) -> bool:
 def _supersedes(candidate: Mapping[str, Any], incumbent: Mapping[str, Any]) -> bool:
     """Whether *candidate* should replace *incumbent* as the latest run.
 
-    Ordering is by timestamp.  When timestamps are absent or identical --
-    which happens when the API does not expose them, or when duplicate
-    runs complete within the same second -- a successful run wins over a
-    failing one.  That tie-break is what resolves the superseded-cancel
-    race: the surviving run is the one that actually ran to completion.
+    Ordering is by timestamp whenever both runs carry one and they
+    differ.  Otherwise the order cannot be established -- the timestamps
+    are absent, only one side reports them, or they are identical, which
+    happens readily when duplicate runs complete within the same second.
+
+    When order is indeterminate a successful run wins over a failing one.
+    Two runs sharing a name are overwhelmingly a supersede race, and a
+    genuine lone failure has no successful sibling to beat it, so this
+    resolves the phantom failure without masking real breakage.
     """
     candidate_ts = _run_timestamp(candidate)
     incumbent_ts = _run_timestamp(incumbent)
 
-    if candidate_ts is not None and incumbent_ts is not None:
-        if candidate_ts != incumbent_ts:
-            return candidate_ts > incumbent_ts
-    elif candidate_ts is not None or incumbent_ts is not None:
-        # Only one side is timestamped.  Prefer the timestamped run: it
-        # carries strictly more information than one that reports none.
-        return candidate_ts is not None
+    if (
+        candidate_ts is not None
+        and incumbent_ts is not None
+        and candidate_ts != incumbent_ts
+    ):
+        return candidate_ts > incumbent_ts
 
-    # Indistinguishable by time; prefer a run that did not fail.
     return _is_failing(incumbent) and not _is_failing(candidate)
 
 

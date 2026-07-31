@@ -101,6 +101,32 @@ class TestSupersededRuns:
         ]
         assert failing_check_names(runs) == []
 
+    def test_success_wins_when_only_the_failure_is_timestamped(self):
+        # Partial timestamps leave the order genuinely unknown.  An
+        # earlier revision preferred whichever run carried a timestamp,
+        # which let a superseded cancel beat the success that replaced
+        # it and reintroduced the phantom failure.
+        runs = [
+            _run("Build", "success"),
+            _run("Build", "cancelled", "2026-07-30T14:43:37Z"),
+        ]
+        assert failing_check_names(runs) == []
+
+    def test_success_wins_when_only_the_success_is_timestamped(self):
+        runs = [
+            _run("Build", "cancelled"),
+            _run("Build", "success", "2026-07-30T14:44:05Z"),
+        ]
+        assert failing_check_names(runs) == []
+
+    def test_identical_timestamps_resolve_to_success(self):
+        # Duplicate runs readily complete within the same second.
+        runs = [
+            _run("Build", "cancelled", "2026-07-30T14:43:37Z"),
+            _run("Build", "success", "2026-07-30T14:43:37Z"),
+        ]
+        assert failing_check_names(runs) == []
+
 
 class TestGenuineFailures:
     """Deduplication must not mask real problems."""
@@ -161,6 +187,24 @@ class TestMalformedInput:
         ]
         # Both timestamps unusable, so the success tie-break applies.
         assert failing_check_names(runs) == []
+
+    def test_naive_and_aware_timestamps_do_not_raise(self):
+        # Comparing an offset-naive datetime with an offset-aware one
+        # raises TypeError in Python.  A payload that omits the offset
+        # must not crash a run; GitHub reports UTC, so naive values are
+        # read as UTC.
+        runs = [
+            _run("A", "cancelled", "2026-07-30T14:43:37"),
+            _run("A", "success", "2026-07-30T14:44:05Z"),
+        ]
+        assert failing_check_names(runs) == []
+
+    def test_naive_timestamps_still_order_correctly(self):
+        runs = [
+            _run("A", "success", "2026-07-30T10:00:00"),
+            _run("A", "failure", "2026-07-30T11:00:00Z"),
+        ]
+        assert failing_check_names(runs) == ["A"]
 
     def test_missing_conclusion_treated_as_not_failing(self):
         # An in-progress run has no conclusion yet; pending is handled
@@ -308,3 +352,23 @@ class TestRestCheckRunPath:
             result = await api.analyze_block_reason("owner", "repo", 123, "abc123")
 
         assert result is not None and "Audit Workflows" in result
+
+    @pytest.mark.asyncio
+    async def test_unnamed_failing_run_is_not_surfaced(self) -> None:
+        # An unnamed run cannot be matched against a required-check
+        # rule.  Reporting it produced output naming a check called
+        # "unknown", which tells the operator nothing actionable.
+        async with GitHubAsync(token="t") as api:
+            api.get = AsyncMock(  # type: ignore[method-assign]
+                side_effect=_rest_router(
+                    check_runs=[
+                        {"status": "completed", "conclusion": "failure"},
+                        {"name": None, "status": "completed", "conclusion": "failure"},
+                    ]
+                )
+            )
+            api.get_required_status_checks = AsyncMock(return_value=[])  # type: ignore[method-assign]
+
+            result = await api.analyze_block_reason("owner", "repo", 123, "abc123")
+
+        assert result is None or "unknown" not in result

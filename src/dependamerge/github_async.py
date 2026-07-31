@@ -2320,7 +2320,14 @@ class GitHubAsync:
                 # a completed run and a fresh in_progress re-run is still
                 # pending, and must not be collapsed away here.
                 for run in raw_runs:
-                    name = run.get("name", "unknown")
+                    name = (run.get("name") or "").strip()
+                    if not name:
+                        # An unnamed run cannot be matched against a
+                        # required-check rule.  Recording it produces
+                        # only misleading output such as "Blocked by
+                        # failing check: unknown", so drop it here just
+                        # as the deduplication helper does.
+                        continue
                     status = run.get("status")
                     reported_check_names.add(name)
                     if status == "completed":

@@ -752,7 +752,7 @@ def _validate_automation_author(ctx: _MergeContext) -> None:
     to do nothing when pointed at a human-authored PR.
 
     Raises:
-        SystemExit: When the source is human-authored and unauthorised,
+        SystemExit: When the source is human-authored and unauthorized,
             or when a supplied override SHA does not match.
     """
     assert ctx.github_client is not None
@@ -761,13 +761,26 @@ def _validate_automation_author(ctx: _MergeContext) -> None:
     if ctx.github_client.is_automation_author(ctx.source_pr.author):
         return
 
+    human_source_notice = (
+        f"👤 Source PR is human-authored (by {ctx.source_pr.author}); "
+        "proceeding because --include-human-prs was supplied."
+    )
+
+    # Deriving the override SHA costs an extra API call per pull request.
+    # Skip it when --include-human-prs alone already authorizes the run
+    # and there is no supplied override to check it against; at
+    # organisation scale that latency and rate-limit pressure adds up.
+    if ctx.include_human_prs and not ctx.override:
+        console.print(human_source_notice)
+        return
+
     commit_messages = ctx.github_client.get_pull_request_commits(
         ctx.owner, ctx.repo_name, ctx.pr_number
     )
     first_commit_line = commit_messages[0].split("\n")[0] if commit_messages else ""
     expected_sha = _generate_override_sha(ctx.source_pr, first_commit_line)
 
-    # A supplied override must match whichever gate ultimately authorises
+    # A supplied override must match whichever gate ultimately authorizes
     # the run.  A wrong SHA means the operator is looking at a different
     # PR than they think, and that is worth stopping for even when
     # --include-human-prs would otherwise have been sufficient.
@@ -781,16 +794,13 @@ def _validate_automation_author(ctx: _MergeContext) -> None:
         )
 
     if ctx.include_human_prs:
-        console.print(
-            f"👤 Source PR is human-authored (by {ctx.source_pr.author}); "
-            "proceeding because --include-human-prs was supplied."
-        )
+        console.print(human_source_notice)
         return
 
     if ctx.override:
         console.print("Override SHA validated. Proceeding with non-automation PR merge.")
         console.print(
-            "ℹ️ --include-human-prs is the documented way to authorise "
+            "ℹ️ --include-human-prs is the documented way to authorize "
             "human-authored PRs; --override remains supported.",
             style="dim",
         )
@@ -800,12 +810,12 @@ def _validate_automation_author(ctx: _MergeContext) -> None:
         ExitCode.VALIDATION_ERROR,
         message=(
             f"❌ Source PR is human-authored (by {ctx.source_pr.author}), "
-            "not from a recognised automation tool"
+            "not from a recognized automation tool"
         ),
         details=(
             "dependamerge acts on automation PRs by default.\n"
             "To include human-authored PRs, run again with: --include-human-prs\n"
-            f"To authorise only this PR instead: --override {expected_sha}\n"
+            f"To authorize only this PR instead: --override {expected_sha}\n"
             f"That SHA derives from the author '{ctx.source_pr.author}' and "
             f"commit message '{first_commit_line[:50]}...'"
         ),
@@ -2487,7 +2497,7 @@ def merge(
         None,
         "--override",
         help=(
-            "SHA hash authorising a single non-automation PR/change. "
+            "SHA hash authorizing a single non-automation PR/change. "
             "Prefer --include-human-prs; this remains supported"
         ),
     ),
@@ -2593,7 +2603,7 @@ def merge(
         False,
         "--include-human-prs",
         help=(
-            "Authorise human-authored PRs. Required when the source PR is "
+            "Authorize human-authored PRs. Required when the source PR is "
             "human-authored, and includes human-authored PRs in the similar-PR "
             "set (prompting for confirmation unless --no-confirm)"
         ),

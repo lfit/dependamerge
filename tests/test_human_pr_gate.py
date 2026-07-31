@@ -95,6 +95,21 @@ class TestHumanSourceWithIncludeHumanPrs:
             _ctx(author="ModeSevenIndustrialSolutions", include_human_prs=True)
         )
 
+    def test_does_not_fetch_commits_when_no_override_to_check(self):
+        # Deriving the override SHA costs an API call per pull request.
+        # With --include-human-prs and no override there is nothing to
+        # check it against, so the call is pure waste at org scale.
+        ctx = _ctx(author="ModeSevenIndustrialSolutions", include_human_prs=True)
+        _validate_automation_author(ctx)
+        ctx.github_client.get_pull_request_commits.assert_not_called()
+
+    def test_still_fetches_commits_when_an_override_needs_checking(self):
+        ctx = _ctx(author="ModeSevenIndustrialSolutions", include_human_prs=True)
+        ctx.override = _expected_sha(ctx)
+        ctx.github_client.get_pull_request_commits.reset_mock()
+        _validate_automation_author(ctx)
+        ctx.github_client.get_pull_request_commits.assert_called_once()
+
     def test_says_why_it_proceeded(self, capsys):
         ctx = _ctx(author="ModeSevenIndustrialSolutions", include_human_prs=True)
         _validate_automation_author(ctx)
