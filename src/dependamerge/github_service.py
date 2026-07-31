@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any
 
 from .bot_identity import canonical_bot_login, is_automation_author
+from .check_runs import failing_check_names
 from .github_async import (
     GitHubAsync,
     GraphQLError,
@@ -1334,9 +1335,15 @@ class GitHubService:
                 )
         return result
 
-    def _extract_failing_checks(self, pr: dict[str, Any]) -> list[str]:
+    @staticmethod
+    def _extract_failing_checks(pr: dict[str, Any]) -> list[str]:
         """
         Extract failing checks from the statusCheckRollup on the latest commit.
+
+        A commit can carry several check runs sharing one name, typically
+        when a duplicate workflow event causes ``concurrency`` to cancel a
+        superseded run.  Only the latest run per name decides the outcome,
+        matching GitHub's own merge protection; see ``check_runs``.
         """
         failing: list[str] = []
 
@@ -1348,23 +1355,23 @@ class GitHubService:
         rollup = commit.get("statusCheckRollup") or {}
         contexts = (rollup.get("contexts") or {}).get("nodes", []) or []
 
+        check_runs: list[dict[str, Any]] = []
+
         for ctx in contexts:
             typ = ctx.get("__typename")
             if typ == "CheckRun":
-                # Consider failure, cancelled, or timed_out as failing
-                conclusion = (ctx.get("conclusion") or "").lower()
-                if conclusion in ("failure", "cancelled", "timed_out"):
-                    name = ctx.get("name") or ""
-                    if name:
-                        failing.append(name)
+                # Collected for deduplication rather than judged here.
+                check_runs.append(ctx)
             elif typ == "StatusContext":
+                # Commit statuses are already latest-per-context: GitHub
+                # collapses repeated posts to the same context itself.
                 state = (ctx.get("state") or "").upper()
                 if state in ("FAILURE", "ERROR"):
                     name = ctx.get("context") or ""
                     if name:
                         failing.append(name)
 
-        return failing
+        return failing_check_names(check_runs) + failing
 
     async def gather_organization_status(self, org: str) -> OrganizationStatus:
         """
