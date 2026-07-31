@@ -26,6 +26,7 @@ from tenacity import (
 )
 
 from .bot_identity import is_copilot
+from .check_runs import failing_check_names
 
 __all__ = [
     "GitHubAsync",
@@ -2309,19 +2310,36 @@ class GitHubAsync:
                 f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs"
             )
             if isinstance(runs, dict):
-                for run in runs.get("check_runs") or []:
-                    if not isinstance(run, dict):
+                raw_runs = [
+                    run
+                    for run in (runs.get("check_runs") or [])
+                    if isinstance(run, dict)
+                ]
+                # Status classification deliberately considers *every*
+                # reported run, not just the latest: a name carrying both
+                # a completed run and a fresh in_progress re-run is still
+                # pending, and must not be collapsed away here.
+                for run in raw_runs:
+                    name = (run.get("name") or "").strip()
+                    if not name:
+                        # An unnamed run cannot be matched against a
+                        # required-check rule.  Recording it produces
+                        # only misleading output such as "Blocked by
+                        # failing check: unknown", so drop it here just
+                        # as the deduplication helper does.
                         continue
-                    name = run.get("name", "unknown")
                     status = run.get("status")
-                    conclusion = run.get("conclusion")
                     reported_check_names.add(name)
                     if status == "completed":
                         completed_check_names.add(name)
                     elif status in ("queued", "in_progress"):
                         pending_check_names.add(name)
-                    if conclusion in ["failure", "cancelled", "timed_out"]:
-                        failing_checks.append(name)
+                # Failure, by contrast, is decided by the latest run per
+                # name.  A commit can carry several runs under one name
+                # when a duplicate workflow event causes ``concurrency``
+                # to cancel a superseded run; that cancelled run must not
+                # mask the successful one that replaced it.
+                failing_checks.extend(failing_check_names(raw_runs))
         except Exception:
             # Check-runs API may be unavailable; proceed with whatever
             # checks were collected so far.

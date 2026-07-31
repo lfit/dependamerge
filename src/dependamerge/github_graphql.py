@@ -157,6 +157,8 @@ query($org: String!, $reposCursor: String) {
                           name
                           status
                           conclusion
+                          startedAt
+                          completedAt
                         }
                         ... on StatusContext {
                           context
@@ -247,6 +249,8 @@ query($owner: String!, $name: String!, $prsCursor: String, $prsPageSize: Int!, $
                       name
                       status
                       conclusion
+                      startedAt
+                      completedAt
                     }
                     ... on StatusContext {
                       context

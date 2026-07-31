@@ -19,6 +19,7 @@ from dependamerge.cli import (
     _validate_override_sha,
     app,
 )
+from dependamerge.error_codes import ExitCode
 from dependamerge.gerrit.models import GerritChangeInfo, GerritComparisonResult
 from dependamerge.models import PullRequestInfo
 from dependamerge.url_parser import ChangeSource, ParsedUrl
@@ -233,8 +234,9 @@ class TestCLI:
             ["merge", "https://github.com/owner/repo/pull/22", "--token", "test_token"],
         )
 
-        assert result.exit_code == 0
-        assert "not from a recognized automation tool" in result.stdout
+        assert result.exit_code == ExitCode.VALIDATION_ERROR
+        assert "human-authored" in result.stdout
+        assert "--include-human-prs" in result.stdout
 
     @patch("dependamerge.cli.GitHubClient")
     @patch("dependamerge.cli.PRComparator")
@@ -400,10 +402,116 @@ class TestCLI:
             ["merge", "https://github.com/owner/repo/pull/22", "--token", "test_token"],
         )
 
-        assert result.exit_code == 0
-        assert "not from a recognized automation tool" in result.stdout
-        assert "--override" in result.stdout
-        assert "human-user" in result.stdout
+        # A human-authored source with neither --include-human-prs nor
+        # --override now fails fast.  It previously exited 0, which a
+        # scripted caller could not tell apart from "nothing to merge".
+        assert result.exit_code == ExitCode.VALIDATION_ERROR
+        assert "human-authored" in result.stdout
+        assert "--include-human-prs" in result.stdout
+
+    @patch("dependamerge.cli.GitHubClient")
+    @patch("dependamerge.cli.PRComparator")
+    @patch("dependamerge.github_service.GitHubService")
+    @patch("dependamerge.merge_manager.GitHubAsync")
+    def test_merge_command_human_pr_with_include_flag(
+        self,
+        mock_async_class,
+        mock_service_class,
+        mock_comparator_class,
+        mock_client_class,
+    ):
+        """--include-human-prs authorizes a human-authored source PR.
+
+        Driven all the way to a successful merge rather than merely past
+        the gate: asserting only that the run avoided VALIDATION_ERROR
+        would also pass if it failed later for an unrelated reason.
+
+        Combined with --no-confirm, this also pins that an authorized
+        human-authored source proceeds unattended, with no prompt.
+        """
+        mock_client = Mock()
+        mock_client_class.return_value = mock_client
+
+        mock_comparator = Mock()
+        mock_comparator_class.return_value = mock_comparator
+
+        mock_service = Mock()
+        mock_service_class.return_value = mock_service
+
+        mock_async = AsyncMock()
+        mock_async.approve_pull_request = AsyncMock()
+        mock_async.merge_pull_request = AsyncMock(return_value=True)
+        mock_async.update_branch = AsyncMock()
+
+        mock_async_instance = AsyncMock()
+        mock_async_instance.__aenter__ = AsyncMock(return_value=mock_async)
+        mock_async_instance.__aexit__ = AsyncMock(return_value=None)
+        mock_async_class.return_value = mock_async_instance
+
+        mock_client.parse_pr_url.return_value = ("owner", "repo", 22)
+        # The point of the test: a human author, not automation.
+        mock_client.is_automation_author.return_value = False
+
+        mock_repo = Mock()
+        mock_repo.full_name = "owner/other-repo"
+        mock_repo.owner.login = "owner"
+        mock_repo.name = "other-repo"
+        mock_client.get_organization_repositories.return_value = [mock_repo]
+        mock_client.get_open_pull_requests.return_value = []
+
+        mock_pr = PullRequestInfo(
+            number=22,
+            title="Fix bug",
+            body="Test body",
+            author="human-user",
+            head_sha="abc123",
+            base_branch="main",
+            head_branch="fix-bug",
+            state="open",
+            mergeable=True,
+            mergeable_state="clean",
+            behind_by=0,
+            files_changed=[],
+            repository_full_name="owner/repo",
+            html_url="https://github.com/owner/repo/pull/22",
+        )
+        mock_client.get_pull_request_info.return_value = mock_pr
+        mock_client.get_pr_status_details.return_value = "Ready to merge"
+        mock_client.get_pull_request_commits.return_value = [
+            "Fix bug\n\nDetailed description"
+        ]
+        mock_client.approve_pull_request.return_value = True
+        mock_client.merge_pull_request.return_value = True
+        mock_client.fix_out_of_date_pr.return_value = True
+
+        async def mock_find_similar_prs(*args, **kwargs):
+            return []
+
+        async def mock_close():
+            return None
+
+        mock_service.find_similar_prs = mock_find_similar_prs
+        mock_service.close = mock_close
+
+        with patch(
+            "dependamerge.merge_manager.AsyncMergeManager._check_merge_requirements",
+            new_callable=AsyncMock,
+            return_value=(True, "Ready to merge"),
+        ):
+            result = self.runner.invoke(
+                app,
+                [
+                    "merge",
+                    "https://github.com/owner/repo/pull/22",
+                    "--no-confirm",
+                    "--token",
+                    "test_token",
+                    "--include-human-prs",
+                ],
+            )
+
+        assert result.exit_code == ExitCode.SUCCESS
+        assert "--include-human-prs was supplied" in result.stdout
 
     @patch("dependamerge.cli.GitHubClient")
     def test_merge_command_non_automation_pr_invalid_override(self, mock_client_class):
