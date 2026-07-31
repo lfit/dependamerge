@@ -739,13 +739,21 @@ def _maybe_check_merge_permissions(ctx: _MergeContext) -> None:
 
 
 def _validate_automation_author(ctx: _MergeContext) -> None:
-    """Verify the source PR author is from automation or has a valid override.
+    """Gate a human-authored source PR behind an explicit opt-in.
 
-    May print usage guidance and return early (via ``return`` in
-    the caller) or exit on validation failure.
+    Automation-authored sources pass straight through.  A human-authored
+    source needs either ``--include-human-prs`` (the documented opt-in,
+    which also governs which similar PRs are acted on) or a matching
+    ``--override`` SHA, retained so existing invocations keep working.
+
+    With neither, fail fast.  Previously this printed override guidance
+    and exited *successfully*, which is indistinguishable from "nothing
+    to merge" when scripted, and meant ``--include-human-prs`` appeared
+    to do nothing when pointed at a human-authored PR.
 
     Raises:
-        typer.Exit: On invalid override SHA.
+        SystemExit: When the source is human-authored and unauthorised,
+            or when a supplied override SHA does not match.
     """
     assert ctx.github_client is not None
     assert ctx.source_pr is not None
@@ -759,27 +767,49 @@ def _validate_automation_author(ctx: _MergeContext) -> None:
     first_commit_line = commit_messages[0].split("\n")[0] if commit_messages else ""
     expected_sha = _generate_override_sha(ctx.source_pr, first_commit_line)
 
-    if not ctx.override:
-        console.print("Source PR is not from a recognized automation tool.")
-        console.print(
-            f"To merge this and similar PRs, run again with: --override {expected_sha}"
-        )
-        console.print(
-            f"This SHA is based on the author "
-            f"'{ctx.source_pr.author}' and commit message "
-            f"'{first_commit_line[:50]}...'",
-            style="dim",
-        )
-        raise typer.Exit(0)
-
-    if not _validate_override_sha(ctx.override, ctx.source_pr, first_commit_line):
+    # A supplied override must match whichever gate ultimately authorises
+    # the run.  A wrong SHA means the operator is looking at a different
+    # PR than they think, and that is worth stopping for even when
+    # --include-human-prs would otherwise have been sufficient.
+    if ctx.override and not _validate_override_sha(
+        ctx.override, ctx.source_pr, first_commit_line
+    ):
         exit_with_error(
             ExitCode.VALIDATION_ERROR,
             message="❌ Invalid override SHA provided",
             details=(f"Expected SHA for this PR and author: --override {expected_sha}"),
         )
 
-    console.print("Override SHA validated. Proceeding with non-automation PR merge.")
+    if ctx.include_human_prs:
+        console.print(
+            f"👤 Source PR is human-authored (by {ctx.source_pr.author}); "
+            "proceeding because --include-human-prs was supplied."
+        )
+        return
+
+    if ctx.override:
+        console.print("Override SHA validated. Proceeding with non-automation PR merge.")
+        console.print(
+            "ℹ️ --include-human-prs is the documented way to authorise "
+            "human-authored PRs; --override remains supported.",
+            style="dim",
+        )
+        return
+
+    exit_with_error(
+        ExitCode.VALIDATION_ERROR,
+        message=(
+            f"❌ Source PR is human-authored (by {ctx.source_pr.author}), "
+            "not from a recognised automation tool"
+        ),
+        details=(
+            "dependamerge acts on automation PRs by default.\n"
+            "To include human-authored PRs, run again with: --include-human-prs\n"
+            f"To authorise only this PR instead: --override {expected_sha}\n"
+            f"That SHA derives from the author '{ctx.source_pr.author}' and "
+            f"commit message '{first_commit_line[:50]}...'"
+        ),
+    )
 
 
 def _scan_and_find_similar(ctx: _MergeContext) -> None:
@@ -2077,7 +2107,7 @@ def _resolve_gerrit_only_automation(
         True when only automation changes should be matched.
 
     Raises:
-        typer.Exit: When the source is a non-automation change without a
+        SystemExit: When the source is a non-automation change without a
             valid override SHA.
     """
     if comparator.is_automation_change(source_change):
@@ -2456,7 +2486,10 @@ def merge(
     override: str | None = typer.Option(
         None,
         "--override",
-        help="SHA hash to override non-automation PR/change restriction",
+        help=(
+            "SHA hash authorising a single non-automation PR/change. "
+            "Prefer --include-human-prs; this remains supported"
+        ),
     ),
     no_fix: bool = typer.Option(
         False,
@@ -2559,7 +2592,11 @@ def merge(
     include_human_prs: bool = typer.Option(
         False,
         "--include-human-prs",
-        help="Include human-authored PRs when merging a repository (prompts for confirmation when human PRs are found)",
+        help=(
+            "Authorise human-authored PRs. Required when the source PR is "
+            "human-authored, and includes human-authored PRs in the similar-PR "
+            "set (prompting for confirmation unless --no-confirm)"
+        ),
     ),
     topic: str | None = typer.Option(
         None,
