@@ -74,6 +74,20 @@ MERGEABILITY_REFRESH_TIMEOUT_SECONDS: float = 10.0
 # runs.  One extra lightweight GET is a fair trade for that.
 MERGE_WAIT_FIRST_POLL_SECONDS: float = 2.0
 
+# When GitHub answers a merge dispatch with 405 "Merge already in
+# progress" it has accepted a merge (usually auto-merge armed earlier in
+# this run) and is completing it asynchronously.  Completion is normally
+# a matter of seconds, but the previous handling --- a 3s then 6s
+# backoff before giving up --- routinely expired first and reported a
+# failure for a PR that merged moments later.  These bound a short watch
+# for completion instead.
+MERGE_IN_PROGRESS_TIMEOUT_SECONDS: float = 60.0
+MERGE_IN_PROGRESS_POLL_SECONDS: float = 5.0
+# As with ``MERGE_WAIT_FIRST_POLL_SECONDS``, the first poll comes early:
+# GitHub is already completing the merge, so it often lands within a
+# second or two and a full-interval first sleep would report it late.
+MERGE_IN_PROGRESS_FIRST_POLL_SECONDS: float = 1.0
+
 # Required verification checks (DCO, lint, build, etc.) normally
 # start reporting within a few seconds.  When a *required* check has
 # been pending for longer than this on a PR that itself was created
@@ -133,6 +147,45 @@ class MergeResult:
     warning: str | None = None
     attempts: int = 0
     duration: float = 0.0
+
+
+def _merged_from_payload(payload: dict[str, Any]) -> bool | None:
+    """Whether a PR REST payload says the PR merged.
+
+    Prefers the explicit ``merged`` boolean.  A trimmed or proxied
+    payload may omit it, so fall back to ``merged_at`` --- the full REST
+    object always carries that key (an ISO timestamp when merged,
+    ``null`` for closed-but-unmerged).  Returns ``None`` only when
+    neither is usable, so an ambiguous payload is never mistaken for a
+    definite "not merged".
+
+    Shared so every caller derives merged-ness identically; the same
+    rule is applied by ``_recheck_pr_before_retry`` and
+    ``_fetch_pr_state_now``.
+    """
+    merged_field = payload.get("merged")
+    if isinstance(merged_field, bool):
+        return merged_field
+    if "merged_at" not in payload:
+        return None
+    merged_at = payload.get("merged_at")
+    if merged_at is not None and not isinstance(merged_at, str):
+        return None
+    return merged_at is not None
+
+
+def _merge_already_in_progress(error_msg: str) -> bool:
+    """Whether a 405 body says GitHub is already merging this PR.
+
+    GitHub's wording is ``Merge already in progress``.  Matched
+    case-insensitively and without punctuation assumptions so a minor
+    upstream rewording does not silently reinstate the old
+    fail-after-6-seconds behaviour.
+    """
+    lowered = error_msg.lower()
+    return "merge already in progress" in lowered or (
+        "already in progress" in lowered and "merge" in lowered
+    )
 
 
 class AsyncMergeManager:
@@ -1187,6 +1240,108 @@ class AsyncMergeManager:
         return None, None
 
     async def _merge_single_pr(self, pr_info: PullRequestInfo) -> MergeResult:
+        """Merge a single PR, then confirm any failure is real.
+
+        Thin wrapper over :meth:`_merge_single_pr_impl`.  It exists
+        because a reported failure is frequently not one: GitHub
+        auto-merge routinely completes a PR moments after this tool
+        stops waiting for it.  In the 503-PR run analysed in
+        ``docs/BULK_RUN_PERFORMANCE_AUDIT.md``, **21 of the 34 reported
+        failures had in fact merged**, most within two minutes of being
+        reported.
+
+        Wrapping rather than editing the end of ``_merge_single_pr_impl``
+        is deliberate: that method has several early ``return`` paths
+        (permission denied, already merged, conflict handling), and a
+        check placed before its final ``return`` would miss them.
+        """
+        result = await self._merge_single_pr_impl(pr_info)
+        return await self._confirm_failure(pr_info, result)
+
+    async def _confirm_failure(
+        self, pr_info: PullRequestInfo, result: MergeResult
+    ) -> MergeResult:
+        """Re-read a failed PR once and correct the outcome if it landed.
+
+        Costs a single GET, and only for PRs that are about to be
+        reported as failures --- a rounding error against the run's
+        total API budget, in exchange for not telling the user a merged
+        PR failed.
+
+        Best-effort by construction: any error here leaves the original
+        result untouched, because the verification must never be able to
+        turn a reportable failure into a crash.
+        """
+        if result.status != MergeStatus.FAILED:
+            return result
+        if self.preview_mode or self._github_client is None:
+            return result
+        if pr_info.repository_full_name in self._permission_failed_repos:
+            # The token cannot act on this repository, so no merge was
+            # ever dispatched and the PR cannot have landed.  Skipping
+            # also preserves the point of the fast-fail path: one failed
+            # repository must not cost an API call per remaining PR.
+            return result
+
+        try:
+            owner, repo = pr_info.repository_full_name.split("/", 1)
+        except ValueError:
+            return result
+
+        try:
+            refreshed = await self._github_client.get(
+                f"/repos/{owner}/{repo}/pulls/{pr_info.number}"
+            )
+        except asyncio.CancelledError:
+            # Cancellation must propagate; a shutdown in flight is not a
+            # verification failure.
+            raise
+        except Exception as exc:
+            self.log.debug(
+                "Could not verify reported failure for %s: %s", pr_info.html_url, exc
+            )
+            return result
+
+        if not isinstance(refreshed, dict):
+            return result
+
+        # Tri-state: ``None`` means the payload could not tell us.  Treat
+        # it as unknown throughout, so an ambiguous response can neither
+        # invent a merge nor assert the absence of one.
+        merged = _merged_from_payload(refreshed)
+
+        if merged:
+            self.log.info(
+                "Reported failure for %s was stale; the PR merged at %s",
+                pr_info.html_url,
+                refreshed.get("merged_at") or "an unknown time",
+            )
+            self._pr_status(f"✅ Merged: {pr_info.html_url}", level="debug")
+            result.status = MergeStatus.MERGED
+            # The recorded reason described a state that no longer holds.
+            # Keep it as a note rather than an error so the summary does
+            # not show a merged PR carrying a failure message.
+            if result.error:
+                result.warning = f"merged after being reported as: {result.error}"
+                result.error = None
+            pr_info.state = "closed"
+            return result
+
+        if merged is False and refreshed.get("state") == "closed":
+            self.log.info(
+                "Reported failure for %s was stale; the PR is closed unmerged",
+                pr_info.html_url,
+            )
+            result.status = MergeStatus.CLOSED
+            pr_info.state = "closed"
+            return result
+
+        # Either still open, or closed with merged-ness unknown.  Keep the
+        # original failure: reporting CLOSED here would assert "did not
+        # merge" from a value that never said so.
+        return result
+
+    async def _merge_single_pr_impl(self, pr_info: PullRequestInfo) -> MergeResult:
         """
         Merge a single pull request with retry logic.
 
@@ -4357,21 +4512,11 @@ class AsyncMergeManager:
             )
             if isinstance(current_pr_data, dict):
                 current_state = current_pr_data.get("state")
-                merged_field = current_pr_data.get("merged")
-                # Prefer the explicit ``merged`` bool. A trimmed payload
-                # may omit it, so fall back to ``merged_at``: the full REST
-                # object always carries that key (an ISO timestamp when
-                # merged, ``null`` for closed-but-unmerged), matching the
-                # derivation used elsewhere. Only a genuinely absent
-                # ``merged_at`` (and no bool) leaves the state unknown so
-                # an ambiguous closed PR proceeds rather than aborting.
-                current_merged: bool | None
-                if isinstance(merged_field, bool):
-                    current_merged = merged_field
-                elif "merged_at" in current_pr_data:
-                    current_merged = current_pr_data.get("merged_at") is not None
-                else:
-                    current_merged = None
+                # Shared derivation: prefer the explicit ``merged`` bool,
+                # fall back to ``merged_at``, ``None`` when neither is
+                # usable so an ambiguous closed PR proceeds rather than
+                # aborting.  See ``_merged_from_payload``.
+                current_merged: bool | None = _merged_from_payload(current_pr_data)
 
                 if current_state == "closed" and current_merged:
                     self.log.info(
@@ -4420,6 +4565,84 @@ class AsyncMergeManager:
                 f"Failed to refresh PR state for {pr_key}: {refresh_err}",
                 exc_info=True,
             )
+
+    async def _await_in_progress_merge(
+        self, owner: str, repo: str, pr_info: PullRequestInfo, pr_key: str
+    ) -> bool:
+        """Watch a PR GitHub says it is already merging; report success.
+
+        Returns ``True`` when the PR reaches a merged state within
+        :data:`MERGE_IN_PROGRESS_TIMEOUT_SECONDS`, ``False`` otherwise
+        (including when it closes unmerged, which the caller reports).
+
+        The wait is parked, so it holds no concurrency slot.
+        """
+        if self._github_client is None:
+            return False
+        if self._no_wait:
+            return False
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + MERGE_IN_PROGRESS_TIMEOUT_SECONDS
+        if self._run_deadline is not None:
+            deadline = min(deadline, self._run_deadline)
+
+        self.log.info(
+            "GitHub reports a merge already in progress for %s; "
+            "waiting up to %.0fs for it to complete",
+            pr_key,
+            max(0.0, deadline - loop.time()),
+        )
+        self._track_pr_state(pr_info, "waiting")
+        async with self._waiting_lock:
+            self._waiting_prs[pr_key] = deadline
+        try:
+            async with parked():
+                first_poll = True
+                while True:
+                    interval = (
+                        MERGE_IN_PROGRESS_FIRST_POLL_SECONDS
+                        if first_poll
+                        else MERGE_IN_PROGRESS_POLL_SECONDS
+                    )
+                    remaining = max(0.0, deadline - loop.time())
+                    await asyncio.sleep(min(interval, remaining))
+                    try:
+                        refreshed = await self._github_client.get(
+                            f"/repos/{owner}/{repo}/pulls/{pr_info.number}"
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        self.log.debug(
+                            "Failed to poll in-progress merge for %s: %s", pr_key, exc
+                        )
+                        refreshed = None
+                    if isinstance(refreshed, dict):
+                        merged = _merged_from_payload(refreshed)
+                        if merged:
+                            self.log.info("Merge completed for %s", pr_key)
+                            pr_info.state = "closed"
+                            return True
+                        if merged is False and refreshed.get("state") == "closed":
+                            pr_info.state = "closed"
+                            return False
+                        # Unknown merged-ness: keep polling rather than
+                        # concluding the merge did not happen.
+                    # Checked *after* polling, so an already-expired
+                    # deadline (a run-wide ``max_wait`` about to elapse)
+                    # still gets exactly one confirmation rather than
+                    # reporting a failure this method exists to prevent.
+                    if loop.time() >= deadline:
+                        break
+                    first_poll = False
+        finally:
+            async with self._waiting_lock:
+                self._waiting_prs.pop(pr_key, None)
+            self._track_pr_state(pr_info, None)
+
+        self.log.debug("In-progress merge for %s did not complete in time", pr_key)
+        return False
 
     async def _blocked_pr_became_clean(
         self, owner: str, repo: str, pr_info: PullRequestInfo, pr_key: str
@@ -4552,6 +4775,30 @@ class AsyncMergeManager:
                 self.log.debug(
                     f"Stored exception for {pr_key}: {type(e).__name__}: {str(e)[:200]}"
                 )
+
+                # "Merge already in progress" is unambiguous on its own,
+                # so it is matched *before* the 405 branch rather than
+                # inside it.  Gating it on the literal "Method Not
+                # Allowed" text as well would mean an upstream rewording
+                # silently reinstated the fail-after-six-seconds
+                # behaviour this handler exists to remove --- the very
+                # fragility ``_merge_already_in_progress`` guards against.
+                if _merge_already_in_progress(error_msg):
+                    # GitHub has already accepted a merge for this PR
+                    # (typically auto-merge armed earlier in this run)
+                    # and is completing it.  Dispatching again is
+                    # pointless and the previous short backoff --- 3s
+                    # then 6s --- expired well before GitHub finished,
+                    # so these were reported as failures despite
+                    # merging moments later: 4 of the 5 such PRs in
+                    # the run analysed in
+                    # ``docs/BULK_RUN_PERFORMANCE_AUDIT.md`` had
+                    # merged.  Watch for completion instead.
+                    if await self._await_in_progress_merge(
+                        owner, repo, pr_info, pr_key
+                    ):
+                        return True
+                    break
 
                 # Enhanced error handling with specific status code checks
                 if "405" in error_msg and "Method Not Allowed" in error_msg:
@@ -4822,20 +5069,12 @@ class AsyncMergeManager:
         state = pr_data.get("state")
         if not isinstance(state, str):
             return None, None
-        merged = pr_data.get("merged")
-        if not isinstance(merged, bool):
-            # The full PR object always carries ``merged`` and ``merged_at``,
-            # but a proxy or trimmed payload may omit the boolean. Derive it
-            # from ``merged_at`` (an ISO timestamp when merged, ``null``
-            # otherwise) when present rather than degrading a recoverable
-            # payload to unknown; only a genuinely absent ``merged_at`` or an
-            # unexpected type falls through to the conservative default.
-            if "merged_at" not in pr_data:
-                return None, None
-            merged_at = pr_data.get("merged_at")
-            if merged_at is not None and not isinstance(merged_at, str):
-                return None, None
-            merged = merged_at is not None
+        # Shared derivation (see ``_merged_from_payload``): an
+        # unrecoverable payload degrades this call to "unknown" rather
+        # than asserting the PR did not merge.
+        merged = _merged_from_payload(pr_data)
+        if merged is None:
+            return None, None
         return state, merged
 
     async def _is_pr_dirty_now(

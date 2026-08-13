@@ -242,6 +242,40 @@ class _Budget:
         return max(0.0, min(1.0, self.remaining / self.limit))
 
 
+# Approve-specific retry policy.  ``POST .../reviews`` returns transient
+# 500 often enough to matter in bulk runs, but a blanket retry of every
+# POST is unsafe, so this is applied only where duplicate-suppression is
+# possible (see ``approve_pull_request``).
+_APPROVE_MAX_ATTEMPTS = 3
+_APPROVE_RETRY_BASE_DELAY = 2.0
+
+# Server-side statuses worth retrying for an operation that can verify
+# its own effect afterwards.  Note 500 is intentionally *not* in
+# ``_is_retryable_status``: generic retries must not replay arbitrary
+# non-idempotent writes.
+# Statuses the outer approve retry handles.  Deliberately **only** 500:
+# ``_request`` already retries 429/502/503/504 (``_is_retryable_status``)
+# plus transport and rate-limit errors via tenacity, six attempts each.
+# Including those here too would nest the loops --- up to 18 requests and
+# two sets of backoff sleeps for one approval --- which is precisely the
+# API-budget waste this work is trying to remove.  500 is the one status
+# ``_request`` does not retry, because a blanket replay of failed POSTs
+# is unsafe; it is safe *here* only because this call can verify its own
+# effect first (see ``approve_pull_request``).
+_TRANSIENT_SERVER_STATUSES = frozenset({500})
+
+
+def _is_transient_server_error(exc: Exception) -> bool:
+    """Whether ``exc`` is a server-side failure the outer retry should own.
+
+    Anything already covered by ``_request``'s tenacity policy returns
+    ``False`` here: by the time such an exception surfaces it has been
+    retried six times, and trying again adds cost without adding hope.
+    """
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status in _TRANSIENT_SERVER_STATUSES
+
+
 def _is_retryable_status(status: int) -> bool:
     # Treat common transient statuses as retryable.
     return status in (429, 502, 503, 504)
@@ -317,12 +351,6 @@ class GitHubAsync:
     # constructor default and as the upper bound when adaptive tuning ramps
     # concurrency back up after a period of throttling.
     _DEFAULT_MAX_CONCURRENCY = 20
-
-    # Heuristic retained for backwards compatibility with callers that may
-    # reference it.  No longer used: ``_get_recent_error_rate`` now counts
-    # real requests instead of estimating them from the error count, which
-    # made the computed rate a constant.
-    _ESTIMATED_REQUESTS_PER_ERROR = 10
 
     def __init__(
         self,
@@ -865,19 +893,122 @@ class GitHubAsync:
 
         REST: POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews
 
+        This endpoint returns a transient ``500`` with some regularity.
+        ``500`` is deliberately absent from ``_is_retryable_status`` --- a
+        blanket retry of every failed POST is unsafe --- so the retry is
+        handled here, where the operation's semantics are known.
+
+        Crucially, a ``500`` does **not** imply the review was not
+        created: in the run analysed in
+        ``docs/BULK_RUN_PERFORMANCE_AUDIT.md``, 4 of the 6 PRs whose
+        approval "failed" this way went on to merge, which requires the
+        approval to have landed.  So before each *retry* --- and once
+        more after the final attempt --- the review list is re-read, and
+        an approval already present counts as success rather than
+        stacking a duplicate review.  The first attempt skips that check,
+        so the common path costs exactly one request.
+
         Raises:
             PermissionError: If token lacks required permissions
         """
-        try:
-            await self.post(
-                f"/repos/{owner}/{repo}/pulls/{number}/reviews",
-                json={"event": "APPROVE", "body": body},
+        last_exc: Exception | None = None
+        for attempt in range(_APPROVE_MAX_ATTEMPTS):
+            if attempt and await self._has_own_approval(owner, repo, number):
+                self.log.debug(
+                    "Approval for %s/%s#%s already present after a %s; "
+                    "treating as success",
+                    owner,
+                    repo,
+                    number,
+                    "transient error",
+                )
+                return
+            try:
+                await self.post(
+                    f"/repos/{owner}/{repo}/pulls/{number}/reviews",
+                    json={"event": "APPROVE", "body": body},
+                )
+                return
+            except Exception as e:
+                perm_error = self._parse_permission_error(e, "approve", owner, repo)
+                if perm_error:
+                    raise perm_error from e
+                if not _is_transient_server_error(e):
+                    raise
+                last_exc = e
+                if attempt == _APPROVE_MAX_ATTEMPTS - 1:
+                    break
+                delay = _APPROVE_RETRY_BASE_DELAY * (2**attempt)
+                self.log.warning(
+                    "Transient error approving %s/%s#%s (attempt %d/%d); "
+                    "retrying in %.1fs",
+                    owner,
+                    repo,
+                    number,
+                    attempt + 1,
+                    _APPROVE_MAX_ATTEMPTS,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+        # Attempts exhausted.  One last look: the final POST may have
+        # created the review despite reporting failure.
+        if await self._has_own_approval(owner, repo, number):
+            self.log.info(
+                "Approval for %s/%s#%s landed despite a reported error",
+                owner,
+                repo,
+                number,
             )
-        except Exception as e:
-            perm_error = self._parse_permission_error(e, "approve", owner, repo)
-            if perm_error:
-                raise perm_error from e
-            raise
+            return
+        assert last_exc is not None
+        raise last_exc
+
+    async def _has_own_approval(self, owner: str, repo: str, number: int) -> bool:
+        """Whether the authenticated user already has an APPROVED review.
+
+        Paginates: a single default page caps at 30 reviews, and missing
+        an existing approval on a busy PR would defeat the
+        duplicate-suppression this exists for and post another review.
+        """
+        try:
+            login = await self.get_authenticated_user_login()
+            if not login:
+                # The lookup returns ``None`` on failure rather than
+                # raising.  Without this guard a review carrying
+                # ``user: null`` yields ``None == None`` and reports an
+                # approval that does not exist --- which would stop
+                # ``approve_pull_request`` retrying and let it report
+                # success having approved nothing.
+                self.log.debug(
+                    "Cannot confirm existing approval on %s/%s#%s: "
+                    "authenticated user unknown",
+                    owner,
+                    repo,
+                    number,
+                )
+                return False
+            async for page in self.get_paginated(
+                f"/repos/{owner}/{repo}/pulls/{number}/reviews",
+                per_page=100,
+            ):
+                if not isinstance(page, list):
+                    continue
+                for review in page:
+                    if not isinstance(review, dict):
+                        continue
+                    if review.get("state") != "APPROVED":
+                        continue
+                    user = review.get("user") or {}
+                    reviewer = user.get("login")
+                    if reviewer and reviewer == login:
+                        return True
+        except Exception as exc:
+            self.log.debug(
+                "Could not read reviews for %s/%s#%s: %s", owner, repo, number, exc
+            )
+            return False
+        return False
 
     async def merge_pull_request(
         self, owner: str, repo: str, number: int, merge_method: str = "merge"
