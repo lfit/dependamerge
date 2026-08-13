@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -76,6 +77,12 @@ class RetryableError(Exception):
     """Internal exception to signal tenacity that a retry should occur."""
 
 
+# Ceiling of tenacity's ``wait_random_exponential`` on ``_request``.  Named
+# so the secondary-rate-limit path can subtract it from a ``Retry-After``
+# sleep rather than stacking a full sleep on top of the retry backoff.
+_TENACITY_MAX_BACKOFF = 10.0
+
+
 def _now() -> float:
     return time.time()
 
@@ -110,6 +117,129 @@ def _is_transient_graphql_error(errors: Any) -> bool:
             "network timeout",
         ]
     )
+
+
+class _ResizableSemaphore:
+    """A semaphore whose effective capacity can change at runtime.
+
+    Backed by a single fixed-capacity :class:`asyncio.Semaphore` sized to
+    ``maximum``.  Capacity is *reduced* by acquiring "ballast" permits and
+    holding them, and restored by releasing them.
+
+    This exists because the obvious implementation --- replacing
+    ``self.semaphore`` with a smaller ``asyncio.Semaphore`` --- is unsafe.
+    Tasks that acquired the old object release back into it, while new
+    arrivals see a fresh object with its full count unclaimed, so the cap
+    is transiently violated by up to the old capacity at exactly the
+    moment the client is trying to back off.  Holding ballast keeps one
+    object for the process lifetime, so every acquire/release pairs up.
+
+    ``resize`` never blocks the caller: acquiring ballast may have to wait
+    for in-flight requests to finish, so it runs in a background task.
+    Shrinking is therefore best-effort and eventually consistent, which is
+    the correct semantic for a throttle --- it takes effect as capacity
+    frees up rather than cancelling work already in flight.
+    """
+
+    def __init__(self, capacity: int, maximum: int) -> None:
+        if maximum < 1:
+            raise ValueError("maximum must be >= 1")
+        self._maximum = maximum
+        self._sem = asyncio.Semaphore(maximum)
+        self._ballast = 0
+        self._desired_ballast = max(0, maximum - max(1, min(capacity, maximum)))
+        self._lock = asyncio.Lock()
+        self._task: asyncio.Task[None] | None = None
+
+    @property
+    def capacity(self) -> int:
+        """Effective capacity once any pending resize has settled."""
+        return self._maximum - self._desired_ballast
+
+    def resize(self, capacity: int) -> None:
+        """Request a new effective capacity.  Returns immediately.
+
+        Safe to call without a running event loop: the desired capacity is
+        recorded and applied by the next call made from inside one.  The
+        production caller (``_request``) always runs in a loop; tolerating
+        its absence keeps the tuning logic testable in isolation and stops
+        a stray call from raising inside a best-effort code path.
+        """
+        capacity = max(1, min(capacity, self._maximum))
+        desired = self._maximum - capacity
+        if desired == self._desired_ballast:
+            return
+        self._desired_ballast = desired
+        if self._task is None or self._task.done():
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop; ``_desired_ballast`` is recorded and
+                # will be honoured by the next resize or explicit settle.
+                self._task = None
+                return
+            self._task = asyncio.create_task(
+                self._settle(), name="github-semaphore-resize"
+            )
+
+    async def _settle(self) -> None:
+        async with self._lock:
+            while self._ballast != self._desired_ballast:
+                if self._ballast < self._desired_ballast:
+                    await self._sem.acquire()
+                    self._ballast += 1
+                else:
+                    self._sem.release()
+                    self._ballast -= 1
+
+    async def aclose(self) -> None:
+        """Cancel any in-flight resize so the loop can shut down cleanly."""
+        task = self._task
+        self._task = None
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def __aenter__(self) -> None:
+        await self._sem.acquire()
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        self._sem.release()
+
+
+class _Budget:
+    """Latest known rate-limit state for one GitHub rate-limit resource.
+
+    REST (``core``), GraphQL (``graphql``) and ``search`` have independent
+    budgets.  They must be tracked separately: GraphQL responses report
+    *points* remaining against a 5000-point budget, so folding them into
+    the same counter as REST request budget makes a healthy GraphQL
+    allowance mask an exhausted REST one, and vice versa.
+    """
+
+    __slots__ = ("remaining", "limit", "reset_epoch", "updated_at")
+
+    def __init__(
+        self, remaining: int, limit: int, reset_epoch: float | None, updated_at: float
+    ) -> None:
+        self.remaining = remaining
+        self.limit = limit
+        self.reset_epoch = reset_epoch
+        self.updated_at = updated_at
+
+    def headroom(self, now: float) -> float:
+        """Fraction of the budget still available, in ``[0.0, 1.0]``.
+
+        Past its reset the budget has replenished, so report full
+        headroom rather than a stale near-zero value that would keep the
+        client throttled long after the pressure ended.
+        """
+        if self.reset_epoch is not None and now >= self.reset_epoch:
+            return 1.0
+        if self.limit <= 0:
+            return 1.0
+        return max(0.0, min(1.0, self.remaining / self.limit))
 
 
 def _is_retryable_status(status: int) -> bool:
@@ -188,16 +318,10 @@ class GitHubAsync:
     # concurrency back up after a period of throttling.
     _DEFAULT_MAX_CONCURRENCY = 20
 
-    # Heuristic used by ``_get_recent_error_rate`` to estimate how many
-    # requests accompanied each observed error within the error window.
-    # We do not track total request counts, only errors, so we assume each
-    # error corresponds to roughly this many requests. With the current
-    # value of 10 the estimate is errors / (errors * 10), so any window
-    # containing at least one error yields an error_rate of ~0.1. A smaller
-    # number raises that estimate and reacts to errors more aggressively,
-    # while a larger number lowers it and tolerates more errors before
-    # throttling. Tune this if observed throttling behaviour is too eager
-    # or too lax.
+    # Heuristic retained for backwards compatibility with callers that may
+    # reference it.  No longer used: ``_get_recent_error_rate`` now counts
+    # real requests instead of estimating them from the error count, which
+    # made the computed rate a constant.
     _ESTIMATED_REQUESTS_PER_ERROR = 10
 
     def __init__(
@@ -246,7 +370,10 @@ class GitHubAsync:
         # a period of throttling, mirroring how ``_base_rps`` bounds the RPS
         # ramp-up.
         self._base_max_concurrency = max_concurrency
-        self.semaphore = asyncio.Semaphore(self._max_concurrency)
+        # Sized to the base ceiling and never replaced; throttling reduces
+        # the *effective* capacity by holding ballast permits.  See
+        # ``_ResizableSemaphore`` for why swapping the object is unsafe.
+        self.semaphore = _ResizableSemaphore(max_concurrency, max_concurrency)
         self._base_rps = requests_per_second
         self._current_rps = requests_per_second
         self.limiter = AsyncLimiter(max_rate=self._current_rps, time_period=1.0)
@@ -257,14 +384,26 @@ class GitHubAsync:
         self.on_rate_limit_cleared = on_rate_limit_cleared
         self.on_metrics = on_metrics
 
-        # Error tracking for adaptive throttling
+        # Adaptive throttling state.  ``_request_history`` records the
+        # timestamp of every completed request and ``_error_history`` the
+        # subset that failed, so the error *rate* is a real ratio rather
+        # than a constant derived from a guessed request count.
         self._error_history: list[
             tuple[float, str]
         ] = []  # List of (timestamp, error_type) tuples
+        self._request_history: list[float] = []
         self._error_window = 300  # 5 minutes
         self._last_retry_after: float | None = None
         self._adaptive_delay = 0.0
         self._last_adaptive_update: float | None = None
+        # Per-resource rate-limit budgets, keyed by ``X-RateLimit-Resource``
+        # (``core``, ``graphql``, ``search``).  Kept apart because they are
+        # independent allowances; see ``_Budget``.
+        self._budgets: dict[str, _Budget] = {}
+        # Consecutive healthy responses observed since the last throttle
+        # event.  Ramp-up requires a sustained run rather than a single
+        # lucky response, so a client under pressure does not oscillate.
+        self._healthy_streak = 0
 
         # Cache for the authenticated user's login (never changes during a session)
         self._authenticated_user_login: str | None = None
@@ -321,7 +460,8 @@ class GitHubAsync:
         await self.aclose()
 
     async def aclose(self) -> None:
-        """Close underlying httpx client."""
+        """Close underlying httpx client and stop any pending resize."""
+        await self.semaphore.aclose()
         await self._client.aclose()
 
     def _parse_permission_error(
@@ -483,7 +623,7 @@ class GitHubAsync:
     @retry(
         reraise=True,
         stop=stop_after_attempt(6),
-        wait=wait_random_exponential(multiplier=0.5, max=10.0),
+        wait=wait_random_exponential(multiplier=0.5, max=_TENACITY_MAX_BACKOFF),
         retry=retry_if_exception_type(
             (
                 httpx.TransportError,
@@ -519,29 +659,37 @@ class GitHubAsync:
             # Secondary rate limit (abuse detection)
             if _is_secondary_rate_limited(body_text):
                 retry_after = r.headers.get("Retry-After")
+                delay: float | None = None
                 if retry_after:
-                    # Sleep the advised duration and signal retry
                     try:
                         delay = float(retry_after)
                         self._last_retry_after = delay
-                        # Apply adaptive throttling based on Retry-After
                         self._apply_retry_after_throttling(delay)
-                    except Exception:
-                        delay = 5.0
-                    self.log.warning(
-                        "Secondary rate limit hit. Sleeping for %ss", delay
-                    )
-                    await asyncio.sleep(max(0.0, delay))
-                else:
-                    # Fallback wait when no explicit Retry-After
-                    delay = 10.0
-                    self.log.warning(
-                        "Secondary rate limit hit. Sleeping fallback %ss", delay
-                    )
-                    await asyncio.sleep(delay)
-
+                    except (TypeError, ValueError):
+                        delay = None
                 # Track error for adaptive throttling
                 self._track_error("secondary_rate_limit")
+                if delay is not None:
+                    # GitHub told us exactly how long to wait.  Sleeping
+                    # here *and* letting tenacity back off on top would
+                    # stack the two; hand tenacity a pre-slept signal
+                    # instead by waiting the advised time and then
+                    # raising, which tenacity adds its own (smaller,
+                    # jittered) delay to.  Keep that combined wait honest
+                    # by subtracting tenacity's cap from our sleep.
+                    effective = max(0.0, delay - _TENACITY_MAX_BACKOFF)
+                    self.log.warning(
+                        "Secondary rate limit hit. Retry-After=%ss, sleeping %ss",
+                        delay,
+                        effective,
+                    )
+                    if effective:
+                        await asyncio.sleep(effective)
+                else:
+                    self.log.warning(
+                        "Secondary rate limit hit without Retry-After; "
+                        "deferring to retry backoff"
+                    )
                 raise SecondaryRateLimitError("Secondary rate limit encountered")
 
             # Primary rate limit exhausted
@@ -611,49 +759,18 @@ class GitHubAsync:
         # All other errors -> raise
         r.raise_for_status()
 
-        # Apply adaptive delay based on recent error patterns
-        if self._adaptive_delay > 0:
-            await asyncio.sleep(self._adaptive_delay)
+        self._track_request()
 
-        # Dynamic concurrency and RPS tuning based on latest headers and error history
+        # Pace the next request when recent Retry-After headers indicated
+        # sustained pressure.  Decays with time (see ``_current_adaptive_delay``).
+        delay = self._current_adaptive_delay()
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+        # Dynamic concurrency and RPS tuning from the latest headers.
         try:
-            remaining, limit, reset_epoch = self._parse_rate_limit_headers(r)
-            error_rate = self._get_recent_error_rate()
-
-            # More aggressive throttling if we have recent errors or low rate limit remaining
-            if limit > 0:
-                remaining_ratio = remaining / max(1, limit)
-                should_throttle = remaining_ratio < 0.1 or error_rate > 0.1
-
-                if should_throttle:
-                    # Reduce concurrency but keep a floor of 2
-                    throttle_factor = 0.3 if error_rate > 0.2 else 0.5
-                    new_concurrency = max(
-                        2, int(self._max_concurrency * throttle_factor)
-                    )
-                    if new_concurrency != self._max_concurrency:
-                        self._max_concurrency = new_concurrency
-                        self.semaphore = asyncio.Semaphore(self._max_concurrency)
-
-                    # Reduce RPS but keep a floor of 1
-                    new_rps = max(1.0, self._current_rps * throttle_factor)
-                    if abs(new_rps - self._current_rps) >= 0.5:
-                        self._current_rps = new_rps
-                        self.limiter = AsyncLimiter(
-                            max_rate=self._current_rps, time_period=1.0
-                        )
-            else:
-                # Gradually increase limits when healthy, up to configured base values
-                if self._max_concurrency < self._base_max_concurrency:
-                    self._max_concurrency = min(
-                        self._base_max_concurrency, self._max_concurrency + 1
-                    )
-                    self.semaphore = asyncio.Semaphore(self._max_concurrency)
-                if self._current_rps < self._base_rps:
-                    self._current_rps = min(self._base_rps, self._current_rps + 1.0)
-                    self.limiter = AsyncLimiter(
-                        max_rate=self._current_rps, time_period=1.0
-                    )
+            self._record_budget(r)
+            self._tune(self._headroom())
         except Exception as e:
             # Tuning is best-effort; never fail the request on tuning errors.
             self.log.debug("Adaptive concurrency tuning skipped: %s", e)
@@ -2653,41 +2770,179 @@ class GitHubAsync:
         cutoff = current_time - self._error_window
         self._error_history = [(t, e) for t, e in self._error_history if t > cutoff]
 
-    def _get_recent_error_rate(self) -> float:
-        """Calculate the error rate in the recent window."""
-        if not self._error_history:
-            return 0.0
+    def _track_request(self) -> None:
+        """Record a completed request so the error *rate* has a denominator."""
+        current_time = _now()
+        self._request_history.append(current_time)
+        cutoff = current_time - self._error_window
+        if self._request_history[0] <= cutoff:
+            self._request_history = [t for t in self._request_history if t > cutoff]
 
+    def _get_recent_error_rate(self) -> float:
+        """Errors as a fraction of all requests in the recent window.
+
+        Previously this divided the error count by an *estimate* derived
+        from the same error count (``errors / (errors * 10)``), which is
+        the constant ``0.1`` whenever any error exists and ``0.0``
+        otherwise.  Both call sites compared it against ``0.1`` and
+        ``0.2``, so the error signal could never fire.  Counting requests
+        as well gives a real ratio.
+        """
         current_time = _now()
         cutoff = current_time - self._error_window
-        recent_errors = [e for t, e in self._error_history if t > cutoff]
+        errors = sum(1 for t, _ in self._error_history if t > cutoff)
+        if not errors:
+            return 0.0
+        requests = sum(1 for t in self._request_history if t > cutoff)
+        # Errors are not recorded in ``_request_history`` (they raise
+        # before ``_track_request``), so the denominator is the total of
+        # both.  Guard against a window holding only errors.
+        total = requests + errors
+        return errors / total if total else 0.0
 
-        # Estimate request rate (very rough heuristic): we only track
-        # errors, not total requests, so assume each error accompanied
-        # ``_ESTIMATED_REQUESTS_PER_ERROR`` requests in the window. See the
-        # constant's definition for the rationale and tuning guidance.
-        estimated_requests = max(
-            len(recent_errors) * self._ESTIMATED_REQUESTS_PER_ERROR, 1
+    def _record_budget(self, r: httpx.Response) -> None:
+        """Store the rate-limit state carried by a response, per resource."""
+        remaining_hdr = r.headers.get("X-RateLimit-Remaining")
+        limit_hdr = r.headers.get("X-RateLimit-Limit")
+        if remaining_hdr is None or limit_hdr is None:
+            # No rate-limit headers: nothing reliable to learn.  Notably we
+            # do *not* fall back to defaults here --- the previous code
+            # defaulted to remaining=1/limit=60, a headroom of 0.017, which
+            # tripped the throttle on any response lacking headers.
+            return
+        try:
+            remaining = int(remaining_hdr)
+            limit = int(limit_hdr)
+        except (TypeError, ValueError):
+            return
+        reset = r.headers.get("X-RateLimit-Reset")
+        try:
+            reset_epoch = float(reset) if reset else None
+        except (TypeError, ValueError):
+            reset_epoch = None
+        resource = r.headers.get("X-RateLimit-Resource") or "core"
+        self._budgets[resource] = _Budget(remaining, limit, reset_epoch, _now())
+
+    def _headroom(self) -> float | None:
+        """Smallest remaining fraction across all known budgets.
+
+        The limiter and semaphore are shared across REST and GraphQL, so
+        the binding constraint is whichever resource is most depleted.
+        Returns ``None`` when nothing is known, meaning "do not tune".
+        """
+        if not self._budgets:
+            return None
+        now = _now()
+        return min(b.headroom(now) for b in self._budgets.values())
+
+    # Ramp-up requires this many consecutive healthy responses.  Recovery
+    # is deliberately slower than back-off: one lucky response should not
+    # undo a throttle, but a sustained healthy run must be able to.
+    _RAMP_UP_STREAK = 20
+
+    def _tune(self, headroom: float | None) -> None:
+        """Adjust concurrency and RPS from budget headroom and error rate.
+
+        Throttling down and ramping back up are the two branches of a
+        single condition.  In the previous implementation the ramp-up
+        branch sat in the ``else`` of ``if limit > 0:`` --- unreachable,
+        because GitHub always reports a positive limit.  Back-off was
+        therefore permanent for the process lifetime: a long run would
+        decay to the floor of 2 concurrent / 1.0 rps and stay there.
+        """
+        if headroom is None:
+            return
+        error_rate = self._get_recent_error_rate()
+        should_throttle = headroom < 0.1 or error_rate > 0.1
+
+        if should_throttle:
+            self._healthy_streak = 0
+            factor = 0.3 if error_rate > 0.2 else 0.5
+            new_concurrency = max(2, int(self._max_concurrency * factor))
+            new_rps = max(1.0, self._current_rps * factor)
+            changed = False
+            if new_concurrency != self._max_concurrency:
+                self._max_concurrency = new_concurrency
+                self.semaphore.resize(new_concurrency)
+                changed = True
+            if abs(new_rps - self._current_rps) >= 0.5:
+                self._current_rps = new_rps
+                self.limiter = AsyncLimiter(max_rate=new_rps, time_period=1.0)
+                changed = True
+            if changed:
+                self.log.warning(
+                    "Throttling down: headroom=%.3f error_rate=%.3f "
+                    "-> concurrency=%d rps=%.1f",
+                    headroom,
+                    error_rate,
+                    self._max_concurrency,
+                    self._current_rps,
+                )
+            return
+
+        # Healthy.  Ramp back toward the configured base values.
+        at_base = (
+            self._max_concurrency >= self._base_max_concurrency
+            and self._current_rps >= self._base_rps
         )
-        return len(recent_errors) / estimated_requests
+        if at_base:
+            self._healthy_streak = 0
+            return
+        self._healthy_streak += 1
+        if self._healthy_streak < self._RAMP_UP_STREAK:
+            return
+        self._healthy_streak = 0
+        if self._max_concurrency < self._base_max_concurrency:
+            self._max_concurrency = min(
+                self._base_max_concurrency, self._max_concurrency + 1
+            )
+            self.semaphore.resize(self._max_concurrency)
+        if self._current_rps < self._base_rps:
+            self._current_rps = min(self._base_rps, self._current_rps + 1.0)
+            self.limiter = AsyncLimiter(max_rate=self._current_rps, time_period=1.0)
+        self.log.info(
+            "Recovering: headroom=%.3f -> concurrency=%d rps=%.1f",
+            headroom,
+            self._max_concurrency,
+            self._current_rps,
+        )
+
+    # Adaptive delay decays to zero over this many seconds after the last
+    # Retry-After observation.
+    _ADAPTIVE_DELAY_DECAY_SECONDS = 120.0
+
+    def _current_adaptive_delay(self) -> float:
+        """The pacing delay to apply right now, decayed by elapsed time.
+
+        The decay used to live inside ``_apply_retry_after_throttling``,
+        so it only ran when *another* ``Retry-After`` arrived.  A single
+        long ``Retry-After`` therefore pinned a delay --- up to 5 s --- on
+        every subsequent successful request for the rest of the run.  At
+        roughly 10 calls per PR that is around 50 s of pure sleeping per
+        PR.  Decaying on read makes the delay self-clearing.
+        """
+        if self._adaptive_delay <= 0 or self._last_adaptive_update is None:
+            return 0.0
+        elapsed = _now() - self._last_adaptive_update
+        if elapsed >= self._ADAPTIVE_DELAY_DECAY_SECONDS:
+            self._adaptive_delay = 0.0
+            return 0.0
+        remaining = 1.0 - (elapsed / self._ADAPTIVE_DELAY_DECAY_SECONDS)
+        return self._adaptive_delay * remaining
 
     def _apply_retry_after_throttling(self, retry_after_seconds: float) -> None:
-        """Apply adaptive throttling based on Retry-After header values."""
-        # If we're getting Retry-After frequently, add adaptive delay
+        """Set the pacing delay implied by a ``Retry-After`` header."""
         if retry_after_seconds > 30:
             # Long retry-after suggests we're hitting limits hard
-            self._adaptive_delay = min(5.0, retry_after_seconds * 0.1)
+            delay = min(5.0, retry_after_seconds * 0.1)
         elif retry_after_seconds > 10:
             # Medium retry-after suggests moderate pressure
-            self._adaptive_delay = min(2.0, retry_after_seconds * 0.05)
+            delay = min(2.0, retry_after_seconds * 0.05)
         else:
             # Short retry-after is normal, minimal delay
-            self._adaptive_delay = min(1.0, retry_after_seconds * 0.02)
+            delay = min(1.0, retry_after_seconds * 0.02)
 
-        # Gradually reduce adaptive delay over time
-        if self._last_adaptive_update is not None:
-            time_since_update = _now() - self._last_adaptive_update
-            if time_since_update > 60:  # Reduce delay after 1 minute
-                self._adaptive_delay *= 0.8
-
+        # Keep the strongest signal currently in force rather than letting
+        # a mild one reset a severe one that has not yet decayed.
+        self._adaptive_delay = max(delay, self._current_adaptive_delay())
         self._last_adaptive_update = _now()
