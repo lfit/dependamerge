@@ -42,6 +42,7 @@ from .github_service import GitHubService
 from .models import ComparisonResult, PullRequestInfo
 from .netrc import NetrcParseError, resolve_gerrit_credentials
 from .output_utils import log_and_print
+from .pr_poller import PullRequestStatePoller
 from .progress_tracker import MergeProgressTracker
 from .slot_lease import holding_slot, parked
 
@@ -304,6 +305,7 @@ class AsyncMergeManager:
         self._merge_semaphore = asyncio.Semaphore(concurrency)
         self._results: list[MergeResult] = []
         self._github_client: GitHubAsync | None = None
+        self._pr_poller: PullRequestStatePoller | None = None
         self._github_service: GitHubService | None = None
         self._copilot_handler: CopilotCommentHandler | None = None
         # Reuse the progress tracker's Rich Console (when one is
@@ -424,6 +426,12 @@ class AsyncMergeManager:
         self._github_client = GitHubAsync(token=self.token)
         await self._github_client.__aenter__()
 
+        # Coalesces the wait loops' per-PR state reads into batched
+        # GraphQL queries.  See ``pr_poller`` for why: unbatched, polling
+        # costs 6 requests/min per parked PR, so ~14 parked PRs consume
+        # the entire REST budget doing nothing but asking for status.
+        self._pr_poller = PullRequestStatePoller(self._github_client, log=self.log)
+
         self._github_service = GitHubService(token=self.token)
 
         # Initialize Copilot handler if dismissal is enabled
@@ -440,6 +448,12 @@ class AsyncMergeManager:
             await self._github_service.close()
         if self._github_client:
             await self._github_client.__aexit__(exc_type, exc_val, exc_tb)
+        # Drop the poller and client together: the poller holds the now
+        # closed client, so leaving it in place would route any later
+        # ``_fetch_pr_state`` call into a use-after-close instead of the
+        # direct-read fallback that method documents.
+        self._pr_poller = None
+        self._github_client = None
 
     async def merge_prs_parallel(
         self,
@@ -4540,15 +4554,35 @@ class AsyncMergeManager:
             )
         return None
 
+    async def _fetch_pr_state(
+        self, owner: str, repo: str, number: int
+    ) -> dict[str, Any] | list[dict[str, Any]] | None:
+        """Read one PR's state, batched with any concurrent reads.
+
+        Routes through :class:`~dependamerge.pr_poller.PullRequestStatePoller`
+        so the wait loops' polling costs one GraphQL query per tick for the
+        whole run rather than one REST request per parked PR --- the
+        difference between ~6 and ~360 calls/minute at 60 parked PRs.  See
+        ``docs/BULK_RUN_PERFORMANCE_AUDIT.md`` §2.1.
+
+        Falls back to a direct REST read when no poller is configured,
+        which is the case for a manager used outside its async context
+        manager (notably unit tests).  The returned shape is identical
+        either way.
+        """
+        if self._pr_poller is not None:
+            return await self._pr_poller.fetch(owner, repo, number)
+        if self._github_client is None:
+            return None
+        return await self._github_client.get(f"/repos/{owner}/{repo}/pulls/{number}")
+
     async def _refresh_pr_mergeable(
         self, owner: str, repo: str, pr_info: PullRequestInfo, pr_key: str
     ) -> None:
         """Best-effort refresh of ``pr_info`` mergeable fields from the API."""
         try:
             if self._github_client:
-                refreshed = await self._github_client.get(
-                    f"/repos/{owner}/{repo}/pulls/{pr_info.number}"
-                )
+                refreshed = await self._fetch_pr_state(owner, repo, pr_info.number)
                 if isinstance(refreshed, dict):
                     pr_info.mergeable = refreshed.get("mergeable")
                     pr_info.mergeable_state = refreshed.get("mergeable_state")
@@ -4608,8 +4642,8 @@ class AsyncMergeManager:
                     remaining = max(0.0, deadline - loop.time())
                     await asyncio.sleep(min(interval, remaining))
                     try:
-                        refreshed = await self._github_client.get(
-                            f"/repos/{owner}/{repo}/pulls/{pr_info.number}"
+                        refreshed = await self._fetch_pr_state(
+                            owner, repo, pr_info.number
                         )
                     except asyncio.CancelledError:
                         raise
@@ -5195,9 +5229,7 @@ class AsyncMergeManager:
 
         while True:
             try:
-                data = await self._github_client.get(
-                    f"/repos/{owner}/{repo}/pulls/{pr_info.number}"
-                )
+                data = await self._fetch_pr_state(owner, repo, pr_info.number)
             except Exception as exc:
                 self.log.debug(
                     "Mergeability refresh failed for %s/%s#%s: %s",
@@ -5330,9 +5362,6 @@ class AsyncMergeManager:
         # PR's wait can push the whole run past ``max_wait``.
         if self._run_deadline is not None:
             deadline = min(deadline, self._run_deadline)
-        # Local alias so the type checker can narrow
-        # ``self._github_client`` across the await boundary.
-        wait_client = self._github_client
 
         async with self._waiting_lock:
             self._waiting_prs[pr_key] = deadline
@@ -5376,8 +5405,8 @@ class AsyncMergeManager:
                     remaining = max(0.0, deadline - loop.time())
                     await asyncio.sleep(min(interval, remaining))
                     try:
-                        refreshed_wait = await wait_client.get(
-                            f"/repos/{owner}/{repo}/pulls/{pr_info.number}"
+                        refreshed_wait = await self._fetch_pr_state(
+                            owner, repo, pr_info.number
                         )
                     except Exception as wait_exc:
                         self.log.debug(
