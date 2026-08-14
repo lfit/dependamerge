@@ -798,7 +798,9 @@ def _validate_automation_author(ctx: _MergeContext) -> None:
         return
 
     if ctx.override:
-        console.print("Override SHA validated. Proceeding with non-automation PR merge.")
+        console.print(
+            "Override SHA validated. Proceeding with non-automation PR merge."
+        )
         console.print(
             "ℹ️ --include-human-prs is the documented way to authorize "
             "human-authored PRs; --override remains supported.",
