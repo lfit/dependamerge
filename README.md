@@ -742,6 +742,16 @@ dependamerge merge https://github.com/owner/repo/pull/123 \
   merge)
 - `--no-fix`: Disable automatic fixing of out-of-date branches
   (default: automatic fixing enabled)
+- `--no-fix-semantic-title`: Disable repair of automation PRs whose title
+  differs from their single commit's subject. Dependabot shortens the commit
+  subject by dropping the `from <old> to <new>` fragment while the title keeps
+  it, which permanently fails a `Semantic Pull Request` check configured with
+  `validateSingleCommitMatchesPrTitle`. By default `dependamerge` sets the
+  title to the commit subject, and GitHub's `edited` event re-runs the check.
+  Three conditions gate the repair: that check is the sole failure, the PR has
+  one commit, and the two strings differ by the elided fragment alone. A title
+  differing by *version* signals genuine drift, which `dependamerge` leaves for
+  the check to reject.
 - `--dismiss-copilot`: Automatically resolve unresolved GitHub Copilot reviews
   (dismissal + thread resolution)
 - `--force TEXT`: Override level for bypassing safety checks - `none` (default),

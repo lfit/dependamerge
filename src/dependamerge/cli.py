@@ -415,6 +415,9 @@ class _MergeContext:
     netrc_optional: bool
     github2gerrit_mode: str
     include_human_prs: bool = False
+    # Optional behaviour flag; defaulted so a context can be built
+    # without every construction site opting in explicitly.
+    fix_semantic_title: bool = True
     rebase_local: bool = True
     # Dry-run: perform the full analysis and preview but never merge,
     # approve, rebase, or close anything.  Because no write occurs, the
@@ -953,6 +956,7 @@ def _run_parallel_merge(
             max_retries=MAX_RETRIES,
             concurrency=concurrency,
             fix_out_of_date=not ctx.no_fix,
+            fix_semantic_title=ctx.fix_semantic_title,
             merge_timeout=ctx.merge_timeout,
             progress_tracker=ctx.progress_tracker,
             preview_mode=preview,
@@ -2508,6 +2512,18 @@ def merge(
         "--no-fix",
         help="Do not attempt to automatically fix out-of-date branches",
     ),
+    fix_semantic_title: bool = typer.Option(
+        True,
+        "--fix-semantic-title/--no-fix-semantic-title",
+        help=(
+            "Repair an automation PR whose title differs from its single "
+            "commit's subject, which permanently fails a semantic pull "
+            "request check. The title is set to the commit subject, and "
+            "GitHub's edited event re-runs the check. Only applied when "
+            "that check is the sole failure and the difference is an "
+            "elided version fragment. Default: enabled."
+        ),
+    ),
     rebase_local: bool = typer.Option(
         True,
         "--rebase-local/--no-rebase-local",
@@ -2854,6 +2870,7 @@ def merge(
             token=token,
             override=override,
             no_fix=no_fix,
+            fix_semantic_title=fix_semantic_title,
             merge_timeout=merge_timeout,
             show_progress=show_progress,
             debug_matching=debug_matching,
@@ -2922,6 +2939,7 @@ def merge(
             token=token,
             override=override,
             no_fix=no_fix,
+            fix_semantic_title=fix_semantic_title,
             merge_timeout=merge_timeout,
             show_progress=show_progress,
             debug_matching=debug_matching,
@@ -2990,6 +3008,7 @@ def merge(
         token=token,
         override=override,
         no_fix=no_fix,
+        fix_semantic_title=fix_semantic_title,
         merge_timeout=merge_timeout,
         show_progress=show_progress,
         debug_matching=debug_matching,
