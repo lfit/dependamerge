@@ -1144,18 +1144,19 @@ Note: The pytest hook runs automatically on every commit to ensure code quality.
 ### Code Quality
 
 ```bash
-# Format (Black)
-uv run black src tests
+# Format
+uv run ruff format src tests
 
-# Lint (Flake8 – still present)
-uv run flake8 src tests
+# Lint
+uv run ruff check src tests
 
 # Type checking
 uv run mypy src
-
-# (Optional) Ruff (if/when added)
-# uv run ruff check .
 ```
+
+`pyproject.toml` pins the `ruff` version to match the `ruff-pre-commit`
+rev in `.pre-commit-config.yaml`, so these commands produce the same
+result as the hooks and CI.
 
 ## Contributing
 
