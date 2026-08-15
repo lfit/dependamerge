@@ -3,13 +3,26 @@
 
 # Merge Orchestration Engine — Design
 
-Package: `src/dependamerge/engine/`
+Package: **removed**. This document survives for the analysis in
+[Motivation](#motivation), which still describes the system accurately
+and drove the changes listed below.
 
-Status: **Phase 1 landed standalone; Phase 2 (park-aware slots) wired
-into the production path via `slot_lease.py`.** The engine package
-itself remains standalone; Phase 2 ports its central scheduling
-semantic — waiting holds no concurrency slot — into the legacy
-orchestration directly (see [Migration plan](#migration-plan)).
+Status: **superseded and deleted.** The `src/dependamerge/engine/`
+package was never imported by `src/` — it existed alongside the
+production path rather than replacing it. Two useful semantics came out
+of it, and both now live elsewhere:
+
+- **Waiting holds no concurrency slot** — ported to `slot_lease.py`,
+  which the merge path uses.
+- **Centralised polling of parked work** — superseded by
+  `pr_poller.py`. The engine's `Reconciler` polled one GET per waiting
+  PR per tick (its own docstring said so), which is precisely the cost
+  the batched poller removed; wiring it in would have preserved the
+  problem rather than fixing it.
+
+Rather than carry the package, its tests and the `ladder`/`model`
+abstractions as a third option nobody was choosing between, this change
+deletes them. See `docs/BULK_RUN_PERFORMANCE_AUDIT.md` §3 (P2.7).
 
 ## Motivation
 

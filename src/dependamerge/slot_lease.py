@@ -4,7 +4,7 @@
 """Park-aware concurrency slots for the production merge path.
 
 This ports the merge engine's core scheduling semantic (see
-``docs/MERGE_ENGINE_DESIGN.md`` and ``engine/scheduler.py``) to the
+``docs/MERGE_ENGINE_DESIGN.md``) to the
 legacy orchestration without decomposing ``_merge_single_pr`` into
 engine phases: **a concurrency slot is held only while a PR is doing
 active work; a PR waiting on an external event (a dependabot rebase,
