@@ -450,6 +450,12 @@ class GitHubAsync:
         self._branch_protection_cache: dict[str, dict[str, Any]] = {}
         self._requires_signatures_cache: dict[str, bool] = {}
         self._requires_strict_checks_cache: dict[str, bool] = {}
+        # Short-lived memo for ``analyze_block_reason``: keyed by
+        # ``(owner, repo, number, head_sha)`` → ``(cached_at, reason)``.
+        # See ``_BLOCK_REASON_TTL_SECONDS`` for why it expires quickly.
+        self._block_reason_cache: dict[
+            tuple[str, str, int, str], tuple[float, str]
+        ] = {}
 
         # Cache for the token's OAuth scopes.  ``_token_scopes_fetched``
         # distinguishes "not looked up yet" from "looked up, but this token
@@ -2555,6 +2561,21 @@ class GitHubAsync:
                 return behind
         return None
 
+    # How long an ``analyze_block_reason`` result stays usable.
+    #
+    # Deliberately short.  The obvious design --- cache per
+    # ``(repo, head_sha)`` for the run --- is unsafe: the reason a PR is
+    # blocked changes as checks complete, while its head SHA does not,
+    # and callers re-analyse after waiting precisely to observe that
+    # change.  A run-lifetime cache would answer "still blocked" forever.
+    #
+    # The waste worth removing is the *burst*: a single evaluation pass
+    # calls this several times in quick succession with nothing changing
+    # in between, at five or more requests each.  A few seconds collapses
+    # that burst and has long expired by the time any wait loop
+    # re-checks.
+    _BLOCK_REASON_TTL_SECONDS = 10.0
+
     async def analyze_block_reason(
         self,
         owner: str,
@@ -2573,7 +2594,32 @@ class GitHubAsync:
         skip the PR-detail fetch this method otherwise performs just to
         read ``base.ref`` — one request saved per invocation, and this
         method runs several times per blocked PR.
+
+        Results are memoised briefly; see
+        ``_BLOCK_REASON_TTL_SECONDS`` for why the window is short.
         """
+        cache_key = (owner, repo, number, head_sha)
+        cached = self._block_reason_cache.get(cache_key)
+        if cached is not None:
+            cached_at, cached_reason = cached
+            if _now() - cached_at < self._BLOCK_REASON_TTL_SECONDS:
+                return cached_reason
+
+        reason = await self._analyze_block_reason_uncached(
+            owner, repo, number, head_sha, base_branch
+        )
+        self._block_reason_cache[cache_key] = (_now(), reason)
+        return reason
+
+    async def _analyze_block_reason_uncached(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        head_sha: str,
+        base_branch: str | None = None,
+    ) -> str:
+        """Compute the block reason, ignoring the memo."""
         # Reviews
         approved = False
         human_changes_requested = False
