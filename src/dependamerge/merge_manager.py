@@ -445,7 +445,15 @@ class AsyncMergeManager:
         # the entire REST budget doing nothing but asking for status.
         self._pr_poller = PullRequestStatePoller(self._github_client, log=self.log)
 
-        self._github_service = GitHubService(token=self.token)
+        # Share the one client.  Rate limiting, concurrency and adaptive
+        # throttling are all per-instance, so a second client doubled the
+        # effective ceiling --- 40 concurrent / 16 rps rather than the
+        # 20 / 8 reported --- against a budget GitHub shares between
+        # them, and left each half blind to the pressure the other was
+        # causing.  See ``docs/BULK_RUN_PERFORMANCE_AUDIT.md`` §2.4.
+        self._github_service = GitHubService(
+            token=self.token, client=self._github_client
+        )
 
         # Initialize Copilot handler if dismissal is enabled
         if self.dismiss_copilot:
@@ -2244,7 +2252,7 @@ class AsyncMergeManager:
 
                     # Compute failure summary once — used for both the
                     # recreate decision and the final error reporting.
-                    failure_reason = self._get_failure_summary(pr_info)
+                    failure_reason = await self._get_failure_summary(pr_info)
 
                     # Before giving up, check if this is a dependabot PR
                     # that failed due to unsigned commits.  If so, ask
@@ -6015,7 +6023,42 @@ class AsyncMergeManager:
             self._pr_status(f"❌ Failed: {pr_info.html_url}", level="error")
         return result
 
-    def _get_failure_summary(self, pr_info: PullRequestInfo) -> str:
+    async def _analyze_block_reason_async(self, pr_info: PullRequestInfo) -> str:
+        """Detailed reason a PR is blocked, using the async client.
+
+        Replaces a call into ``GitHubClient._analyze_block_reason``, the
+        synchronous wrapper.  That method detects a running event loop
+        and, unable to call ``asyncio.run`` inside one, returns the
+        placeholder ``"Blocked by branch protection"`` **without making
+        any request**.  Since every caller here runs under the merge
+        manager's loop, the detailed analysis was unreachable in
+        production: every blocked PR resolved through the
+        ``"branch protection"`` branch below and reported
+        ``branch protection rules prevent merge`` whatever the true
+        cause --- a failing check, a Copilot review, a ruleset, a human
+        reviewer.  The surrounding branches were dead code that happened
+        to agree with the fallback.
+
+        Returns an empty string when no client is available, letting the
+        caller fall through to its own generic handling.
+        """
+        if self._github_client is None:
+            return ""
+        owner, repo = pr_info.repository_full_name.split("/", 1)
+        reason = await self._github_client.analyze_block_reason(
+            owner,
+            repo,
+            pr_info.number,
+            pr_info.head_sha,
+            base_branch=pr_info.base_branch,
+        )
+        # Guard the contract rather than trusting it: every other API
+        # payload in this module is type-checked before use, and a
+        # non-string here would propagate into the branch matching below
+        # as a silently truthy value.
+        return reason if isinstance(reason, str) else ""
+
+    async def _get_failure_summary(self, pr_info: PullRequestInfo) -> str:
         """
         Generate a detailed failure summary based on PR state.
 
@@ -6095,10 +6138,7 @@ class AsyncMergeManager:
         elif pr_info.mergeable_state == "blocked":
             # Use detailed block analysis for blocked PRs
             try:
-                from .github_client import GitHubClient
-
-                client = GitHubClient(token=self.token)
-                detailed_reason = client._analyze_block_reason(pr_info)
+                detailed_reason = await self._analyze_block_reason_async(pr_info)
                 # Convert the detailed reason to a more concise format for console output
                 if detailed_reason.startswith("Blocked by failing check:"):
                     check_name = detailed_reason.replace(
@@ -6138,12 +6178,9 @@ class AsyncMergeManager:
         elif pr_info.mergeable is False:
             return "cannot update protected ref - organization or branch protection rules prevent merge"
         elif pr_info.mergeable_state == "unknown":
-            # For unknown state, try to get more details using the GitHub client
+            # For unknown state, try to get more details
             try:
-                from .github_client import GitHubClient
-
-                client = GitHubClient(token=self.token)
-                detailed_reason = client._analyze_block_reason(pr_info)
+                detailed_reason = await self._analyze_block_reason_async(pr_info)
                 if "failing check" in detailed_reason.lower():
                     if detailed_reason.startswith("Blocked by failing check:"):
                         check_name = detailed_reason.replace(

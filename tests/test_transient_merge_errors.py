@@ -138,7 +138,8 @@ class TestFailureSummaryHTTPErrors:
         )
         return mgr
 
-    def test_405_on_clean_pr_reports_transient_error(self):
+    @pytest.mark.asyncio
+    async def test_405_on_clean_pr_reports_transient_error(self):
         """A 405 on a clean PR should report transient API error."""
         mgr = self._make_manager()
         pr = _make_pr_info(mergeable_state="clean", mergeable=True)
@@ -146,14 +147,15 @@ class TestFailureSummaryHTTPErrors:
         exc = _make_405_exception()
         mgr._last_merge_exception["org/repo#39"] = exc
 
-        summary = mgr._get_failure_summary(pr)
+        summary = await mgr._get_failure_summary(pr)
 
         assert "transient 405" in summary.lower()
         assert "githubstatus.com" in summary
         # Must NOT say "branch protection"
         assert "branch protection" not in summary.lower()
 
-    def test_405_on_unstable_pr_reports_transient_error(self):
+    @pytest.mark.asyncio
+    async def test_405_on_unstable_pr_reports_transient_error(self):
         """A 405 on an unstable PR should also report transient."""
         mgr = self._make_manager()
         pr = _make_pr_info(mergeable_state="unstable", mergeable=True)
@@ -161,12 +163,13 @@ class TestFailureSummaryHTTPErrors:
         exc = _make_405_exception()
         mgr._last_merge_exception["org/repo#39"] = exc
 
-        summary = mgr._get_failure_summary(pr)
+        summary = await mgr._get_failure_summary(pr)
 
         assert "transient 405" in summary.lower()
         assert "githubstatus.com" in summary
 
-    def test_405_on_blocked_pr_falls_through_to_state_analysis(self):
+    @pytest.mark.asyncio
+    async def test_405_on_blocked_pr_falls_through_to_state_analysis(self):
         """A 405 on a blocked PR should fall through to block analysis."""
         mgr = self._make_manager()
         pr = _make_pr_info(mergeable_state="blocked", mergeable=True)
@@ -174,13 +177,14 @@ class TestFailureSummaryHTTPErrors:
         exc = _make_405_exception()
         mgr._last_merge_exception["org/repo#39"] = exc
 
-        summary = mgr._get_failure_summary(pr)
+        summary = await mgr._get_failure_summary(pr)
 
         # Should NOT report transient — should fall through to
         # state-based analysis for blocked PRs
         assert "transient 405" not in summary.lower()
 
-    def test_405_with_github_body_surfaces_detail(self):
+    @pytest.mark.asyncio
+    async def test_405_with_github_body_surfaces_detail(self):
         """A 405 carrying GitHub's response body surfaces that detail.
 
         End-to-end counterpart to ``TestMergeApiBodyCapture`` (which
@@ -200,7 +204,7 @@ class TestFailureSummaryHTTPErrors:
             "(PR state: open, mergeable: True, mergeable_state: blocked)"
         )
 
-        summary = mgr._get_failure_summary(pr)
+        summary = await mgr._get_failure_summary(pr)
 
         assert "Required workflows" in summary
         assert "are not satisfied" in summary
@@ -209,7 +213,8 @@ class TestFailureSummaryHTTPErrors:
         # The appended PR-state context must be trimmed off.
         assert "PR state:" not in summary
 
-    def test_502_reports_bad_gateway(self):
+    @pytest.mark.asyncio
+    async def test_502_reports_bad_gateway(self):
         """A 502 error should be reported as Bad Gateway."""
         mgr = self._make_manager()
         pr = _make_pr_info(mergeable_state="clean", mergeable=True)
@@ -217,13 +222,14 @@ class TestFailureSummaryHTTPErrors:
         exc = _make_502_exception()
         mgr._last_merge_exception["org/repo#39"] = exc
 
-        summary = mgr._get_failure_summary(pr)
+        summary = await mgr._get_failure_summary(pr)
 
         assert "502" in summary
         assert "bad gateway" in summary.lower()
         assert "githubstatus.com" in summary
 
-    def test_workflow_scope_error_still_detected(self):
+    @pytest.mark.asyncio
+    async def test_workflow_scope_error_still_detected(self):
         """Existing workflow scope detection must not regress."""
         mgr = self._make_manager()
         pr = _make_pr_info(mergeable_state="clean", mergeable=True)
@@ -232,16 +238,17 @@ class TestFailureSummaryHTTPErrors:
             "Missing 'workflow' scope for merge"
         )
 
-        summary = mgr._get_failure_summary(pr)
+        summary = await mgr._get_failure_summary(pr)
 
         assert "workflow" in summary.lower()
 
-    def test_no_exception_falls_through_to_state(self):
+    @pytest.mark.asyncio
+    async def test_no_exception_falls_through_to_state(self):
         """With no stored exception, summary uses mergeable_state."""
         mgr = self._make_manager()
         pr = _make_pr_info(mergeable_state="behind", mergeable=True)
 
-        summary = mgr._get_failure_summary(pr)
+        summary = await mgr._get_failure_summary(pr)
 
         assert "behind" in summary.lower()
 
@@ -475,7 +482,8 @@ class TestPostApprovalDelay:
 
             assert "org/repo#39" in mgr._recently_approved
 
-    def test_recently_approved_cleanup_via_discard(self):
+    @pytest.mark.asyncio
+    async def test_recently_approved_cleanup_via_discard(self):
         """Verify _recently_approved entries can be cleaned up."""
         mgr, _client = make_merge_manager(
             merge_method="merge",
@@ -501,7 +509,8 @@ class TestPostApprovalDelay:
 class TestPostApprovalDelayConfig:
     """Verify defensive parsing of the env var configuration."""
 
-    def test_default_delay_value(self):
+    @pytest.mark.asyncio
+    async def test_default_delay_value(self):
         """Default delay should be 3.0 seconds."""
         with (
             patch.dict("os.environ", {}, clear=False),
@@ -517,7 +526,8 @@ class TestPostApprovalDelayConfig:
             )
             assert mgr._post_approval_delay == 3.0
 
-    def test_custom_delay_from_env(self):
+    @pytest.mark.asyncio
+    async def test_custom_delay_from_env(self):
         """Custom numeric value should be respected."""
         with (
             patch.dict(
@@ -532,7 +542,8 @@ class TestPostApprovalDelayConfig:
             )
             assert mgr._post_approval_delay == 5.5
 
-    def test_zero_delay_from_env(self):
+    @pytest.mark.asyncio
+    async def test_zero_delay_from_env(self):
         """Zero should disable the delay."""
         with (
             patch.dict(
@@ -547,7 +558,8 @@ class TestPostApprovalDelayConfig:
             )
             assert mgr._post_approval_delay == 0.0
 
-    def test_invalid_delay_falls_back_to_default(self):
+    @pytest.mark.asyncio
+    async def test_invalid_delay_falls_back_to_default(self):
         """Non-numeric value should fall back to 3.0 with a warning."""
         with (
             patch.dict(
@@ -562,7 +574,8 @@ class TestPostApprovalDelayConfig:
             )
             assert mgr._post_approval_delay == 3.0
 
-    def test_inf_delay_falls_back_to_default(self):
+    @pytest.mark.asyncio
+    async def test_inf_delay_falls_back_to_default(self):
         """Infinity should be rejected and fall back to default."""
         with (
             patch.dict(
@@ -577,7 +590,8 @@ class TestPostApprovalDelayConfig:
             )
             assert mgr._post_approval_delay == 3.0
 
-    def test_negative_inf_delay_falls_back_to_default(self):
+    @pytest.mark.asyncio
+    async def test_negative_inf_delay_falls_back_to_default(self):
         """Negative infinity should be rejected and fall back to default."""
         with (
             patch.dict(
@@ -592,7 +606,8 @@ class TestPostApprovalDelayConfig:
             )
             assert mgr._post_approval_delay == 3.0
 
-    def test_nan_delay_falls_back_to_default(self):
+    @pytest.mark.asyncio
+    async def test_nan_delay_falls_back_to_default(self):
         """NaN should be rejected and fall back to default."""
         with (
             patch.dict(
@@ -607,7 +622,8 @@ class TestPostApprovalDelayConfig:
             )
             assert mgr._post_approval_delay == 3.0
 
-    def test_negative_delay_falls_back_to_default(self):
+    @pytest.mark.asyncio
+    async def test_negative_delay_falls_back_to_default(self):
         """Negative values should be rejected and fall back to default."""
         with (
             patch.dict(
@@ -719,7 +735,8 @@ class TestMergeApiBodyCapture:
 class TestFailureSummarySurfacesGitHubDetail:
     """``_get_failure_summary`` surfaces the GitHub-supplied reason."""
 
-    def test_github_detail_extracted_from_exception(self):
+    @pytest.mark.asyncio
+    async def test_github_detail_extracted_from_exception(self):
         mgr, _client = make_merge_manager(merge_method="merge")
         pr = _make_pr_info(mergeable_state="blocked", mergeable=True)
         exc = Exception(
@@ -730,7 +747,7 @@ class TestFailureSummarySurfacesGitHubDetail:
         )
         mgr._last_merge_exception["org/repo#39"] = exc
 
-        summary = mgr._get_failure_summary(pr)
+        summary = await mgr._get_failure_summary(pr)
 
         # The actionable GitHub message is returned, trimmed of the
         # appended PR-state context.
@@ -779,19 +796,22 @@ class TestMergeErrorIndicatesPendingWorkflows:
         mgr, _client = make_merge_manager(merge_method="merge")
         return mgr
 
-    def test_not_satisfied_is_pending(self):
+    @pytest.mark.asyncio
+    async def test_not_satisfied_is_pending(self):
         """ "not satisfied" (workflows still executing) is pending."""
         mgr = self._mgr()
         exc = _make_405_workflows_not_satisfied_exception()
         assert mgr._merge_error_indicates_pending_workflows(str(exc)) is True
 
-    def test_failed_variant_is_terminal(self):
+    @pytest.mark.asyncio
+    async def test_failed_variant_is_terminal(self):
         """A workflow that ran and failed must stay terminal."""
         mgr = self._mgr()
         exc = _make_405_workflows_failed_exception()
         assert mgr._merge_error_indicates_pending_workflows(str(exc)) is False
 
-    def test_leading_failed_to_merge_prefix_does_not_poison(self):
+    @pytest.mark.asyncio
+    async def test_leading_failed_to_merge_prefix_does_not_poison(self):
         """The "Failed to merge PR" prefix must not read as failure.
 
         Only the clause from the ``required workflow`` wording onward
@@ -805,7 +825,8 @@ class TestMergeErrorIndicatesPendingWorkflows:
         )
         assert mgr._merge_error_indicates_pending_workflows(text) is True
 
-    def test_pr_state_suffix_is_trimmed(self):
+    @pytest.mark.asyncio
+    async def test_pr_state_suffix_is_trimmed(self):
         """Failure wording after the PR-state context is ignored."""
         mgr = self._mgr()
         text = (
@@ -816,7 +837,8 @@ class TestMergeErrorIndicatesPendingWorkflows:
         )
         assert mgr._merge_error_indicates_pending_workflows(text) is True
 
-    def test_required_status_checks_not_matched(self):
+    @pytest.mark.asyncio
+    async def test_required_status_checks_not_matched(self):
         """Status-check violations are a different condition."""
         mgr = self._mgr()
         text = (
@@ -1078,3 +1100,79 @@ class TestPendingWorkflowsMergeSinglePrRouting:
 
         wf_recovery.assert_not_awaited()
         assert result.status == MergeStatus.FAILED
+
+
+# -------------------------------------------------------------------
+# Detailed block analysis must actually reach the API
+# -------------------------------------------------------------------
+
+
+class TestBlockedReasonUsesDetailedAnalysis:
+    """The detailed reason must survive the async call path.
+
+    ``_get_failure_summary`` previously reached the analysis through
+    ``GitHubClient._analyze_block_reason``, a synchronous wrapper that
+    detects a running event loop and returns the placeholder
+    ``"Blocked by branch protection"`` without issuing a request.  Every
+    caller runs under the merge manager's loop, so in production every
+    blocked PR reported ``branch protection rules prevent merge``
+    whatever the real cause, and the surrounding branches were
+    unreachable.
+    """
+
+    @pytest.mark.asyncio
+    async def test_failing_check_is_named(self):
+        mgr, client = make_merge_manager()
+        pr = _make_pr_info(mergeable_state="blocked", mergeable=True)
+        client.analyze_block_reason = AsyncMock(
+            return_value="Blocked by failing check: Zizmor Scan"
+        )
+
+        summary = await mgr._get_failure_summary(pr)
+
+        assert summary == "failing check: Zizmor Scan"
+        client.analyze_block_reason.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_human_review_is_distinguished(self):
+        mgr, client = make_merge_manager()
+        pr = _make_pr_info(mergeable_state="blocked", mergeable=True)
+        client.analyze_block_reason = AsyncMock(
+            return_value="Human reviewer requested changes"
+        )
+
+        assert await mgr._get_failure_summary(pr) == "human reviewer requested changes"
+
+    @pytest.mark.asyncio
+    async def test_ruleset_is_distinguished(self):
+        mgr, client = make_merge_manager()
+        pr = _make_pr_info(mergeable_state="blocked", mergeable=True)
+        client.analyze_block_reason = AsyncMock(
+            return_value="Blocked by repository ruleset"
+        )
+
+        assert await mgr._get_failure_summary(pr) == "repository ruleset prevents merge"
+
+    @pytest.mark.asyncio
+    async def test_branch_protection_still_reported_when_that_is_the_cause(self):
+        mgr, client = make_merge_manager()
+        pr = _make_pr_info(mergeable_state="blocked", mergeable=True)
+        client.analyze_block_reason = AsyncMock(
+            return_value="Blocked by branch protection (requires approval)"
+        )
+
+        assert (
+            await mgr._get_failure_summary(pr)
+            == "branch protection rules prevent merge"
+        )
+
+    @pytest.mark.asyncio
+    async def test_analysis_failure_falls_back_without_raising(self):
+        mgr, client = make_merge_manager()
+        pr = _make_pr_info(mergeable_state="blocked", mergeable=True)
+        client.analyze_block_reason = AsyncMock(side_effect=RuntimeError("boom"))
+
+        assert (
+            await mgr._get_failure_summary(pr)
+            == "branch protection rules prevent merge"
+        )

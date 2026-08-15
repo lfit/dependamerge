@@ -116,6 +116,7 @@ class GitHubService:
         max_repo_tasks: int = 8,
         max_page_tasks: int = 16,
         debug_matching: bool = False,
+        client: GitHubAsync | None = None,
     ) -> None:
         """
         Args:
@@ -123,8 +124,16 @@ class GitHubService:
             progress_tracker: Optional ProgressTracker-compatible instance.
             max_repo_tasks: Max concurrent repository scans to schedule at once.
             debug_matching: Enable detailed debugging output for PR matching.
+            client: An existing client to share.  Rate limiting,
+                concurrency and adaptive throttling are per-instance, so a
+                second client doubles the effective ceiling against a
+                budget that is shared server-side and keeps each half
+                blind to the pressure the other is causing.  Callers that
+                already hold a client should pass it; the service then
+                does not own its lifecycle and will not close it.
         """
-        self._api = GitHubAsync(
+        self._owns_api = client is None
+        self._api = client or GitHubAsync(
             token=token,
             on_rate_limited=self._on_rate_limited,
             on_rate_limit_cleared=self._on_rate_limit_cleared,
@@ -147,7 +156,10 @@ class GitHubService:
         self.log = logging.getLogger(__name__)
 
     async def close(self) -> None:
-        await self._api.aclose()
+        # Only close what this service created: a shared client outlives
+        # it and is closed by whoever owns it.
+        if self._owns_api:
+            await self._api.aclose()
 
     async def _on_rate_limited(self, reset_epoch: float) -> None:
         # Mark rate-limited and report current tuning metrics
