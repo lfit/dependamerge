@@ -24,12 +24,16 @@ are **left as originally recorded**: they are the observations that motivated
 the work, and rewriting them would destroy the baseline any future run is
 compared against.
 
-| Group                         | Shipped | Note                        |
-| ----------------------------- | ------- | --------------------------- |
-| P0 — stop the cliff           | 7 of 7  | v0.10.2, v0.11.0            |
-| P1 — cut API volume           | 4 of 4  | v0.10.3, v0.11.0            |
-| P2 — correctness of reporting | 6 of 7  | item 5 recommended in error |
-| §4 — persistent record        | 0       | not started                 |
+<!-- markdownlint-disable MD013 -->
+
+| Group                         | Shipped | Note                                              |
+| ----------------------------- | ------- | ------------------------------------------------- |
+| P0 — stop the cliff           | 7 of 7  | v0.10.2, v0.11.0                                  |
+| P1 — cut API volume           | 4 of 4  | v0.10.3, v0.11.0; item 4 by a different mechanism |
+| P2 — correctness of reporting | 6 of 7  | item 5 recommended in error                       |
+| §4 — persistent record        | 0       | not started                                       |
+
+<!-- markdownlint-enable MD013 -->
 
 Per-item status is marked inline in §3.
 
@@ -372,9 +376,16 @@ All four shipped; item 4 by a different mechanism than proposed.
    than the per-`(repo, head_sha)` key proposed here: the reason changes as
    checks complete while the head SHA does not, so a run-lifetime memo would
    answer "still blocked" forever and break the wait-and-retry paths.*
-4. ✅ **Propagate a repo's first outcome to its siblings within a run.** If PR
+4. ⚠️ **Propagate a repo's first outcome to its siblings within a run.** If PR
    #29 waited out 300 s for a required check that never started, do not make
-   #30, #31 and #32 repeat the same discovery.
+   #30, #31 and #32 repeat the same discovery. *The **outcome** ships but not
+   the **mechanism**: propagation proved unsafe. Absence of a workflow run is
+   a fact about one commit, not a repository — a workflow missing from #29's
+   head says nothing about #30's, which may have been pushed later and
+   dispatched fine. Reusing the finding would skip a wait that could have
+   succeeded and report a failure instead. Each sibling therefore detects the
+   condition itself, in seconds rather than the 300 s this item set out to
+   save, so no PR repeats the expensive discovery.*
 
 ### P2 — correctness of reporting
 

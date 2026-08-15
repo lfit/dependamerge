@@ -45,7 +45,7 @@ from .netrc import NetrcParseError, resolve_gerrit_credentials
 from .output_utils import log_and_print
 from .pr_poller import PullRequestStatePoller
 from .progress_tracker import MergeProgressTracker
-from .rule_violations import required_workflow_names
+from .rule_violations import violation_verb, workflow_name_fragments
 from .semantic_title import (
     describe_title_change,
     is_semantic_check_name,
@@ -92,6 +92,20 @@ MERGE_WAIT_FIRST_POLL_SECONDS: float = 2.0
 # for completion instead.
 MERGE_IN_PROGRESS_TIMEOUT_SECONDS: float = 60.0
 MERGE_IN_PROGRESS_POLL_SECONDS: float = 5.0
+
+# Pause between the two observations required before concluding that a
+# required workflow will never be dispatched.  A single snapshot cannot
+# tell "never dispatched" from "dispatched moments ago and not yet
+# visible", and that mistake reports a terminal failure on a PR that
+# would have merged.  The condition being detected persists for hours,
+# so a few seconds costs nothing against the five-minute wait it saves.
+UNDISPATCHED_CONFIRM_DELAY_SECONDS: float = 10.0
+# Room reserved for the *requests* that follow the pause: a re-read of
+# the PR head, then the workflow-run lookup, which retries and
+# paginates.  Budgeting the pause alone would let the confirmation
+# start a request the caller's deadline had already expired on, holding
+# a worker slot past the run's ceiling.
+UNDISPATCHED_CONFIRM_LOOKUP_SECONDS: float = 5.0
 # As with ``MERGE_WAIT_FIRST_POLL_SECONDS``, the first poll comes early:
 # GitHub is already completing the merge, so it often lands within a
 # second or two and a full-interval first sleep would report it late.
@@ -320,11 +334,6 @@ class AsyncMergeManager:
         # only: a semantic check that keeps failing after the fix must
         # report rather than drive a rewrite loop.
         self._semantic_title_aligned: set[str] = set()
-        # Required workflows observed with no run at all, per repository.
-        # Populated by the first PR that discovers it so its siblings do
-        # not each spend a full merge timeout rediscovering the same
-        # thing --- the striped scheduler runs them one after another.
-        self._repo_undispatched_workflows: dict[str, set[str]] = {}
         # Observed check-resolution latency per repository, used to give
         # sibling PRs a head start (see ``_wait_head_start``).
         self._repo_wait_seconds: dict[str, list[float]] = {}
@@ -369,6 +378,11 @@ class AsyncMergeManager:
 
         # Track last merge exception per PR for better error reporting
         self._last_merge_exception: dict[str, Exception] = {}
+        # The head SHA each stored exception was raised against.  A
+        # rejection is evidence about the commit that was rejected, so
+        # a force-push in between invalidates it; see
+        # ``_wait_for_required_workflows_and_retry``.
+        self._last_merge_exception_head: dict[str, str] = {}
 
         # Track PRs that were just approved (for post-approval merge retry)
         self._recently_approved: set[str] = set()
@@ -512,6 +526,28 @@ class AsyncMergeManager:
         Returns:
             List of MergeResult objects with operation results
         """
+        # Per-run observations, cleared before anything else so the
+        # invariant is simply "a run starts with none".  This manager
+        # supports reuse, and a non-confirmed invocation runs the whole
+        # batch once as a preview before the real pass.  Carrying them
+        # over would let an earlier run's finding skip a workflow lookup
+        # entirely, or size a head start from stale latency.
+        #
+        # A stored rejection is run-scoped evidence for the same reason.
+        # The head it was raised against can be unchanged while the
+        # *reason* has moved on, so an earlier run's "not satisfied"
+        # could send a fresh failure down the undispatched-workflow path
+        # on a commit whose workflows have since run.
+        self._repo_wait_seconds.clear()
+        self._semantic_title_aligned.clear()
+        self._last_merge_exception.clear()
+        self._last_merge_exception_head.clear()
+        # The block-reason memo lives on the client rather than here,
+        # but it is run-scoped for the same reason and its expiry window
+        # can outlast the gap between two runs.
+        if self._github_client is not None:
+            self._github_client.clear_block_reasons()
+
         if not pr_list:
             return []
 
@@ -1865,6 +1901,7 @@ class AsyncMergeManager:
                     repo_owner,
                     repo_name,
                     continue_states=("blocked", "behind", "unstable"),
+                    measures_checks=True,
                 )
                 self._track_pr_state(pr_info, None)
 
@@ -3368,22 +3405,26 @@ class AsyncMergeManager:
         Only the clause starting at the ``required workflow`` wording
         is inspected, because the enhanced exception text always begins
         with "Failed to merge PR …" — matching ``fail`` against the
-        whole message would classify every rejection as terminal.  A
-        workflow *name* containing "fail" also suppresses the match;
-        that conservative false negative merely preserves the previous
-        fail-fast behaviour.
+        whole message would classify every rejection as terminal.
+        The outcome is read through :func:`violation_verb`, which looks
+        only at the text *after* the quoted names, so a workflow called
+        "Fail Fast Lint" no longer suppresses this recovery path.  Two
+        parsers reading the same string is exactly the drift
+        ``rule_violations`` exists to prevent.
         """
         if not error_text:
             return False
-        text = error_text.lower()
-        idx = text.find("required workflow")
+        # Trim the PR-state context ``_validate_merge_result`` appends
+        # after GitHub's detail before anything reads it: that context
+        # can itself say "blocked by failing checks", which the outcome
+        # parser would take for the workflows' verdict.
+        cut = error_text.lower().find(" (pr state:")
+        detail = error_text if cut == -1 else error_text[:cut]
+        lowered = detail.lower()
+        idx = lowered.find("required workflow")
         if idx == -1:
             return False
-        clause = text[idx:]
-        # Trim the PR-state context ``_validate_merge_result`` appends
-        # after GitHub's detail so it cannot influence classification.
-        clause = clause.split(" (pr state:", 1)[0]
-        return "not satisfied" in clause and "fail" not in clause
+        return "not satisfied" in lowered[idx:] and violation_verb(detail) != "failed"
 
     async def _check_merge_requirements(
         self, pr_info: PullRequestInfo
@@ -4957,6 +4998,7 @@ class AsyncMergeManager:
                 # Store exception for better error reporting
                 pr_key = f"{owner}/{repo}#{pr_info.number}"
                 self._last_merge_exception[pr_key] = e
+                self._last_merge_exception_head[pr_key] = pr_info.head_sha
                 self.log.debug(
                     f"Stored exception for {pr_key}: {type(e).__name__}: {str(e)[:200]}"
                 )
@@ -5093,7 +5135,12 @@ class AsyncMergeManager:
         return False
 
     async def _workflows_never_dispatched(
-        self, pr_info: PullRequestInfo, owner: str, repo: str, error_text: str
+        self,
+        pr_info: PullRequestInfo,
+        owner: str,
+        repo: str,
+        error_text: str,
+        deadline: float | None = None,
     ) -> list[str]:
         """Required workflows named in *error_text* that GitHub never started.
 
@@ -5102,13 +5149,23 @@ class AsyncMergeManager:
         GitHub queued it but never dispatched it.  The PR then reports
         "Required workflows … are not satisfied" forever, and the wait
         loop spends its entire ``merge_timeout`` discovering that nothing
-        will change.  Because the striped scheduler serialises a
-        repository's PRs, siblings then repeat the same discovery one
-        after another: four such PRs in one repository burn twenty
-        minutes learning the same fact four times.
+        will change.
 
-        The result is remembered per repository so siblings skip the wait
-        entirely (see ``_repo_undispatched_workflows``).
+        The answer is always computed against **this PR's head SHA**.  An
+        earlier sibling's finding is not reused: absence is a fact about
+        one commit, not about the repository, so a workflow missing from
+        PR #29's head says nothing about PR #30's.  Reusing it would skip
+        a wait that could have succeeded and report a failure instead ---
+        and the lookup it would save is a single request, against a wait
+        worth five minutes.
+
+        Absence must also be observed **twice**, either side of a short
+        delay.  One snapshot cannot distinguish "never dispatched" from
+        "dispatched a moment ago and not yet visible"; concluding the
+        former turns an ordinary dispatch delay into a terminal merge
+        failure.  Two requests and a few seconds is a cheap premium
+        against a five-minute wait, and the condition this detects
+        persists for hours.
 
         Returns the names with no workflow run at all.  An empty list
         means either that every named workflow has started --- so waiting
@@ -5117,20 +5174,200 @@ class AsyncMergeManager:
         """
         if self._github_client is None:
             return []
-        names = required_workflow_names(error_text)
+        # The *raw* fragments, duplicates intact: ``_unmatched_names``
+        # rejoins spans of them against the runs that dispatched, and a
+        # collapsed sequence cannot reconstruct a name like
+        # ``Build, Build``.
+        names = workflow_name_fragments(error_text)
         if not names:
             return []
 
-        known = self._repo_undispatched_workflows.get(pr_info.repository_full_name)
-        if known is not None and all(name in known for name in names):
-            self.log.debug(
-                "Skipping wait for %s: %s already observed as never dispatched "
-                "in this repository",
-                pr_info.html_url,
-                ", ".join(names),
-            )
-            return list(names)
+        missing = await self._bounded_absent_runs(pr_info, owner, repo, names, deadline)
+        if not missing:
+            return []
+        return await self._confirm_absent_workflow_runs(
+            pr_info, owner, repo, missing, deadline
+        )
 
+    async def _bounded_absent_runs(
+        self,
+        pr_info: PullRequestInfo,
+        owner: str,
+        repo: str,
+        names: list[str],
+        deadline: float | None,
+    ) -> list[str]:
+        """:meth:`_absent_workflow_runs` inside the caller's budget.
+
+        The lookup retries and paginates, so an unbounded call can run
+        past a nearly exhausted ``max_wait`` while holding a worker
+        slot.  Overrunning reads as unknown, like every other doubt on
+        this path, so the caller waits rather than reporting a terminal
+        failure it never actually established.
+        """
+        if deadline is None:
+            return await self._absent_workflow_runs(pr_info, owner, repo, names)
+        budget = deadline - asyncio.get_running_loop().time()
+        if budget <= 0:
+            return []
+        try:
+            return await asyncio.wait_for(
+                self._absent_workflow_runs(pr_info, owner, repo, names), budget
+            )
+        except asyncio.TimeoutError:
+            # Not the builtin ``TimeoutError``: the two are only the same
+            # class from Python 3.11, and on 3.10 ``wait_for`` raises
+            # ``asyncio.exceptions.TimeoutError``, so catching the builtin
+            # would let it escape and fail the merge outright.
+            self.log.debug(
+                "Listing workflow runs for %s outlasted the remaining "
+                "budget; treating as unknown and waiting",
+                pr_info.html_url,
+            )
+            return []
+
+    async def _confirm_absent_workflow_runs(
+        self,
+        pr_info: PullRequestInfo,
+        owner: str,
+        repo: str,
+        missing: list[str],
+        deadline: float | None,
+    ) -> list[str]:
+        """Re-observe *missing* after a pause, within the run's budget.
+
+        A workflow dispatched moments ago may simply not be visible yet,
+        so absence is observed twice.  Both halves of that cost must fit
+        the caller's deadline --- the pause *and* the requests after it,
+        which retry and paginate.  Budgeting only the pause would let a
+        request start against an already-expired deadline and hold a
+        worker slot past the run's ceiling.
+
+        Whenever the two observations cannot fit, or the second outlasts
+        what remains, the answer stays unknown and the caller waits: the
+        safe direction, since calling a live workflow dead reports a
+        terminal failure on a PR that would have merged.
+        """
+        delay = UNDISPATCHED_CONFIRM_DELAY_SECONDS
+        loop = asyncio.get_running_loop()
+        if (
+            deadline is not None
+            and deadline - loop.time() < delay + UNDISPATCHED_CONFIRM_LOOKUP_SECONDS
+        ):
+            self.log.debug(
+                "Not enough budget to confirm undispatched workflows for "
+                "%s; treating as unknown and waiting",
+                pr_info.html_url,
+            )
+            return []
+        async with parked():
+            await asyncio.sleep(delay)
+        return await self._reobserve_absent_runs(
+            pr_info, owner, repo, missing, deadline
+        )
+
+    async def _reobserve_absent_runs(
+        self,
+        pr_info: PullRequestInfo,
+        owner: str,
+        repo: str,
+        missing: list[str],
+        deadline: float | None,
+    ) -> list[str]:
+        """The second observation, valid only if the head has not moved.
+
+        Dependabot force-pushes when it rebases, and the confirmation
+        pause is long enough to straddle one.  Both observations would
+        then describe a commit the PR has abandoned, and reporting
+        "never dispatched" for an abandoned head --- while the live one
+        may be running its workflows perfectly --- is the exact mistake
+        this confirmation exists to prevent.
+
+        The head is checked *after* the lookup rather than before, which
+        costs the same one request but covers a wider window: a
+        force-push during the lookup is caught as well as one during the
+        pause.  It is also skipped entirely when nothing is missing,
+        since that answer means "keep waiting" whatever the head is
+        doing --- so the common case gets cheaper, not dearer.
+
+        A moved head is treated as inconclusive rather than restarted
+        on the new SHA: restarting could be chased indefinitely by a
+        branch under active rebase, and one extra wait is far cheaper
+        than one false terminal failure.
+        """
+        still_missing = await self._bounded_absent_runs(
+            pr_info, owner, repo, missing, deadline
+        )
+        if not still_missing:
+            return []
+        if not await self._head_sha_unchanged(pr_info, owner, repo, deadline):
+            self.log.debug(
+                "Head of %s moved during confirmation; treating as unknown and waiting",
+                pr_info.html_url,
+            )
+            return []
+        return still_missing
+
+    async def _head_sha_unchanged(
+        self,
+        pr_info: PullRequestInfo,
+        owner: str,
+        repo: str,
+        deadline: float | None = None,
+    ) -> bool:
+        """Whether the PR still points at the commit already observed.
+
+        An unreadable answer counts as *changed*: this gates a terminal
+        verdict, so doubt must resolve towards waiting like every other
+        ambiguity on this path.  That covers running out of budget too
+        --- the lookup before this one may have consumed it all, and
+        starting a request past the run's ceiling would hold the
+        reacquired worker slot beyond ``max_wait``.
+        """
+        if self._github_client is None:
+            return False
+        budget: float | None = None
+        if deadline is not None:
+            budget = deadline - asyncio.get_running_loop().time()
+            if budget <= 0:
+                return False
+        try:
+            request = self._github_client.get(
+                f"/repos/{owner}/{repo}/pulls/{pr_info.number}"
+            )
+            # A timeout lands in the handler below as any other failure
+            # would, which is the answer we want: unknown, so wait.
+            refreshed = (
+                await request
+                if budget is None
+                else await asyncio.wait_for(request, budget)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.log.debug(
+                "Could not re-read the head of %s: %s", pr_info.html_url, exc
+            )
+            return False
+        if not isinstance(refreshed, dict):
+            return False
+        head = (refreshed.get("head") or {}).get("sha")
+        return bool(head) and head == pr_info.head_sha
+
+    async def _absent_workflow_runs(
+        self,
+        pr_info: PullRequestInfo,
+        owner: str,
+        repo: str,
+        names: list[str],
+    ) -> list[str]:
+        """Which of *names* have no workflow run on the PR's head SHA.
+
+        Returns an empty list when the answer cannot be established, so
+        an unusable response reads as "wait" rather than "never runs".
+        """
+        if self._github_client is None:
+            return []
         try:
             dispatched = await self._github_client.get_workflow_run_names_for_sha(
                 owner, repo, pr_info.head_sha
@@ -5146,13 +5383,44 @@ class AsyncMergeManager:
             # No runs at all is ambiguous: it can mean the lookup
             # returned nothing useful.  Treat as unknown and wait.
             return []
+        return self._unmatched_names(names, dispatched)
 
-        missing = [name for name in names if name not in dispatched]
-        if missing:
-            self._repo_undispatched_workflows.setdefault(
-                pr_info.repository_full_name, set()
-            ).update(missing)
-        return missing
+    @staticmethod
+    def _unmatched_names(names: list[str], dispatched: set[str]) -> list[str]:
+        """Which of *names* no dispatched run accounts for.
+
+        GitHub joins the required names with a comma, and a workflow
+        name may itself contain one, so ``'Build, Test, Lint'`` splits
+        into three fragments that might be three workflows, or two
+        (``Build, Test`` and ``Lint``), or one.  Nothing in the message
+        says which, and this path reads an unmatched name as "never
+        dispatched" --- so guessing wrongly reports a terminal failure
+        against a workflow that ran perfectly.
+
+        The observed runs settle it without another request: any
+        *contiguous span* of fragments that rejoins into a run which
+        dispatched accounts for all of them.  Every matching span is
+        applied, including overlapping ones.  Committing to one and
+        skipping its overlaps would let an arbitrary tie-break reject a
+        partition that does explain the list: with runs ``A``, ``A, B``
+        and ``B, C``, fragments ``A|B|C`` are wholly explained by
+        ``A`` + ``B, C``, but claiming ``A, B`` first would leave ``C``
+        looking undispatched.  A fragment any span can account for is
+        therefore accounted for, which keeps every ambiguity on the
+        waiting side.  A one-fragment span is the ordinary case, which
+        keeps a plain two-workflow violation behaving exactly as before.
+
+        Both spacings are tried because only the separator GitHub emits
+        is known for certain.
+        """
+        total = len(names)
+        accounted = [False] * total
+        for width in range(1, total + 1):
+            for start in range(total - width + 1):
+                span = names[start : start + width]
+                if any(sep.join(span) in dispatched for sep in (", ", ",")):
+                    accounted[start : start + width] = [True] * width
+        return [name for name, seen in zip(names, accounted, strict=True) if not seen]
 
     async def _wait_for_required_workflows_and_retry(
         self, pr_info: PullRequestInfo, owner: str, repo: str
@@ -5187,24 +5455,6 @@ class AsyncMergeManager:
             return False
 
         pr_key = f"{owner}/{repo}#{pr_info.number}"
-
-        # Waiting only helps if the workflows are actually running.  When
-        # GitHub never dispatched them, the rejection is permanent and
-        # the wait would burn the whole merge timeout to learn nothing.
-        last_error = str(self._last_merge_exception.get(pr_key) or "")
-        undispatched = await self._workflows_never_dispatched(
-            pr_info, owner, repo, last_error
-        )
-        if undispatched:
-            self.log.info(
-                "⚠️ Not waiting on %s: required workflow(s) %s have no run on "
-                "%s — GitHub has not dispatched them, so the requirement "
-                "cannot clear on its own",
-                pr_info.html_url,
-                ", ".join(undispatched),
-                pr_info.head_sha[:8],
-            )
-            return False
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._merge_timeout
@@ -5243,6 +5493,30 @@ class AsyncMergeManager:
                 exc,
             )
 
+        # Only now, against the *live* head SHA, ask whether waiting can
+        # help at all.  Checking before the refresh above would test a
+        # snapshot that may predate a force-push, and a workflow absent
+        # from the old head says nothing about the new one.
+        #
+        # The rejection itself is evidence about the commit it rejected,
+        # so it is only usable while the PR still points at that commit.
+        # After a force-push the new head's workflows may not have
+        # dispatched *yet* --- exactly the transient this path must not
+        # call terminal --- so a moved head means we simply wait and let
+        # the retry produce a rejection for the commit we are on.
+        last_error = ""
+        if self._last_merge_exception_head.get(pr_key) == pr_info.head_sha:
+            last_error = str(self._last_merge_exception.get(pr_key) or "")
+        if last_error and await self._stop_for_undispatched_workflows(
+            pr_info, owner, repo, last_error, deadline
+        ):
+            return False
+        # The head this question has already been put for.  A rejection
+        # arriving later for a *different* head is fresh evidence about
+        # a commit never judged, and without asking again the loop would
+        # wait out the whole timeout on a workflow that will never run.
+        judged_head = pr_info.head_sha if last_error else None
+
         self._track_pr_state(pr_info, "waiting")
         try:
             while True:
@@ -5252,6 +5526,7 @@ class AsyncMergeManager:
                     repo,
                     continue_states=("blocked", "unstable"),
                     deadline=deadline,
+                    measures_checks=True,
                 )
                 if closed:
                     return merged_during
@@ -5263,12 +5538,24 @@ class AsyncMergeManager:
                     raise
                 except Exception as exc:
                     self._last_merge_exception[pr_key] = exc
+                    self._last_merge_exception_head[pr_key] = pr_info.head_sha
                     if not self._merge_error_indicates_pending_workflows(str(exc)):
                         # The rejection reason changed (e.g. a workflow
                         # finished and *failed*) — terminal; let the
                         # caller classify and report it.
                         return False
                     merged = False
+                    if pr_info.head_sha != judged_head:
+                        # A head we have not judged --- either the
+                        # refresh above found a force-push and skipped
+                        # the question, or one landed during the wait.
+                        # This rejection is evidence for the commit we
+                        # are actually on, so ask now.
+                        judged_head = pr_info.head_sha
+                        if await self._stop_for_undispatched_workflows(
+                            pr_info, owner, repo, str(exc), deadline
+                        ):
+                            return False
                 if merged:
                     return True
                 remaining = deadline - loop.time()
@@ -5277,6 +5564,37 @@ class AsyncMergeManager:
                 await asyncio.sleep(min(self._merge_recheck_interval, remaining))
         finally:
             self._track_pr_state(pr_info, None)
+
+    async def _stop_for_undispatched_workflows(
+        self,
+        pr_info: PullRequestInfo,
+        owner: str,
+        repo: str,
+        error_text: str,
+        deadline: float | None,
+    ) -> bool:
+        """Whether waiting is pointless because nothing was dispatched.
+
+        Asked once per head rather than once per rejection: the answer
+        is a fact about a commit, and re-asking each retry would spend
+        two requests a minute re-confirming it.
+        """
+        undispatched = await self._workflows_never_dispatched(
+            pr_info, owner, repo, error_text, deadline
+        )
+        if not undispatched:
+            return False
+        self.log.info(
+            "⚠️ Not waiting on %s: required workflow(s) %s have no run on "
+            "%s — GitHub has not dispatched them, so the requirement "
+            "cannot clear on its own",
+            pr_info.html_url,
+            # Collapsed only for the message: the pipeline above needs
+            # the raw sequence, a reader does not.
+            ", ".join(dict.fromkeys(undispatched)),
+            pr_info.head_sha[:8],
+        )
+        return True
 
     async def _is_pr_already_merged(
         self, pr_info: PullRequestInfo, owner: str, repo: str
@@ -5574,7 +5892,16 @@ class AsyncMergeManager:
         if not observations:
             return 0.0
         ordered = sorted(observations)
-        median = ordered[len(ordered) // 2]
+        mid = len(ordered) // 2
+        # True median: average the middle pair for an even count.  Taking
+        # the upper middle instead lets a single slow outlier set the
+        # figure --- [60, 900] would yield 900 rather than 480 --- which
+        # is exactly what the median is chosen to avoid.
+        median = (
+            ordered[mid]
+            if len(ordered) % 2
+            else (ordered[mid - 1] + ordered[mid]) / 2.0
+        )
         if median < self._HEAD_START_MIN_INTERVALS * self._merge_recheck_interval:
             return 0.0
         # Never spend more than half the remaining budget asleep: a
@@ -5582,14 +5909,39 @@ class AsyncMergeManager:
         return max(0.0, min(median * self._HEAD_START_FRACTION, budget / 2.0))
 
     async def _apply_wait_head_start(
-        self, pr_info: PullRequestInfo, pr_key: str, remaining: float
+        self,
+        pr_info: PullRequestInfo,
+        pr_key: str,
+        remaining: float,
+        continue_states: tuple[str, ...],
+        stop_on_clean: bool,
+        measures_checks: bool,
     ) -> None:
         """Sleep past the latency this repository has already demonstrated.
 
+        Applies only to waits that measure checks.  The figure describes
+        check latency, so using it to skip ahead in a *rebase* wait would
+        sleep on an unrelated measurement --- and a rebase often lands in
+        seconds, so a check-sized head start could sleep clean through it.
+
+        Skipped, too, unless the PR is currently in a state this wait
+        intends to sit through.  The conflict path calls back with
+        ``stop_on_clean`` after a rebase may already have left the PR
+        ``clean``; sleeping first would burn up to half the shared
+        deadline before the loop noticed it should return immediately.
+
         Extracted from :meth:`_wait_for_auto_merge` to keep that method
         within the complexity budget; see :meth:`_wait_head_start` for
-        the decision itself.
+        the sizing decision.
         """
+        if not measures_checks:
+            return
+        if stop_on_clean and pr_info.mergeable_state == "clean":
+            return
+        if continue_states and pr_info.mergeable_state not in continue_states:
+            # Already outside the states this call waits through, so the
+            # loop is about to exit; there is nothing to skip ahead to.
+            return
         head_start = self._wait_head_start(pr_info.repository_full_name, remaining)
         if head_start <= 0:
             return
@@ -5610,6 +5962,7 @@ class AsyncMergeManager:
         continue_states: tuple[str, ...],
         deadline: float | None = None,
         stop_on_clean: bool = True,
+        measures_checks: bool = False,
     ) -> tuple[bool, bool]:
         """Poll a PR until it merges, closes, settles, or times out.
 
@@ -5673,6 +6026,9 @@ class AsyncMergeManager:
         # Bound before the try so the ``finally`` can always read it,
         # even if the parked block is never entered.
         wait_started = loop.time()
+        # Set only where a wait is judged to have measured checks; see
+        # the assignment at the end of the poll loop.
+        wait_ended: float | None = None
         try:
             # The whole poll loop is a wait on an external event
             # (auto-merge / CI / a rebase), so release this worker's
@@ -5683,7 +6039,12 @@ class AsyncMergeManager:
                 # Skip ahead when this repository has already shown how
                 # long its checks take (see ``_wait_head_start``).
                 await self._apply_wait_head_start(
-                    pr_info, pr_key, max(0.0, deadline - loop.time())
+                    pr_info,
+                    pr_key,
+                    max(0.0, deadline - loop.time()),
+                    continue_states,
+                    stop_on_clean,
+                    measures_checks,
                 )
                 while loop.time() < deadline:
                     if stop_on_clean and pr_info.mergeable_state == "clean":
@@ -5721,39 +6082,11 @@ class AsyncMergeManager:
                         )
                         continue
                     if isinstance(refreshed_wait, dict):
-                        # Only overwrite when present, and preserve the
-                        # previous non-None value when GitHub returns null
-                        # (it does so while recomputing) so the
-                        # ``continue_states`` check below does not break the
-                        # loop early on a transient null.
-                        if "mergeable" in refreshed_wait:
-                            refreshed_mergeable = refreshed_wait.get("mergeable")
-                            if refreshed_mergeable is not None:
-                                pr_info.mergeable = refreshed_mergeable
-                        if "mergeable_state" in refreshed_wait:
-                            refreshed_state = refreshed_wait.get("mergeable_state")
-                            # Preserve the previous concrete state while
-                            # GitHub is still recomputing mergeability: it
-                            # returns ``null`` / ``""`` / ``"unknown"``
-                            # transiently, and overwriting with those would
-                            # push the state out of ``continue_states`` and
-                            # break the wait loop early (e.g. a ``blocked``
-                            # PR briefly going ``unknown`` would exit and
-                            # trigger a premature manual merge).
-                            if refreshed_state not in (None, "", "unknown"):
-                                pr_info.mergeable_state = refreshed_state
-                        # The head can change while we wait (rebase,
-                        # force-push); keep it current so any later
-                        # block-reason analysis queries the right commit.
-                        refreshed_head = (refreshed_wait.get("head") or {}).get("sha")
-                        if refreshed_head:
-                            pr_info.head_sha = refreshed_head
-                        if refreshed_wait.get("state") == "closed":
+                        if self._apply_wait_refresh(pr_info, refreshed_wait):
                             closed_during_wait = True
                             merged_during_wait = bool(
                                 refreshed_wait.get("merged", False)
                             )
-                            pr_info.state = "closed"
                             break
                     if (
                         pr_info.mergeable_state == "unstable"
@@ -5766,17 +6099,114 @@ class AsyncMergeManager:
                     # state, so exit and let the caller decide.
                     if pr_info.mergeable_state not in continue_states:
                         break
+                # Stop the clock inside the park: leaving it re-acquires
+                # this worker's slot, and that queue is the scheduler's
+                # time, not the repository's.  Only a wait that polled
+                # and saw the checks resolve measured anything.
+                if not first_poll and self._checks_resolved(pr_info):
+                    wait_ended = loop.time()
         finally:
             async with self._waiting_lock:
                 self._waiting_prs.pop(pr_key, None)
-            # Record the latency only when the wait produced a result;
-            # a timeout bounds it from below but does not measure it.
-            if loop.time() < deadline:
-                self._record_wait_duration(
-                    pr_info.repository_full_name, loop.time() - wait_started
-                )
+            # Whatever was true before the wait is not necessarily true
+            # after it: that is the point of waiting.  Drop the memo
+            # rather than rely on its expiry, which a short
+            # ``--merge-timeout`` can outlast.
+            if self._github_client is not None:
+                self._github_client.invalidate_block_reason(owner, repo, pr_info.number)
+            # Record the latency only when the wait produced a result and
+            # actually measured checks (see ``_record_check_wait``).
+            if measures_checks:
+                self._record_check_wait(pr_info, wait_started, wait_ended, deadline)
 
         return closed_during_wait, merged_during_wait
+
+    @staticmethod
+    def _apply_wait_refresh(
+        pr_info: PullRequestInfo, refreshed: dict[str, Any]
+    ) -> bool:
+        """Fold a polled snapshot into *pr_info*; report whether it closed.
+
+        Extracted from :meth:`_wait_for_auto_merge` to keep that method
+        within the complexity budget.
+
+        Each field is overwritten only when present *and* usable.
+        GitHub returns ``null`` for ``mergeable`` and ``null`` / ``""``
+        / ``"unknown"`` for ``mergeable_state`` while it recomputes
+        mergeability, and letting those through would push the state out
+        of the caller's ``continue_states`` and end the wait early --- a
+        ``blocked`` PR briefly reading ``unknown`` would exit and trigger
+        a premature manual merge.
+
+        The head is kept current because it can change mid-wait (rebase,
+        force-push), and later block-reason analysis must query the
+        commit the PR is actually on.
+        """
+        if "mergeable" in refreshed:
+            refreshed_mergeable = refreshed.get("mergeable")
+            if refreshed_mergeable is not None:
+                pr_info.mergeable = refreshed_mergeable
+        if "mergeable_state" in refreshed:
+            refreshed_state = refreshed.get("mergeable_state")
+            if refreshed_state not in (None, "", "unknown"):
+                pr_info.mergeable_state = refreshed_state
+        refreshed_head = (refreshed.get("head") or {}).get("sha")
+        if refreshed_head:
+            pr_info.head_sha = refreshed_head
+        if refreshed.get("state") != "closed":
+            return False
+        pr_info.state = "closed"
+        return True
+
+    @staticmethod
+    def _checks_resolved(pr_info: PullRequestInfo) -> bool:
+        """Whether the PR's state says its checks have finished.
+
+        Used to decide whether a completed wait measured anything.  The
+        loop can also end because the PR turned ``dirty``, was closed,
+        or went ``behind`` --- none of which timed a check run, and all
+        of which tend to resolve in seconds, so recording them would
+        drag the repository's median down and quietly disable the head
+        start for its siblings.
+
+        ``unstable`` counts when the PR is mergeable: that is every
+        required check finished, with a non-required one failing.
+        """
+        if pr_info.mergeable_state == "clean":
+            return True
+        return pr_info.mergeable_state == "unstable" and pr_info.mergeable is True
+
+    def _record_check_wait(
+        self,
+        pr_info: PullRequestInfo,
+        started: float,
+        ended: float | None,
+        deadline: float,
+    ) -> None:
+        """Note how long this repository's checks took, for its siblings.
+
+        Only a wait that ended of its own accord counts.  ``ended`` is
+        ``None`` when the wait recorded no measurement --- an exception
+        cut it short, it never polled, or it ended for a reason that
+        timed no check run --- and a wait that reached the deadline
+        bounds the latency from below without measuring it.
+
+        ``ended`` is also sampled *before* the caller's parked block
+        exits, since leaving it re-acquires a concurrency slot that on a
+        busy run queues behind other work; charging that scheduler delay
+        to the repository's checks would teach every sibling to sleep
+        through it too.
+
+        The caller decides whether its wait measured checks at all:
+        :meth:`_wait_for_auto_merge` also waits for dependabot rebases
+        and for an armed auto-merge to close, and recording those would
+        let a rebase turnaround masquerade as check latency and hand the
+        same PR's next phase a head start worth half its remaining
+        budget.
+        """
+        if ended is None or ended >= deadline:
+            return
+        self._record_wait_duration(pr_info.repository_full_name, ended - started)
 
     async def _request_dependabot_rebase(
         self, pr_info: PullRequestInfo, owner: str, repo: str
@@ -6087,6 +6517,12 @@ class AsyncMergeManager:
                 continue_states=continue_states,
                 deadline=deadline,
                 stop_on_clean=not auto_ok,
+                # Only a measurement of *checks* when the wait stops at
+                # ``clean``.  With auto-merge armed it deliberately waits
+                # through ``clean`` until GitHub closes the PR, so the
+                # duration would also carry merge-queue latency and would
+                # oversize a sibling's head start.
+                measures_checks=not auto_ok,
             )
         finally:
             self._track_pr_state(pr_info, None)
