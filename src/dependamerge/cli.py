@@ -5,7 +5,6 @@ import asyncio
 import hashlib
 import logging
 import os
-import re
 import sys
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -73,6 +72,13 @@ from .netrc import (
 from .pr_comparator import PRComparator
 from .progress_tracker import MergeProgressTracker, ProgressTracker
 from .resolve_conflicts import FixOptions, FixOrchestrator, PRSelection
+from .rule_violations import (
+    RULE_VIOLATION_MARKER,
+    is_rule_violation,
+    required_status_check_names,
+    required_workflow_names,
+    violation_verb,
+)
 from .system_utils import get_default_workers
 from .url_parser import (
     ParsedGerritTopicUrl,
@@ -1143,39 +1149,21 @@ def _format_failure_reason(reason: str) -> list[str]:
     ``Required status check(s)`` variants.  Reasons we do not recognise
     are returned unchanged as a single line.
     """
-    ruleset = "Repository rule violations found"
-    if ruleset in reason:
-        # Required workflows: ``Required workflows 'A, B' are not satisfied``
-        wf_marker = "Required workflows "
-        if wf_marker in reason:
-            after_marker = reason.split(wf_marker, 1)[1]
-            if "'" in after_marker:
-                # ``'A, B, C' are not satisfied`` -> names, then verb.
-                _, _, after_first = after_marker.partition("'")
-                quoted, _, rest = after_first.partition("'")
-                workflows = [w.strip() for w in quoted.split(",") if w.strip()]
-                # GitHub can list the same workflow name more than once in
-                # the violation string; collapse duplicates while keeping
-                # first-seen order so each name renders as a single bullet.
-                workflows = list(dict.fromkeys(workflows))
-                verb = "failed" if "fail" in rest.lower() else "not satisfied"
-                if workflows:
-                    return [
-                        f"{ruleset} / Required workflows {verb}",
-                        *(f"• {name}" for name in workflows),
-                    ]
-        # Required status check(s): ``Required status check "X" is failing.``
-        if "Required status check" in reason:
-            checks = [c.strip() for c in re.findall(r'"([^"]+)"', reason) if c.strip()]
-            # De-duplicate repeated names (see workflows note above),
-            # preserving first-seen order.
-            checks = list(dict.fromkeys(checks))
-            verb = "failed" if "fail" in reason.lower() else "not satisfied"
-            if checks:
-                return [
-                    f"{ruleset} / Required status checks {verb}",
-                    *(f"• {name}" for name in checks),
-                ]
+    if is_rule_violation(reason):
+        ruleset = RULE_VIOLATION_MARKER
+        verb = violation_verb(reason)
+        workflows = required_workflow_names(reason)
+        if workflows:
+            return [
+                f"{ruleset} / Required workflows {verb}",
+                *(f"• {name}" for name in workflows),
+            ]
+        checks = required_status_check_names(reason)
+        if checks:
+            return [
+                f"{ruleset} / Required status checks {verb}",
+                *(f"• {name}" for name in checks),
+            ]
     return [reason]
 
 

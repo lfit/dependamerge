@@ -867,6 +867,34 @@ class GitHubAsync:
             return []
         return [run for run in (data.get("check_runs") or []) if isinstance(run, dict)]
 
+    async def get_workflow_run_names_for_sha(
+        self, owner: str, repo: str, head_sha: str
+    ) -> set[str]:
+        """Names of Actions workflow runs that exist for *head_sha*.
+
+        Distinct from check runs.  A required workflow that GitHub never
+        dispatched has **no workflow run at all** --- not a queued one, not
+        a failed one, nothing --- so its absence here is the signal that
+        waiting cannot help.  Check runs cannot express that: the
+        workflow simply never appears.
+
+        Returns an empty set on failure, which callers must treat as
+        "unknown" rather than "nothing ran".
+        """
+        data = await self.get(
+            f"/repos/{owner}/{repo}/actions/runs",
+            params={"head_sha": head_sha, "per_page": 100},
+        )
+        if not isinstance(data, dict):
+            return set()
+        names: set[str] = set()
+        for run in data.get("workflow_runs") or []:
+            if isinstance(run, dict):
+                name = run.get("name")
+                if isinstance(name, str) and name:
+                    names.add(name)
+        return names
+
     async def get_failing_status_contexts(
         self, owner: str, repo: str, ref: str
     ) -> list[str]:

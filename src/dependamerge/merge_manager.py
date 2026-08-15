@@ -45,6 +45,7 @@ from .netrc import NetrcParseError, resolve_gerrit_credentials
 from .output_utils import log_and_print
 from .pr_poller import PullRequestStatePoller
 from .progress_tracker import MergeProgressTracker
+from .rule_violations import required_workflow_names
 from .semantic_title import (
     describe_title_change,
     is_semantic_check_name,
@@ -319,6 +320,11 @@ class AsyncMergeManager:
         # only: a semantic check that keeps failing after the fix must
         # report rather than drive a rewrite loop.
         self._semantic_title_aligned: set[str] = set()
+        # Required workflows observed with no run at all, per repository.
+        # Populated by the first PR that discovers it so its siblings do
+        # not each spend a full merge timeout rediscovering the same
+        # thing --- the striped scheduler runs them one after another.
+        self._repo_undispatched_workflows: dict[str, set[str]] = {}
         self._github_service: GitHubService | None = None
         self._copilot_handler: CopilotCommentHandler | None = None
         # Reuse the progress tracker's Rich Console (when one is
@@ -5083,6 +5089,68 @@ class AsyncMergeManager:
         )
         return False
 
+    async def _workflows_never_dispatched(
+        self, pr_info: PullRequestInfo, owner: str, repo: str, error_text: str
+    ) -> list[str]:
+        """Required workflows named in *error_text* that GitHub never started.
+
+        A ruleset can require a workflow that never runs --- most often
+        because the workflow lives in the org's ``.github`` repository and
+        GitHub queued it but never dispatched it.  The PR then reports
+        "Required workflows … are not satisfied" forever, and the wait
+        loop spends its entire ``merge_timeout`` discovering that nothing
+        will change.  Because the striped scheduler serialises a
+        repository's PRs, siblings then repeat the same discovery one
+        after another: four such PRs in one repository burn twenty
+        minutes learning the same fact four times.
+
+        The result is remembered per repository so siblings skip the wait
+        entirely (see ``_repo_undispatched_workflows``).
+
+        Returns the names with no workflow run at all.  An empty list
+        means either that every named workflow has started --- so waiting
+        is worthwhile --- or that the lookup failed, which is deliberately
+        indistinguishable here: on doubt, wait.
+        """
+        if self._github_client is None:
+            return []
+        names = required_workflow_names(error_text)
+        if not names:
+            return []
+
+        known = self._repo_undispatched_workflows.get(pr_info.repository_full_name)
+        if known is not None and all(name in known for name in names):
+            self.log.debug(
+                "Skipping wait for %s: %s already observed as never dispatched "
+                "in this repository",
+                pr_info.html_url,
+                ", ".join(names),
+            )
+            return list(names)
+
+        try:
+            dispatched = await self._github_client.get_workflow_run_names_for_sha(
+                owner, repo, pr_info.head_sha
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.log.debug(
+                "Could not list workflow runs for %s: %s", pr_info.html_url, exc
+            )
+            return []
+        if not dispatched:
+            # No runs at all is ambiguous: it can mean the lookup
+            # returned nothing useful.  Treat as unknown and wait.
+            return []
+
+        missing = [name for name in names if name not in dispatched]
+        if missing:
+            self._repo_undispatched_workflows.setdefault(
+                pr_info.repository_full_name, set()
+            ).update(missing)
+        return missing
+
     async def _wait_for_required_workflows_and_retry(
         self, pr_info: PullRequestInfo, owner: str, repo: str
     ) -> bool:
@@ -5116,6 +5184,25 @@ class AsyncMergeManager:
             return False
 
         pr_key = f"{owner}/{repo}#{pr_info.number}"
+
+        # Waiting only helps if the workflows are actually running.  When
+        # GitHub never dispatched them, the rejection is permanent and
+        # the wait would burn the whole merge timeout to learn nothing.
+        last_error = str(self._last_merge_exception.get(pr_key) or "")
+        undispatched = await self._workflows_never_dispatched(
+            pr_info, owner, repo, last_error
+        )
+        if undispatched:
+            self.log.info(
+                "⚠️ Not waiting on %s: required workflow(s) %s have no run on "
+                "%s — GitHub has not dispatched them, so the requirement "
+                "cannot clear on its own",
+                pr_info.html_url,
+                ", ".join(undispatched),
+                pr_info.head_sha[:8],
+            )
+            return False
+
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._merge_timeout
         if self._run_deadline is not None:
