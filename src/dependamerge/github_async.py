@@ -844,6 +844,80 @@ class GitHubAsync:
             return {}
         return r.json()  # type: ignore[no-any-return]
 
+    async def get_check_runs_for_ref(
+        self, owner: str, repo: str, ref: str
+    ) -> list[dict[str, Any]]:
+        """Check runs reported against *ref*.
+
+        Returns the raw runs, including superseded duplicates: deciding
+        which run is authoritative for a given name belongs to
+        :mod:`dependamerge.check_runs`, not here.
+        """
+        data = await self.get(
+            f"/repos/{owner}/{repo}/commits/{ref}/check-runs",
+            params={"per_page": 100},
+        )
+        if not isinstance(data, dict):
+            return []
+        return [run for run in (data.get("check_runs") or []) if isinstance(run, dict)]
+
+    async def get_failing_status_contexts(
+        self, owner: str, repo: str, ref: str
+    ) -> list[str]:
+        """Contexts whose latest commit *status* is failing.
+
+        Distinct from check runs: pre-commit.ci, DCO and other legacy
+        integrations report through the commit status API, so a caller
+        reasoning about "what is failing" from check runs alone sees only
+        half the picture.
+
+        GitHub's combined-status endpoint already collapses each context
+        to its latest state, so no deduplication is needed here.
+        """
+        data = await self.get(f"/repos/{owner}/{repo}/commits/{ref}/status")
+        if not isinstance(data, dict):
+            return []
+        failing: list[str] = []
+        for entry in data.get("statuses") or []:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("state") in ("failure", "error"):
+                context = entry.get("context")
+                if isinstance(context, str) and context and context not in failing:
+                    failing.append(context)
+        return failing
+
+    async def update_pull_request_title(
+        self, owner: str, repo: str, number: int, title: str
+    ) -> None:
+        """Set a pull request's title.
+
+        REST: PATCH /repos/{owner}/{repo}/pulls/{pull_number}
+
+        GitHub emits a ``pull_request.edited`` event, which re-runs any
+        workflow listening for it --- the mechanism this is used for (see
+        ``semantic_title``).  Note that ruleset-*injected* required
+        workflows do **not** appear to honour ``edited``, so this is only
+        useful for checks the repository or org wires up conventionally.
+        """
+        await self.patch(
+            f"/repos/{owner}/{repo}/pulls/{number}",
+            json={"title": title},
+        )
+
+    async def get_pull_request_commits(
+        self, owner: str, repo: str, number: int
+    ) -> list[dict[str, Any]]:
+        """All commits on a pull request, across pages."""
+        out: list[dict[str, Any]] = []
+        async for page in self.get_paginated(
+            f"/repos/{owner}/{repo}/pulls/{number}/commits",
+            per_page=100,
+        ):
+            if isinstance(page, list):
+                out.extend(c for c in page if isinstance(c, dict))
+        return out
+
     async def graphql(
         self, query: str, variables: dict[str, Any] | None = None
     ) -> dict[str, Any]:
