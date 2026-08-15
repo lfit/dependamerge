@@ -325,6 +325,9 @@ class AsyncMergeManager:
         # not each spend a full merge timeout rediscovering the same
         # thing --- the striped scheduler runs them one after another.
         self._repo_undispatched_workflows: dict[str, set[str]] = {}
+        # Observed check-resolution latency per repository, used to give
+        # sibling PRs a head start (see ``_wait_head_start``).
+        self._repo_wait_seconds: dict[str, list[float]] = {}
         self._github_service: GitHubService | None = None
         self._copilot_handler: CopilotCommentHandler | None = None
         # Reuse the progress tracker's Rich Console (when one is
@@ -5534,6 +5537,70 @@ class AsyncMergeManager:
 
             await asyncio.sleep(min(poll_interval, deadline - now))
 
+    # A head start is only worth taking when a repository's checks are
+    # slow relative to the poll cadence; below this multiple of the
+    # recheck interval the normal rhythm already costs little.
+    _HEAD_START_MIN_INTERVALS = 3.0
+    # Fraction of the observed median to skip.  Deliberately short of
+    # 1.0 so a repository that speeds up is still caught promptly.
+    _HEAD_START_FRACTION = 0.8
+
+    def _record_wait_duration(self, repo_full_name: str, seconds: float) -> None:
+        """Remember how long a repository's checks took to resolve.
+
+        Only durations from waits that *ended in a result* are recorded;
+        a timeout says nothing about latency except that it exceeded the
+        budget.
+        """
+        if seconds <= 0:
+            return
+        self._repo_wait_seconds.setdefault(repo_full_name, []).append(seconds)
+
+    def _wait_head_start(self, repo_full_name: str, budget: float) -> float:
+        """Seconds to skip before the first poll of a wait.
+
+        Polling a repository every ten seconds from t=0 when its checks
+        reliably take four minutes spends around twenty requests learning
+        nothing.  Once one PR in the repository has shown how long its
+        checks take, its siblings can sleep most of that time first ---
+        the striped scheduler runs them one after another, so by the
+        second PR the observation already exists.
+
+        Returns ``0.0`` when nothing is known, when the repository is
+        quick enough that the normal cadence is cheap, or when the
+        remaining budget is too small to gamble on a single sleep.
+        """
+        observations = self._repo_wait_seconds.get(repo_full_name)
+        if not observations:
+            return 0.0
+        ordered = sorted(observations)
+        median = ordered[len(ordered) // 2]
+        if median < self._HEAD_START_MIN_INTERVALS * self._merge_recheck_interval:
+            return 0.0
+        # Never spend more than half the remaining budget asleep: a
+        # repository that has become faster must still be observed.
+        return max(0.0, min(median * self._HEAD_START_FRACTION, budget / 2.0))
+
+    async def _apply_wait_head_start(
+        self, pr_info: PullRequestInfo, pr_key: str, remaining: float
+    ) -> None:
+        """Sleep past the latency this repository has already demonstrated.
+
+        Extracted from :meth:`_wait_for_auto_merge` to keep that method
+        within the complexity budget; see :meth:`_wait_head_start` for
+        the decision itself.
+        """
+        head_start = self._wait_head_start(pr_info.repository_full_name, remaining)
+        if head_start <= 0:
+            return
+        self.log.debug(
+            "Head start of %.0fs for %s: this repository's checks have "
+            "taken that long already",
+            head_start,
+            pr_key,
+        )
+        await asyncio.sleep(head_start)
+
     async def _wait_for_auto_merge(
         self,
         pr_info: PullRequestInfo,
@@ -5603,6 +5670,9 @@ class AsyncMergeManager:
         closed_during_wait = False
         merged_during_wait = False
         first_poll = True
+        # Bound before the try so the ``finally`` can always read it,
+        # even if the parked block is never entered.
+        wait_started = loop.time()
         try:
             # The whole poll loop is a wait on an external event
             # (auto-merge / CI / a rebase), so release this worker's
@@ -5610,6 +5680,11 @@ class AsyncMergeManager:
             # never starve runnable PRs (see ``slot_lease.py``).  The
             # polling GETs are paced by the HTTP client's own limits.
             async with parked():
+                # Skip ahead when this repository has already shown how
+                # long its checks take (see ``_wait_head_start``).
+                await self._apply_wait_head_start(
+                    pr_info, pr_key, max(0.0, deadline - loop.time())
+                )
                 while loop.time() < deadline:
                     if stop_on_clean and pr_info.mergeable_state == "clean":
                         break
@@ -5694,6 +5769,12 @@ class AsyncMergeManager:
         finally:
             async with self._waiting_lock:
                 self._waiting_prs.pop(pr_key, None)
+            # Record the latency only when the wait produced a result;
+            # a timeout bounds it from below but does not measure it.
+            if loop.time() < deadline:
+                self._record_wait_duration(
+                    pr_info.repository_full_name, loop.time() - wait_started
+                )
 
         return closed_during_wait, merged_during_wait
 
