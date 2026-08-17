@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -95,6 +96,81 @@ def _clone_url_with_git_suffix(url: Any) -> str | None:
     return None
 
 
+class _CallbackChain:
+    """A callback made of individually removable links.
+
+    Composing closures produces a chain that can only be undone by
+    restoring a snapshot --- and a snapshot is wrong the moment anything
+    else registers.  It clobbers callbacks added after the snapshot was
+    taken, and with two services borrowing one client, closing the first
+    would drop the second's callbacks while closing the second would
+    resurrect the first's.  Holding the links in a list lets each owner
+    remove exactly its own and leave the rest alone.
+
+    A failure in one link must not suppress the others: these are
+    observability hooks, and losing the rate-limit flag because a
+    progress tracker raised would reintroduce the very bug this exists
+    to prevent.
+    """
+
+    __slots__ = ("links",)
+
+    def __init__(self, links: list[Any]) -> None:
+        self.links = links
+
+    async def __call__(self, *args: Any) -> None:
+        # Iterate a copy: a link may detach itself while being invoked.
+        for callback in list(self.links):
+            try:
+                result = callback(*args)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:  # pragma: no cover - observability only
+                logging.getLogger(__name__).debug(
+                    "Rate-limit callback failed", exc_info=True
+                )
+
+
+def _chain_callbacks(existing: Any, added: Any) -> Any:
+    """Return a callback invoking *existing* then *added*.
+
+    Callbacks may be plain functions or coroutines, and either side may
+    be absent.  Appends to an existing chain rather than nesting one, so
+    every link stays individually removable.
+    """
+    if added is None:
+        return existing
+    if existing is None:
+        return added
+    if isinstance(existing, _CallbackChain):
+        existing.links.append(added)
+        return existing
+    return _CallbackChain([existing, added])
+
+
+def _unchain_callback(current: Any, remove: Any) -> Any:
+    """Return *current* with *remove* taken out of it.
+
+    Removes only what it can see.  If something replaced the chain
+    wholesale, the replacement is left untouched rather than guessed
+    at --- silently restoring an older callback would be worse than
+    leaving the current one in place.
+    """
+    if current is None:
+        return None
+    if isinstance(current, _CallbackChain):
+        if remove in current.links:
+            current.links.remove(remove)
+        if not current.links:
+            return None
+        if len(current.links) == 1:
+            return current.links[0]
+        return current
+    # Bound methods are rebuilt on each attribute access, so identity
+    # would not hold here; equality compares ``__self__``/``__func__``.
+    return None if current == remove else current
+
+
 class GitHubService:
     """
     Asynchronous service orchestrating GraphQL paging and mapping results
@@ -116,6 +192,7 @@ class GitHubService:
         max_repo_tasks: int = 8,
         max_page_tasks: int = 16,
         debug_matching: bool = False,
+        client: GitHubAsync | None = None,
     ) -> None:
         """
         Args:
@@ -123,13 +200,30 @@ class GitHubService:
             progress_tracker: Optional ProgressTracker-compatible instance.
             max_repo_tasks: Max concurrent repository scans to schedule at once.
             debug_matching: Enable detailed debugging output for PR matching.
+            client: An existing client to share.  Rate limiting,
+                concurrency and adaptive throttling are per-instance, so a
+                second client doubles the effective ceiling against a
+                budget that is shared server-side and keeps each half
+                blind to the pressure the other is causing.  Callers that
+                already hold a client should pass it; the service then
+                does not own its lifecycle and will not close it.
         """
-        self._api = GitHubAsync(
+        self._owns_api = client is None
+        self._callbacks_attached = False
+        self._api = client or GitHubAsync(
             token=token,
             on_rate_limited=self._on_rate_limited,
             on_rate_limit_cleared=self._on_rate_limit_cleared,
             on_metrics=self._on_metrics,
         )
+        if client is not None:
+            # A shared client arrives with whatever callbacks its owner
+            # registered, and this service's own must still fire: without
+            # ``_on_rate_limited`` the ``_rate_limited`` flag never sets,
+            # and the GraphQL paging below silently stops shrinking its
+            # page sizes under rate-limit pressure.  Chain rather than
+            # replace so the owner's callbacks keep working too.
+            self._attach_callbacks(client)
         self._progress = progress_tracker
         self._max_repo_tasks = max_repo_tasks
         self._max_page_tasks = max_page_tasks
@@ -146,8 +240,47 @@ class GitHubService:
         self._owner_root_cache: dict[str, tuple[str, str]] = {}
         self.log = logging.getLogger(__name__)
 
+    def _attach_callbacks(self, client: GitHubAsync) -> None:
+        """Add this service's rate-limit callbacks to a shared client."""
+        client.on_rate_limited = _chain_callbacks(
+            client.on_rate_limited, self._on_rate_limited
+        )
+        client.on_rate_limit_cleared = _chain_callbacks(
+            client.on_rate_limit_cleared, self._on_rate_limit_cleared
+        )
+        client.on_metrics = _chain_callbacks(client.on_metrics, self._on_metrics)
+        self._callbacks_attached = True
+
+    def _detach_callbacks(self) -> None:
+        """Take this service's callbacks back off a borrowed client.
+
+        Leaving them attached would keep a closed service alive and
+        receiving events, and attaching a replacement service to the same
+        client would stack a second copy, duplicating every rate-limit
+        and progress update.
+
+        Only this service's own links are removed.  Anything registered
+        afterwards --- including a second service sharing the client ---
+        keeps working.
+        """
+        if not self._callbacks_attached:
+            return
+        self._api.on_rate_limited = _unchain_callback(
+            self._api.on_rate_limited, self._on_rate_limited
+        )
+        self._api.on_rate_limit_cleared = _unchain_callback(
+            self._api.on_rate_limit_cleared, self._on_rate_limit_cleared
+        )
+        self._api.on_metrics = _unchain_callback(self._api.on_metrics, self._on_metrics)
+        self._callbacks_attached = False
+
     async def close(self) -> None:
-        await self._api.aclose()
+        # Only close what this service created: a shared client outlives
+        # it and is closed by whoever owns it.  Its callbacks, however,
+        # belong to this service and must come off either way.
+        self._detach_callbacks()
+        if self._owns_api:
+            await self._api.aclose()
 
     async def _on_rate_limited(self, reset_epoch: float) -> None:
         # Mark rate-limited and report current tuning metrics

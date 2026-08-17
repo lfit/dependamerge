@@ -16,6 +16,34 @@ change the tool's behaviour.
 
 ---
 
+## 0. Status as of v0.11.0
+
+Every P0 and P1 item has shipped, along with six of the seven P2 items. The
+seventh was recommended in error and needed no work. The measurements in §2
+are **left as originally recorded**: they are the observations that motivated
+the work, and rewriting them would destroy the baseline any future run is
+compared against.
+
+<!-- markdownlint-disable MD013 -->
+
+| Group                         | Shipped | Note                                              |
+| ----------------------------- | ------- | ------------------------------------------------- |
+| P0 — stop the cliff           | 7 of 7  | v0.10.2, v0.11.0                                  |
+| P1 — cut API volume           | 4 of 4  | v0.10.3, v0.11.0; item 4 by a different mechanism |
+| P2 — correctness of reporting | 6 of 7  | item 5 recommended in error                       |
+| §4 — persistent record        | 0       | not started                                       |
+
+<!-- markdownlint-enable MD013 -->
+
+Per-item status is marked inline in §3.
+
+**The combined effect has not yet been measured.** Five pull requests across
+three releases rest on a single data point. A repeat bulk run remains the
+highest-value next step, and belongs here as a new section comparing before
+and after rather than as edits to §2.
+
+---
+
 ## 1. Executive summary
 
 Three independent problems compound:
@@ -291,6 +319,10 @@ issue #405.
 
 ### 2.8 Dead code
 
+> **Resolved in v0.11.0.** The package was deleted. `slot_lease.py` already
+> carried the parking semantic, and `pr_poller.py` supersedes the reconciler,
+> so nothing remained worth wiring. See §3 P2.7.
+
 `src/dependamerge/engine/` (`scheduler.py`, `reconciler.py`, `ladder.py`,
 `model.py`) is **not imported anywhere in `src/`** — only by `tests/engine/`.
 `slot_lease.py` ported one semantic (parking) out of it into the legacy path.
@@ -305,64 +337,88 @@ wiring it as-is would not fix §2.1 without adding batching.
 
 ### P0 — stop the cliff (small, surgical, high impact)
 
-1. **Fix the ratchet.** Restructure `github_async.py:617-655` to
+All seven shipped in v0.10.2 and v0.11.0.
+
+1. ✅ **Fix the ratchet.** Restructure `github_async.py:617-655` to
    `if should_throttle: ... else: ramp_up()` so recovery is reachable. Ramp up
    on sustained healthy responses toward `_base_max_concurrency`/`_base_rps`.
-2. **Delete or fix `_get_recent_error_rate`.** As written it is a constant.
+2. ✅ **Delete or fix `_get_recent_error_rate`.** As written it is a constant.
    Either track total requests (a simple counter alongside errors) or remove
    the error term and drive throttling from budget headroom alone.
-3. **Do not replace live semaphores.** Use a resizable limiter that adjusts by
+3. ✅ **Do not replace live semaphores.** Use a resizable limiter that adjusts by
    acquiring/releasing spare permits, so the cap is never transiently violated.
-4. **Decay `_adaptive_delay` on read**, not only inside
+4. ✅ **Decay `_adaptive_delay` on read**, not only inside
    `_apply_retry_after_throttling`; cap its total contribution per run.
-5. **Do not stack sleeps.** On a secondary rate limit, either sleep locally
+5. ✅ **Do not stack sleeps.** On a secondary rate limit, either sleep locally
    *or* delegate to tenacity — not both.
-6. **Separate REST and GraphQL budget accounting.** Key the throttle state on
+6. ✅ **Separate REST and GraphQL budget accounting.** Key the throttle state on
    `X-RateLimit-Resource` (already returned; observed as `core`), and add
    `rateLimit { cost remaining resetAt }` to GraphQL queries.
-7. **Share one `GitHubAsync`.** Inject the manager's client into
+7. ✅ **Share one `GitHubAsync`.** Inject the manager's client into
    `GitHubService` and `GitHubClient` so there is exactly one limiter, one
    semaphore, and one throttle state per run.
 
 ### P1 — cut API volume (the real scaling fix)
 
-1. **Batch parked-PR polling.** Replace N× `GET /pulls/{n}` per tick with a
+All four shipped; item 4 by a different mechanism than proposed.
+
+1. ✅ **Batch parked-PR polling.** Replace N× `GET /pulls/{n}` per tick with a
    single aliased GraphQL query covering all parked PRs
    (`pr0: repository(...){pullRequest(number:){...}} pr1: ...`). This turns
    O(parked) into O(1) per tick and is the single largest lever available:
    60 parked PRs go from 360 calls/min to ~6.
-2. **Adaptive first-poll delay.** Do not poll from t=0 at 10 s intervals when
+2. ✅ **Adaptive first-poll delay.** Do not poll from t=0 at 10 s intervals when
    the repo's checks historically take 4 minutes. Schedule the first poll at
-   `p50_check_seconds × 0.8`. (Requires §4.)
-3. **Cache `analyze_block_reason` per `(repo, head_sha)`.** It costs ≥5 calls
-   and is invoked from three sites per PR.
-4. **Propagate a repo's first outcome to its siblings within a run.** If PR
+   `p50_check_seconds × 0.8`. *Shipped as an in-run measurement rather than a
+   stored one, so it needs no persistence and does not pre-commit §4's design.*
+3. ✅ **Cache `analyze_block_reason`.** It costs ≥5 calls
+   and is invoked from three sites per PR. *Shipped with a short TTL rather
+   than the per-`(repo, head_sha)` key proposed here: the reason changes as
+   checks complete while the head SHA does not, so a run-lifetime memo would
+   answer "still blocked" forever and break the wait-and-retry paths.*
+4. ⚠️ **Propagate a repo's first outcome to its siblings within a run.** If PR
    #29 waited out 300 s for a required check that never started, do not make
-   #30, #31 and #32 repeat the same discovery.
+   #30, #31 and #32 repeat the same discovery. *The **outcome** ships but not
+   the **mechanism**: propagation proved unsafe. Absence of a workflow run is
+   a fact about one commit, not a repository — a workflow missing from #29's
+   head says nothing about #30's, which may have been pushed later and
+   dispatched fine. Reusing the finding would skip a wait that could have
+   succeeded and report a failure instead. Each sibling therefore detects the
+   condition itself, in seconds rather than the 300 s this item set out to
+   save, so no PR repeats the expensive discovery.*
 
 ### P2 — correctness of reporting
 
-1. **Re-verify before reporting failure.** Before emitting `FAILED`, re-read
+Six of seven shipped; item 5 was recommended in error (see below).
+
+1. ✅ **Re-verify before reporting failure.** Before emitting `FAILED`, re-read
    the PR once. This alone would have converted 21 of 34 "failures" into
    successes or `AUTO_MERGE_PENDING`.
-2. **Retry 500 on approve**, guarded by a re-read of existing reviews so a
+2. ✅ **Retry 500 on approve**, guarded by a re-read of existing reviews so a
    duplicate approval is never created.
-3. **Treat "Merge already in progress" as park-and-verify**, not terminal.
-4. **Bound the wait for required checks that have not started.** Where a
+3. ✅ **Treat "Merge already in progress" as park-and-verify**, not terminal.
+4. ✅ **Bound the wait for required checks that have not started.** *Also
+   closes the tooling half of #380 Category C.* Where a
    required check has no check-run on the head SHA, the cause is usually a
    GitHub infrastructure problem — ruleset-injected workflows queued but never
    executed — which no amount of waiting resolves. That cause is out of scope
    for this tool, but the tool need not spend 300 s per sibling PR
    rediscovering it: report it distinctly from "check failed" and stop waiting.
-5. **Resolve duplicate check runs by latest attempt.** When one check name has
-   several runs on a head SHA, judge it by the most recent non-`cancelled` run.
-   `sigul-sign-docker#175` is blocked purely because a `cancelled` duplicate
-   — a side effect of `concurrency.cancel-in-progress: true` — shadows a
-   `success`.
-6. **Align Dependabot PR titles with commit subjects.** Tracked separately as
+5. ⚠️ **Resolve duplicate check runs by latest attempt.** *Recommended in
+   error — already implemented before this audit was written.*
+   `check_runs.py` landed on 2026-07-31, a fortnight before this document,
+   and `latest_check_run_per_name` already collapses each name to its latest
+   run; `github_async`, `github_service` and `merge_manager` all consume it.
+   The observed symptom was real but its cause was elsewhere:
+   `sigul-sign-docker#175` was blocked by **GitHub's own ruleset evaluation**
+   picking the `cancelled` run, not by this tool's scoring, which had it
+   right. There was never a tooling-side fix to make. Tracked upstream as
+   lfreleng-actions/.github#171.
+6. ✅ **Align Dependabot PR titles with commit subjects.** Tracked separately as
    lfreleng-actions/dependamerge#405.
-7. **Wire or delete `src/dependamerge/engine/`.** Carrying an unused scheduler
-   plus its test suite is a maintenance tax and a trap for future readers.
+7. ✅ **Wire or delete `src/dependamerge/engine/`.** Deleted. Carrying an
+   unused scheduler plus its test suite is a maintenance tax and a trap for
+   future readers.
 
 ---
 

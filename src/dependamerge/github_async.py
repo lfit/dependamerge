@@ -450,6 +450,14 @@ class GitHubAsync:
         self._branch_protection_cache: dict[str, dict[str, Any]] = {}
         self._requires_signatures_cache: dict[str, bool] = {}
         self._requires_strict_checks_cache: dict[str, bool] = {}
+        # Short-lived memo for ``analyze_block_reason``: keyed by
+        # ``(owner, repo, number, head_sha, base_branch)`` →
+        # ``(cached_at, reason)``.  The base branch belongs in the key
+        # because it selects which protection configuration is read.
+        # See ``_BLOCK_REASON_TTL_SECONDS`` for why it expires quickly.
+        self._block_reason_cache: dict[
+            tuple[str, str, int, str, str | None], tuple[float, str]
+        ] = {}
 
         # Cache for the token's OAuth scopes.  ``_token_scopes_fetched``
         # distinguishes "not looked up yet" from "looked up, but this token
@@ -861,6 +869,49 @@ class GitHubAsync:
             return []
         return [run for run in (data.get("check_runs") or []) if isinstance(run, dict)]
 
+    async def get_workflow_run_names_for_sha(
+        self, owner: str, repo: str, head_sha: str
+    ) -> set[str]:
+        """Names of Actions workflow runs that exist for *head_sha*.
+
+        Distinct from check runs.  A required workflow that GitHub never
+        dispatched has **no workflow run at all** --- not a queued one, not
+        a failed one, nothing --- so its absence here is the signal that
+        waiting cannot help.  Check runs cannot express that: the
+        workflow simply never appears.
+
+        Paginated: a busy commit can carry more than one page of runs,
+        and a required workflow sitting on page two would otherwise read
+        as absent.  Callers use absence to *stop waiting*, so a false
+        absence turns a live workflow into a reported merge failure.
+
+        Request failures **propagate**: they are not converted into an
+        empty set, and callers that use absence to stop waiting must
+        handle them (``_absent_workflow_runs`` does).  An empty set
+        means the lookup succeeded and found nothing, which is itself
+        ambiguous --- a commit whose runs are not yet visible looks
+        identical --- so that too must read as "unknown" rather than
+        "nothing ran".  Both readings land on the same safe action:
+        keep waiting.
+        """
+        names: set[str] = set()
+        async for page in self.get_paginated(
+            f"/repos/{owner}/{repo}/actions/runs",
+            params={"head_sha": head_sha},
+            per_page=100,
+        ):
+            if not isinstance(page, dict):
+                continue
+            runs = page.get("workflow_runs")
+            if not runs:
+                break
+            for run in runs:
+                if isinstance(run, dict):
+                    name = run.get("name")
+                    if isinstance(name, str) and name:
+                        names.add(name)
+        return names
+
     async def get_failing_status_contexts(
         self, owner: str, repo: str, ref: str
     ) -> list[str]:
@@ -959,6 +1010,33 @@ class GitHubAsync:
         # Should not be reached due to reraise=True; keep mypy happy
         raise GraphQLError("GraphQL request failed after retries")
 
+    def clear_block_reasons(self) -> None:
+        """Forget every memoised block reason.
+
+        For run boundaries: the merge manager supports reuse, and a
+        non-confirmed invocation runs the whole batch as a preview
+        first.  Expiry alone is not enough --- a second run can begin
+        inside the window, and checks complete while a head SHA stays
+        constant, so the earlier run's answer can be both cached and
+        wrong.
+        """
+        self._block_reason_cache.clear()
+
+    def invalidate_block_reason(self, owner: str, repo: str, number: int) -> None:
+        """Forget any memoised block reason for a PR.
+
+        Called after operations that change *why* a PR is blocked ---
+        approving it, or attempting a merge.  Without this, the memo
+        outlives the state it describes: approving a PR that reported
+        "requires approval", then failing the retry for a different
+        reason, would replay the stale approval message and could send
+        the failure down the wrong recovery path.
+        """
+        for key in [
+            k for k in self._block_reason_cache if k[:3] == (owner, repo, number)
+        ]:
+            self._block_reason_cache.pop(key, None)
+
     async def approve_pull_request(
         self, owner: str, repo: str, number: int, body: str
     ) -> None:
@@ -996,12 +1074,18 @@ class GitHubAsync:
                     number,
                     "transient error",
                 )
+                # Reporting success means the approval landed, so the
+                # memo must go here too --- not only on the path where
+                # the POST itself returned cleanly.
+                self.invalidate_block_reason(owner, repo, number)
                 return
             try:
                 await self.post(
                     f"/repos/{owner}/{repo}/pulls/{number}/reviews",
                     json={"event": "APPROVE", "body": body},
                 )
+                # The PR's block reason has just changed by construction.
+                self.invalidate_block_reason(owner, repo, number)
                 return
             except Exception as e:
                 perm_error = self._parse_permission_error(e, "approve", owner, repo)
@@ -1034,6 +1118,7 @@ class GitHubAsync:
                 repo,
                 number,
             )
+            self.invalidate_block_reason(owner, repo, number)
             return
         assert last_exc is not None
         raise last_exc
@@ -1095,6 +1180,9 @@ class GitHubAsync:
         Raises:
             PermissionError: If token lacks required permissions
         """
+        # A merge attempt changes the PR's state whether it succeeds or
+        # is refused, so any memoised block reason describes the past.
+        self.invalidate_block_reason(owner, repo, number)
         try:
             self.log.debug(
                 f"Attempting to merge PR #{number} in {owner}/{repo} with method={merge_method}"
@@ -2555,6 +2643,21 @@ class GitHubAsync:
                 return behind
         return None
 
+    # How long an ``analyze_block_reason`` result stays usable.
+    #
+    # Deliberately short.  The obvious design --- cache per
+    # ``(repo, head_sha)`` for the run --- is unsafe: the reason a PR is
+    # blocked changes as checks complete, while its head SHA does not,
+    # and callers re-analyse after waiting precisely to observe that
+    # change.  A run-lifetime cache would answer "still blocked" forever.
+    #
+    # The waste worth removing is the *burst*: a single evaluation pass
+    # calls this several times in quick succession with nothing changing
+    # in between, at five or more requests each.  A few seconds collapses
+    # that burst and has long expired by the time any wait loop
+    # re-checks.
+    _BLOCK_REASON_TTL_SECONDS = 10.0
+
     async def analyze_block_reason(
         self,
         owner: str,
@@ -2573,7 +2676,36 @@ class GitHubAsync:
         skip the PR-detail fetch this method otherwise performs just to
         read ``base.ref`` — one request saved per invocation, and this
         method runs several times per blocked PR.
+
+        Results are memoised briefly; see
+        ``_BLOCK_REASON_TTL_SECONDS`` for why the window is short.  The
+        base branch is part of the memo key because it selects which
+        protection and required-check configuration is consulted: a
+        retargeted PR, or two callers supplying different bases, must
+        not share an answer computed against the other's branch.
         """
+        cache_key = (owner, repo, number, head_sha, base_branch)
+        cached = self._block_reason_cache.get(cache_key)
+        if cached is not None:
+            cached_at, cached_reason = cached
+            if _now() - cached_at < self._BLOCK_REASON_TTL_SECONDS:
+                return cached_reason
+
+        reason = await self._analyze_block_reason_uncached(
+            owner, repo, number, head_sha, base_branch
+        )
+        self._block_reason_cache[cache_key] = (_now(), reason)
+        return reason
+
+    async def _analyze_block_reason_uncached(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        head_sha: str,
+        base_branch: str | None = None,
+    ) -> str:
+        """Compute the block reason, ignoring the memo."""
         # Reviews
         approved = False
         human_changes_requested = False

@@ -75,7 +75,7 @@ from __future__ import annotations
 
 import os
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -160,5 +160,11 @@ def make_merge_manager(**overrides: Any) -> tuple[AsyncMergeManager, AsyncMock]:
     defaults.update(overrides)
     mgr = AsyncMergeManager(**defaults)
     client = AsyncMock()
+    # Mirror the real client's shape for the handful of *synchronous*
+    # methods on it.  A blanket ``AsyncMock`` turns these into
+    # coroutines that production code never awaits, producing
+    # "never awaited" warnings that obscure genuine ones.
+    client.invalidate_block_reason = MagicMock()
+    client.clear_block_reasons = MagicMock()
     mgr._github_client = client
     return mgr, client
