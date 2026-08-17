@@ -37,7 +37,8 @@ _ALLOWED_FILES: set[str] = {
 # not construction) — these legitimately reference /c/ and /+/ in regexes,
 # docstrings, and error messages but never emit a URL.
 _DETECTION_ONLY_FILES: set[str] = {
-    str(_SRC_ROOT / "url_parser.py"),
+    str(_SRC_ROOT / "url_parser" / "change.py"),
+    str(_SRC_ROOT / "url_parser" / "topic.py"),
 }
 
 # ---------------------------------------------------------------------------
