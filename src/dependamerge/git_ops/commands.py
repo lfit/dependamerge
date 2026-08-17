@@ -14,8 +14,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 
+from . import process
 from .paths import PathLike
-from .process import GitResult, run_git
+from .process import GitResult
 
 
 def add_remote(
@@ -25,7 +26,7 @@ def add_remote(
     cwd: PathLike,
     logger: Callable[[str], None] | None = None,
 ) -> None:
-    run_git(["git", "remote", "add", name, url], cwd=cwd, logger=logger)
+    process.run_git(["git", "remote", "add", name, url], cwd=cwd, logger=logger)
 
 
 def checkout(
@@ -41,9 +42,9 @@ def checkout(
     if create:
         args.append("-B")
     args.append(branch)
-    run_git(args, cwd=cwd, logger=logger)
+    process.run_git(args, cwd=cwd, logger=logger)
     if track:
-        run_git(
+        process.run_git(
             ["git", "branch", "--set-upstream-to", track, branch],
             cwd=cwd,
             logger=logger,
@@ -67,7 +68,9 @@ def rebase(
     if autostash:
         args.append("--autostash")
     args.append(onto)
-    return run_git(args, cwd=cwd, interactive=interactive, check=False, logger=logger)
+    return process.run_git(
+        args, cwd=cwd, interactive=interactive, check=False, logger=logger
+    )
 
 
 def rebase_continue(
@@ -76,7 +79,7 @@ def rebase_continue(
     interactive: bool = False,
     logger: Callable[[str], None] | None = None,
 ) -> GitResult:
-    return run_git(
+    return process.run_git(
         ["git", "rebase", "--continue"],
         cwd=cwd,
         interactive=interactive,
@@ -90,7 +93,7 @@ def rebase_abort(
     cwd: PathLike,
     logger: Callable[[str], None] | None = None,
 ) -> None:
-    run_git(["git", "rebase", "--abort"], cwd=cwd, logger=logger)
+    process.run_git(["git", "rebase", "--abort"], cwd=cwd, logger=logger)
 
 
 def status_porcelain(
@@ -99,7 +102,9 @@ def status_porcelain(
     logger: Callable[[str], None] | None = None,
 ) -> str:
     """Return porcelain status output."""
-    res = run_git(["git", "status", "--porcelain"], cwd=cwd, check=True, logger=logger)
+    res = process.run_git(
+        ["git", "status", "--porcelain"], cwd=cwd, check=True, logger=logger
+    )
     return res.stdout
 
 
@@ -136,7 +141,7 @@ def add(
         args = ["git", "add", "--", paths]
     else:
         args = ["git", "add", "--", *paths]
-    run_git(args, cwd=cwd, logger=logger)
+    process.run_git(args, cwd=cwd, logger=logger)
 
 
 def add_all(
@@ -144,7 +149,7 @@ def add_all(
     cwd: PathLike,
     logger: Callable[[str], None] | None = None,
 ) -> None:
-    run_git(["git", "add", "-A"], cwd=cwd, logger=logger)
+    process.run_git(["git", "add", "-A"], cwd=cwd, logger=logger)
 
 
 def commit_amend_no_edit(
@@ -156,7 +161,7 @@ def commit_amend_no_edit(
     args = ["git", "commit", "--amend", "--no-edit"]
     if no_verify:
         args.append("--no-verify")
-    run_git(args, cwd=cwd, logger=logger)
+    process.run_git(args, cwd=cwd, logger=logger)
 
 
 def rev_list_count(
@@ -166,7 +171,9 @@ def rev_list_count(
     logger: Callable[[str], None] | None = None,
 ) -> int:
     """Return the number of commits in the given revision range (e.g., 'base..HEAD')."""
-    res = run_git(["git", "rev-list", "--count", range_expr], cwd=cwd, logger=logger)
+    res = process.run_git(
+        ["git", "rev-list", "--count", range_expr], cwd=cwd, logger=logger
+    )
     try:
         return int((res.stdout or "0").strip())
     except ValueError:
