@@ -46,7 +46,7 @@ class _CopilotThreadMixin:
         Returns:
             List of review thread data
         """
-        from .github_graphql import GET_PR_REVIEW_THREADS
+        from ..github_graphql import GET_PR_REVIEW_THREADS
 
         threads = []
         cursor = None
@@ -183,7 +183,7 @@ class _CopilotThreadMixin:
             )
             return True
 
-        from .github_graphql import RESOLVE_REVIEW_THREAD
+        from ..github_graphql import RESOLVE_REVIEW_THREAD
 
         try:
             variables = {"threadId": thread_id}
