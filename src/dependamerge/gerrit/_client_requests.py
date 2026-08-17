@@ -16,6 +16,8 @@ effective.  Every attribute this mixin reads is established by
 ``GerritRestClient.__init__``.
 """
 
+# pyright: reportUninitializedInstanceVariable=false
+
 from __future__ import annotations
 
 import logging

@@ -18,8 +18,12 @@ import sys
 from datetime import datetime, timedelta
 from typing import Any
 
-from dependamerge import progress_tracker as pt
 from dependamerge.progress_tracker import MergeProgressTracker, ProgressTracker
+
+# ``Live`` is patched in the module that *reads* it, not on the package
+# that re-exports it: a call site resolves globals from its own module,
+# so patching the package attribute would silently have no effect.
+from dependamerge.progress_tracker import scan as pt_scan
 
 
 class _RecordingLive:
@@ -47,7 +51,7 @@ class _RecordingLive:
 
 class TestLiveRenderableIsCallable:
     def test_start_passes_get_renderable(self, monkeypatch) -> None:
-        monkeypatch.setattr(pt, "Live", _RecordingLive)
+        monkeypatch.setattr(pt_scan, "Live", _RecordingLive)
         tracker = MergeProgressTracker("owner")
         tracker.rich_available = True
         tracker.start()
@@ -60,7 +64,7 @@ class TestLiveRenderableIsCallable:
         tracker.stop()
 
     def test_resume_passes_get_renderable(self, monkeypatch) -> None:
-        monkeypatch.setattr(pt, "Live", _RecordingLive)
+        monkeypatch.setattr(pt_scan, "Live", _RecordingLive)
         tracker = MergeProgressTracker("owner")
         tracker.rich_available = True
         tracker.start()
@@ -75,7 +79,7 @@ class TestLiveRenderableIsCallable:
         # Event-driven repaints go through refresh() (re-render via the
         # callable), never update(<static text>), which would reinstate
         # a frozen snapshot.
-        monkeypatch.setattr(pt, "Live", _RecordingLive)
+        monkeypatch.setattr(pt_scan, "Live", _RecordingLive)
         tracker = MergeProgressTracker("owner")
         tracker.rich_available = True
         tracker.start()
@@ -122,7 +126,7 @@ class TestTerminalLoggingQuieted:
         return handler, handler.level
 
     def test_start_quiets_and_stop_restores(self, monkeypatch) -> None:
-        monkeypatch.setattr(pt, "Live", _RecordingLive)
+        monkeypatch.setattr(pt_scan, "Live", _RecordingLive)
         # Pretend we are attached to a real TTY so quieting engages.
         monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
         handler, original_level = self._make_terminal_handler()
@@ -142,7 +146,7 @@ class TestTerminalLoggingQuieted:
             root.removeHandler(handler)
 
     def test_suspend_restores_and_resume_requiets(self, monkeypatch) -> None:
-        monkeypatch.setattr(pt, "Live", _RecordingLive)
+        monkeypatch.setattr(pt_scan, "Live", _RecordingLive)
         monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
         handler, original_level = self._make_terminal_handler()
         root = logging.getLogger()
@@ -163,7 +167,7 @@ class TestTerminalLoggingQuieted:
             root.removeHandler(handler)
 
     def test_non_tty_leaves_handlers_untouched(self, monkeypatch) -> None:
-        monkeypatch.setattr(pt, "Live", _RecordingLive)
+        monkeypatch.setattr(pt_scan, "Live", _RecordingLive)
         monkeypatch.setattr(sys.stdout, "isatty", lambda: False, raising=False)
         handler, original_level = self._make_terminal_handler()
         root = logging.getLogger()
@@ -181,7 +185,7 @@ class TestTerminalLoggingQuieted:
             root.removeHandler(handler)
 
     def test_file_handler_is_not_quieted(self, monkeypatch, tmp_path) -> None:
-        monkeypatch.setattr(pt, "Live", _RecordingLive)
+        monkeypatch.setattr(pt_scan, "Live", _RecordingLive)
         monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
         log_file = tmp_path / "run.log"
         handler = logging.FileHandler(log_file)
@@ -209,7 +213,7 @@ class TestTerminalLoggingQuieted:
         quieted, so a non-TTY stderr handler must keep its level even
         while the live display is active.
         """
-        monkeypatch.setattr(pt, "Live", _RecordingLive)
+        monkeypatch.setattr(pt_scan, "Live", _RecordingLive)
         # stdout is a real terminal (top-level guard passes)...
         monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
         # ...but stderr has been redirected to a file (not a TTY).
@@ -246,7 +250,7 @@ class TestTerminalLoggingQuieted:
                 recorded["level_at_stop"] = handler.level
                 super().stop()
 
-        monkeypatch.setattr(pt, "Live", _StopRecordingLive)
+        monkeypatch.setattr(pt_scan, "Live", _StopRecordingLive)
         monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
         root = logging.getLogger()
         root.addHandler(handler)
@@ -274,7 +278,7 @@ class TestTerminalLoggingQuieted:
                 recorded["level_at_stop"] = handler.level
                 super().stop()
 
-        monkeypatch.setattr(pt, "Live", _StopRecordingLive)
+        monkeypatch.setattr(pt_scan, "Live", _StopRecordingLive)
         monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
         root = logging.getLogger()
         root.addHandler(handler)
@@ -307,7 +311,7 @@ class TestTerminalLoggingQuieted:
                 recorded["level_at_start"] = handler.level
                 super().start()
 
-        monkeypatch.setattr(pt, "Live", _StartRecordingLive)
+        monkeypatch.setattr(pt_scan, "Live", _StartRecordingLive)
         monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
         root = logging.getLogger()
         root.addHandler(handler)
@@ -330,7 +334,7 @@ class TestTerminalLoggingQuieted:
                 recorded["level_at_start"] = handler.level
                 super().start()
 
-        monkeypatch.setattr(pt, "Live", _StartRecordingLive)
+        monkeypatch.setattr(pt_scan, "Live", _StartRecordingLive)
         monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
         root = logging.getLogger()
         root.addHandler(handler)
@@ -385,7 +389,7 @@ class TestSafeStdoutIsTty:
             def flush(self) -> None:
                 pass
 
-        monkeypatch.setattr(pt, "Live", _RecordingLive)
+        monkeypatch.setattr(pt_scan, "Live", _RecordingLive)
         monkeypatch.setattr(sys, "stdout", _NoIsattyStream())
         tracker = MergeProgressTracker("owner")
         tracker.rich_available = True
