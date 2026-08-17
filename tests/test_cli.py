@@ -40,7 +40,9 @@ class TestCLI:
         before exercising the code under test.  Patch it out for
         the duration of every test in the class.
         """
-        with patch("dependamerge.cli._check_merge_permissions") as mock_check:
+        with patch(
+            "dependamerge.cli._permissions._check_merge_permissions"
+        ) as mock_check:
             yield mock_check
 
     def setup_method(self):
@@ -52,8 +54,8 @@ class TestCLI:
         # Should contain the version banner
         assert "dependamerge version" in result.stdout
 
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.PRComparator")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._deps.PRComparator")
     @patch("dependamerge.github_service.GitHubService")
     def test_merge_command_interactive_default(
         self,
@@ -199,7 +201,7 @@ class TestCLI:
         assert result.exit_code == 1
         assert "Invalid --max-wait" in result.stdout
 
-    @patch("dependamerge.cli.GitHubClient")
+    @patch("dependamerge.cli._deps.GitHubClient")
     def test_merge_command_non_automation_pr(self, mock_client_class):
         mock_client = Mock()
         mock_client_class.return_value = mock_client
@@ -238,8 +240,8 @@ class TestCLI:
         assert "human-authored" in result.stdout
         assert "--include-human-prs" in result.stdout
 
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.PRComparator")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._deps.PRComparator")
     @patch("dependamerge.github_service.GitHubService")
     @patch("dependamerge.merge_manager.GitHubAsync")
     def test_merge_command_no_similar_prs_merges_source(
@@ -370,7 +372,7 @@ class TestCLI:
         # The mocking prevented actual HTTP calls and the CLI completed successfully
         assert "0 failed" in result.stdout
 
-    @patch("dependamerge.cli.GitHubClient")
+    @patch("dependamerge.cli._deps.GitHubClient")
     def test_merge_command_non_automation_pr_no_override(self, mock_client_class):
         """Test that non-automation PR without override shows SHA and exits."""
         mock_client = Mock()
@@ -413,8 +415,8 @@ class TestCLI:
         assert "human-authored" in result.stdout
         assert "--include-human-prs" in result.stdout
 
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.PRComparator")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._deps.PRComparator")
     @patch("dependamerge.github_service.GitHubService")
     @patch("dependamerge.merge_manager.GitHubAsync")
     def test_merge_command_human_pr_with_include_flag(
@@ -521,7 +523,7 @@ class TestCLI:
         assert result.exit_code == ExitCode.SUCCESS
         assert "--include-human-prs was supplied" in result.stdout
 
-    @patch("dependamerge.cli.GitHubClient")
+    @patch("dependamerge.cli._deps.GitHubClient")
     def test_merge_command_non_automation_pr_invalid_override(self, mock_client_class):
         """Test that non-automation PR with invalid override SHA fails."""
         mock_client = Mock()
@@ -567,8 +569,8 @@ class TestCLI:
         assert result.exit_code == 8
         assert "Invalid override SHA" in result.stdout
 
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.PRComparator")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._deps.PRComparator")
     @patch("dependamerge.github_service.GitHubService")
     def test_merge_command_non_automation_pr_valid_override(
         self, mock_service_class, mock_comparator_class, mock_client_class
@@ -747,9 +749,9 @@ class TestCLI:
             permitted_labels={"Code-Review": ["-2", "-1", "0", "+1", "+2"]},
         )
 
-    @patch("dependamerge.cli.create_gerrit_comparator")
-    @patch("dependamerge.cli.create_gerrit_service")
-    @patch("dependamerge.cli.resolve_gerrit_credentials")
+    @patch("dependamerge.cli._deps.create_gerrit_comparator")
+    @patch("dependamerge.cli._deps.create_gerrit_service")
+    @patch("dependamerge.cli._deps.resolve_gerrit_credentials")
     def test_gerrit_merge_non_automation_change_no_override(
         self,
         mock_resolve_credentials,
@@ -790,9 +792,9 @@ class TestCLI:
         assert "'CI: Bump github2gerrit workflow to v1.4.3...'" not in output
         service.find_similar_changes.assert_not_called()
 
-    @patch("dependamerge.cli.create_gerrit_comparator")
-    @patch("dependamerge.cli.create_gerrit_service")
-    @patch("dependamerge.cli.resolve_gerrit_credentials")
+    @patch("dependamerge.cli._deps.create_gerrit_comparator")
+    @patch("dependamerge.cli._deps.create_gerrit_service")
+    @patch("dependamerge.cli._deps.resolve_gerrit_credentials")
     def test_gerrit_merge_non_automation_change_valid_override(
         self,
         mock_resolve_credentials,
@@ -834,9 +836,9 @@ class TestCLI:
             candidates=None,
         )
 
-    @patch("dependamerge.cli.create_gerrit_comparator")
-    @patch("dependamerge.cli.create_gerrit_service")
-    @patch("dependamerge.cli.resolve_gerrit_credentials")
+    @patch("dependamerge.cli._deps.create_gerrit_comparator")
+    @patch("dependamerge.cli._deps.create_gerrit_service")
+    @patch("dependamerge.cli._deps.resolve_gerrit_credentials")
     def test_gerrit_merge_non_automation_change_invalid_override(
         self,
         mock_resolve_credentials,
@@ -889,9 +891,9 @@ class TestCLI:
             permitted_labels={"Code-Review": ["-2", "-1", "0", "+1", "+2"]},
         )
 
-    @patch("dependamerge.cli.create_gerrit_comparator")
-    @patch("dependamerge.cli.create_gerrit_service")
-    @patch("dependamerge.cli.resolve_gerrit_credentials")
+    @patch("dependamerge.cli._deps.create_gerrit_comparator")
+    @patch("dependamerge.cli._deps.create_gerrit_service")
+    @patch("dependamerge.cli._deps.resolve_gerrit_credentials")
     def test_gerrit_merge_scopes_candidates_to_source_topic(
         self,
         mock_resolve_credentials,
@@ -937,9 +939,9 @@ class TestCLI:
         output = console.export_text()
         assert "update-settings" in output
 
-    @patch("dependamerge.cli.create_gerrit_comparator")
-    @patch("dependamerge.cli.create_gerrit_service")
-    @patch("dependamerge.cli.resolve_gerrit_credentials")
+    @patch("dependamerge.cli._deps.create_gerrit_comparator")
+    @patch("dependamerge.cli._deps.create_gerrit_service")
+    @patch("dependamerge.cli._deps.resolve_gerrit_credentials")
     def test_gerrit_merge_topic_url_anchors_first_open_change(
         self,
         mock_resolve_credentials,
@@ -1001,9 +1003,9 @@ class TestCLI:
             candidates=[anchor_listed, sibling],
         )
 
-    @patch("dependamerge.cli.create_gerrit_comparator")
-    @patch("dependamerge.cli.create_gerrit_service")
-    @patch("dependamerge.cli.resolve_gerrit_credentials")
+    @patch("dependamerge.cli._deps.create_gerrit_comparator")
+    @patch("dependamerge.cli._deps.create_gerrit_service")
+    @patch("dependamerge.cli._deps.resolve_gerrit_credentials")
     def test_gerrit_merge_topic_url_no_open_changes(
         self,
         mock_resolve_credentials,
@@ -1043,9 +1045,9 @@ class TestCLI:
             console.export_text()
         )
 
-    @patch("dependamerge.cli.create_gerrit_comparator")
-    @patch("dependamerge.cli.create_gerrit_service")
-    @patch("dependamerge.cli.resolve_gerrit_credentials")
+    @patch("dependamerge.cli._deps.create_gerrit_comparator")
+    @patch("dependamerge.cli._deps.create_gerrit_service")
+    @patch("dependamerge.cli._deps.resolve_gerrit_credentials")
     def test_gerrit_merge_explicit_topic_flag_wins(
         self,
         mock_resolve_credentials,
@@ -1084,9 +1086,9 @@ class TestCLI:
 
         service.get_changes_by_topic.assert_called_once_with("forced-topic")
 
-    @patch("dependamerge.cli.create_gerrit_comparator")
-    @patch("dependamerge.cli.create_gerrit_service")
-    @patch("dependamerge.cli.resolve_gerrit_credentials")
+    @patch("dependamerge.cli._deps.create_gerrit_comparator")
+    @patch("dependamerge.cli._deps.create_gerrit_service")
+    @patch("dependamerge.cli._deps.resolve_gerrit_credentials")
     def test_gerrit_merge_interactive_prompts_for_continue_sha(
         self,
         mock_resolve_credentials,
@@ -1131,11 +1133,11 @@ class TestCLI:
         assert "Test mode detected" in output
         assert "To proceed, run with --no-confirm" not in output
 
-    @patch("dependamerge.cli.create_submit_manager")
-    @patch("dependamerge.cli._confirm_gerrit_submission")
-    @patch("dependamerge.cli.create_gerrit_comparator")
-    @patch("dependamerge.cli.create_gerrit_service")
-    @patch("dependamerge.cli.resolve_gerrit_credentials")
+    @patch("dependamerge.cli._deps.create_submit_manager")
+    @patch("dependamerge.cli._gerrit_merge._confirm_gerrit_submission")
+    @patch("dependamerge.cli._deps.create_gerrit_comparator")
+    @patch("dependamerge.cli._deps.create_gerrit_service")
+    @patch("dependamerge.cli._deps.resolve_gerrit_credentials")
     def test_gerrit_merge_interactive_confirmed_submits(
         self,
         mock_resolve_credentials,
@@ -1177,11 +1179,11 @@ class TestCLI:
         mock_confirm.assert_called_once_with(change, console)
         submit_manager.submit_changes_parallel.assert_called_once()
 
-    @patch("dependamerge.cli.create_submit_manager")
-    @patch("dependamerge.cli._confirm_gerrit_submission")
-    @patch("dependamerge.cli.create_gerrit_comparator")
-    @patch("dependamerge.cli.create_gerrit_service")
-    @patch("dependamerge.cli.resolve_gerrit_credentials")
+    @patch("dependamerge.cli._deps.create_submit_manager")
+    @patch("dependamerge.cli._gerrit_merge._confirm_gerrit_submission")
+    @patch("dependamerge.cli._deps.create_gerrit_comparator")
+    @patch("dependamerge.cli._deps.create_gerrit_service")
+    @patch("dependamerge.cli._deps.resolve_gerrit_credentials")
     def test_gerrit_merge_interactive_declined_does_not_submit(
         self,
         mock_resolve_credentials,
@@ -1289,8 +1291,8 @@ class TestCLI:
         assert "https://gerrit.example.org/c/proj/+/2" in output
         assert "Failed to submit (change may not be submittable)" in output
 
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.PRComparator")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._deps.PRComparator")
     @patch("dependamerge.github_service.GitHubService")
     @patch("dependamerge.merge_manager.GitHubAsync")
     def test_merge_command_no_confirm_flag(
@@ -1374,8 +1376,8 @@ class TestCLI:
         # Should show direct merge output
         assert "📈 Final Results:" in result.stdout
 
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.PRComparator")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._deps.PRComparator")
     @patch("dependamerge.github_service.GitHubService")
     def test_close_command_automation_pr(
         self, mock_service_class, mock_comparator_class, mock_client_class
@@ -1437,7 +1439,7 @@ class TestCLI:
         assert result.exit_code == 0
         assert "closed" in result.stdout.lower()
 
-    @patch("dependamerge.cli.GitHubClient")
+    @patch("dependamerge.cli._deps.GitHubClient")
     def test_close_command_non_automation_pr_no_override(self, mock_client_class):
         """Test that close command for non-automation PR without override shows SHA."""
         mock_client = Mock()
@@ -1660,10 +1662,10 @@ class TestMergeDryRun:
     def setup_method(self):
         self.runner = CliRunner()
 
-    @patch("dependamerge.cli._run_parallel_merge")
-    @patch("dependamerge.cli._check_merge_permissions")
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.PRComparator")
+    @patch("dependamerge.cli._parallel._run_parallel_merge")
+    @patch("dependamerge.cli._permissions._check_merge_permissions")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._deps.PRComparator")
     @patch("dependamerge.github_service.GitHubService")
     def test_dry_run_skips_permission_check_and_previews(
         self,
@@ -1738,10 +1740,10 @@ class TestMergeDryRun:
         assert captured.get("preview") is True
         assert "Dry run" in result.stdout
 
-    @patch("dependamerge.cli._run_parallel_merge")
-    @patch("dependamerge.cli._check_merge_permissions")
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.PRComparator")
+    @patch("dependamerge.cli._parallel._run_parallel_merge")
+    @patch("dependamerge.cli._permissions._check_merge_permissions")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._deps.PRComparator")
     @patch("dependamerge.github_service.GitHubService")
     def test_dry_run_forces_preview_even_with_no_confirm(
         self,
@@ -1825,9 +1827,9 @@ class TestCloseDryRun:
     def setup_method(self):
         self.runner = CliRunner()
 
-    @patch("dependamerge.cli.AsyncCloseManager")
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.PRComparator")
+    @patch("dependamerge.cli._deps.AsyncCloseManager")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._deps.PRComparator")
     @patch("dependamerge.github_service.GitHubService")
     def test_close_dry_run_previews_without_closing(
         self,

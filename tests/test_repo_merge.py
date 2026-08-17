@@ -251,8 +251,8 @@ class TestMergeRepoUrl:
     def setup_method(self):
         self.runner = CliRunner()
 
-    @patch("dependamerge.cli.asyncio.run")
-    @patch("dependamerge.cli.GitHubClient")
+    @patch("dependamerge.cli._repo_merge.asyncio.run")
+    @patch("dependamerge.cli._deps.GitHubClient")
     def test_repo_url_is_accepted(self, mock_client_class, mock_asyncio_run):
         """Verify that a repo URL doesn't produce 'Invalid URL' error."""
         mock_client = Mock()
@@ -284,8 +284,8 @@ class TestMergeRepoUrl:
         assert result.exit_code == 0, f"CLI failed: {result.stdout}"
         assert "❌ Invalid URL:" not in result.stdout
 
-    @patch("dependamerge.cli.asyncio.run")
-    @patch("dependamerge.cli.GitHubClient")
+    @patch("dependamerge.cli._repo_merge.asyncio.run")
+    @patch("dependamerge.cli._deps.GitHubClient")
     def test_repo_url_trailing_slash_accepted(
         self, mock_client_class, mock_asyncio_run
     ):
@@ -316,8 +316,8 @@ class TestMergeRepoUrl:
         assert result.exit_code == 0, f"CLI failed: {result.stdout}"
         assert "❌ Invalid URL:" not in result.stdout
 
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.asyncio.run")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._repo_merge.asyncio.run")
     def test_repo_merge_automation_only_default(
         self, mock_asyncio_run, mock_client_class
     ):
@@ -370,8 +370,8 @@ class TestMergeRepoUrl:
         assert result.exit_code == 0, f"CLI failed: {result.stdout}"
         assert "Repository mode" in result.stdout
 
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.asyncio.run")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._repo_merge.asyncio.run")
     def test_repo_merge_no_open_prs(self, mock_asyncio_run, mock_client_class):
         """When no matching PRs exist, show appropriate message."""
         mock_client = Mock()
@@ -405,8 +405,8 @@ class TestMergeRepoUrl:
         assert "No open" in result.stdout
         assert "PRs found" in result.stdout
 
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.asyncio.run")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._repo_merge.asyncio.run")
     def test_repo_merge_include_human_prs_flag(
         self, mock_asyncio_run, mock_client_class
     ):
@@ -457,8 +457,8 @@ class TestMergeRepoUrl:
         # Should show human PRs warning
         assert "Repository mode" in result.stdout
 
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.asyncio.run")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._repo_merge.asyncio.run")
     def test_repo_merge_human_prs_no_prompt_when_none_found(
         self, mock_asyncio_run, mock_client_class
     ):
@@ -529,8 +529,8 @@ class TestMergeRepoUrl:
         assert result.exit_code == 1
         assert "❌ Invalid URL:" in result.stdout
 
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.asyncio.run")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._repo_merge.asyncio.run")
     def test_repo_merge_shows_pr_classification(
         self, mock_asyncio_run, mock_client_class
     ):
@@ -582,8 +582,8 @@ class TestMergeRepoUrl:
         assert "Automation PRs:" in result.stdout
         assert "Human PRs:" in result.stdout
 
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.asyncio.run")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._repo_merge.asyncio.run")
     def test_repo_merge_no_confirm_merges_directly(
         self, mock_asyncio_run, mock_client_class
     ):
@@ -653,7 +653,7 @@ class TestMergeUrlRouting:
     def setup_method(self):
         self.runner = CliRunner()
 
-    @patch("dependamerge.cli.GitHubClient")
+    @patch("dependamerge.cli._deps.GitHubClient")
     def test_pr_url_still_works(self, mock_client_class):
         """A normal PR URL should still route to the original merge flow."""
         mock_client = Mock()

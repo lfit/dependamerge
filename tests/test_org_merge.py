@@ -223,8 +223,8 @@ class TestMergeOrgUrl:
     def setup_method(self):
         self.runner = CliRunner()
 
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.asyncio.run")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._org_merge.asyncio.run")
     def test_owner_url_routes_to_org_handler(self, mock_asyncio_run, mock_client_class):
         auto_pr = _make_pr(1, repo="acme/widget")
 
@@ -250,8 +250,8 @@ class TestMergeOrgUrl:
         assert "Owner mode" in out
         assert "acme" in out
 
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.asyncio.run")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._org_merge.asyncio.run")
     def test_owner_url_no_prs(self, mock_asyncio_run, mock_client_class):
         mock_client = Mock()
         mock_client.token = "test_token"
@@ -273,8 +273,8 @@ class TestMergeOrgUrl:
         assert "No open" in out
         assert "PRs found" in out
 
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.asyncio.run")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._org_merge.asyncio.run")
     def test_owner_url_groups_by_repo(self, mock_asyncio_run, mock_client_class):
         prs = [
             _make_pr(1, repo="acme/alpha"),
@@ -300,8 +300,8 @@ class TestMergeOrgUrl:
         assert "acme/beta" in out
         assert "2 repositories" in out
 
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.asyncio.run")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._org_merge.asyncio.run")
     def test_owner_url_surfaces_scan_errors(self, mock_asyncio_run, mock_client_class):
         auto_pr = _make_pr(1, repo="acme/widget")
 
@@ -327,8 +327,8 @@ class TestMergeOrgUrl:
         assert "could not be scanned" in out
         assert "acme/broken" in out
 
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.asyncio.run")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._org_merge.asyncio.run")
     def test_orgs_canonical_url_routes_to_org_handler(
         self, mock_asyncio_run, mock_client_class
     ):
@@ -356,9 +356,9 @@ class TestMergeOrgUrl:
         out = _strip_ansi(result.stdout)
         assert "owner" in out.lower()
 
-    @patch("dependamerge.cli._check_merge_permissions")
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.asyncio.run")
+    @patch("dependamerge.cli._permissions._check_merge_permissions")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._org_merge.asyncio.run")
     def test_permission_check_uses_concrete_repo(
         self, mock_asyncio_run, mock_client_class, mock_check_perms
     ):
@@ -392,9 +392,9 @@ class TestMergeOrgUrl:
         mock_check_perms.assert_called_once()
         assert captured["repo_name"] == "widget"
 
-    @patch("dependamerge.cli._check_merge_permissions")
-    @patch("dependamerge.cli.GitHubClient")
-    @patch("dependamerge.cli.asyncio.run")
+    @patch("dependamerge.cli._permissions._check_merge_permissions")
+    @patch("dependamerge.cli._deps.GitHubClient")
+    @patch("dependamerge.cli._org_merge.asyncio.run")
     def test_permission_check_skipped_when_no_prs(
         self, mock_asyncio_run, mock_client_class, mock_check_perms
     ):
