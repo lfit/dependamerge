@@ -28,9 +28,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _SRC_ROOT = _PROJECT_ROOT / "src" / "dependamerge"
 
 # Files that are *allowed* to construct Gerrit URLs directly.
-# gerrit/urls.py  — the canonical builder implementation
+# gerrit/urls/builder.py  — the canonical builder implementation
 _ALLOWED_FILES: set[str] = {
-    str(_SRC_ROOT / "gerrit" / "urls.py"),
+    str(_SRC_ROOT / "gerrit" / "urls" / "builder.py"),
 }
 
 # Files that only *detect* / *parse* Gerrit URL shapes (pattern matching,
@@ -95,7 +95,7 @@ _DIRECT_URL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
 # Pattern for constructing a Gerrit base URL from host + base_path.
 # This catches: f"https://{host}/{base_path}/"  and similar shapes.
-# Only flagged outside urls.py AND the low-level client bootstrap
+# Only flagged outside urls/builder.py AND the low-level client bootstrap
 # (gerrit/client.py:build_client is the HTTP transport layer and needs
 # its own base URL before the builder exists).
 _BASE_URL_PATTERN = re.compile(
@@ -103,7 +103,7 @@ _BASE_URL_PATTERN = re.compile(
 )
 
 _BASE_URL_ALLOWED_FILES: set[str] = {
-    str(_SRC_ROOT / "gerrit" / "urls.py"),
+    str(_SRC_ROOT / "gerrit" / "urls" / "builder.py"),
     # The REST client bootstraps its own base URL before the builder is
     # available — this is acceptable at the transport layer.
     str(_SRC_ROOT / "gerrit" / "client.py"),
@@ -241,7 +241,7 @@ class TestNoDirectGerritUrlConstruction:
         """Production files must not build Gerrit base URLs manually.
 
         The pattern ``f"https://{host}/{base_path}/"`` should only appear
-        in ``gerrit/urls.py`` (the builder) and ``gerrit/client.py``
+        in ``gerrit/urls/builder.py`` (the builder) and ``gerrit/client.py``
         (transport-layer bootstrap).  Everywhere else, use
         ``GerritUrlBuilder._build_base_url()`` or its public methods.
         """
