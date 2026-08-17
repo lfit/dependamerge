@@ -2,81 +2,19 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 """
-GraphQL query strings for retrieving repositories in an organization and their
-open pull requests, including status check rollups and basic file/comment data.
+Open pull request queries.
 
-These queries are designed to batch-read as much as possible to reduce the
-number of HTTP round-trips compared to multiple REST calls per PR.
+The two queries here carry the full per-PR payload the scanner needs —
+mergeability, base/head refs and repositories, changed files, recent
+comments, reviews and the latest commit's status check rollup — so a scan
+does not have to fall back to per-PR REST calls.
 
-Notes:
-- The mergeable field is an enum: MERGEABLE | CONFLICTING | UNKNOWN
-- The mergeStateStatus field includes states like CLEAN, DIRTY, BLOCKED, BEHIND, DRAFT, UNKNOWN
-- statusCheckRollup provides both CheckRun and StatusContext results for the latest commit
+``ORG_REPOS_WITH_OPEN_PRS`` walks an organization repository-by-repository
+with a first page of PRs attached; ``REPO_OPEN_PRS_PAGE`` continues a
+single repository's PR pagination and takes its page sizes as variables.
 """
 
-__all__ = [
-    "ORG_REPOS_ONLY",
-    "USER_REPOS_ONLY",
-    "ORG_REPOS_WITH_OPEN_PRS",
-    "REPO_OPEN_PRS_PAGE",
-    "ENABLE_AUTO_MERGE",
-    "GET_BRANCH_PROTECTION",
-    "GET_PR_REVIEW_THREADS",
-    "RESOLVE_REVIEW_THREAD",
-]
-
-# Lightweight query to list repositories without PR nodes for accurate counting.
-# totalCount is provided by the GitHub GraphQL API for free on connection
-# objects, so the first page immediately reveals the org-wide repo total
-# without requiring a separate counting pass.
-#
-# ``isFork`` is included so owner-wide bulk operations can exclude fork
-# repositories without a second round-trip; existing consumers that only
-# read ``nameWithOwner`` / ``isArchived`` simply ignore the extra field.
-ORG_REPOS_ONLY = """
-query($org: String!, $reposCursor: String) {
-  organization(login: $org) {
-    repositories(first: 100, after: $reposCursor, orderBy: { field: NAME, direction: ASC }) {
-      totalCount
-      pageInfo {
-        hasNextPage
-        endCursor
-      }
-      nodes {
-        nameWithOwner
-        isArchived
-        isFork
-      }
-    }
-  }
-}
-"""
-
-# User-account counterpart of ORG_REPOS_ONLY.  The ``repositories``
-# connection exists on both ``Organization`` and ``User``, so this query
-# is structurally identical apart from the ``user(login:)`` root.  It is
-# used as a runtime fallback when an owner login is not an organization
-# (the ``organization`` field returns null).  The ``$org`` variable name
-# is retained for call-site uniformity even though it carries a user
-# login here.
-USER_REPOS_ONLY = """
-query($org: String!, $reposCursor: String) {
-  user(login: $org) {
-    repositories(first: 100, after: $reposCursor, orderBy: { field: NAME, direction: ASC }) {
-      totalCount
-      pageInfo {
-        hasNextPage
-        endCursor
-      }
-      nodes {
-        nameWithOwner
-        isArchived
-        isFork
-      }
-    }
-  }
-}
-"""
+from __future__ import annotations
 
 # Fetch organization repositories with a first page of their open PRs.
 # Use the returned pageInfo to continue paging repositories.
@@ -262,98 +200,6 @@ query($owner: String!, $name: String!, $prsCursor: String, $prsPageSize: Int!, $
             }
           }
         }
-      }
-    }
-  }
-}
-"""
-
-# GraphQL mutation to resolve a review thread
-RESOLVE_REVIEW_THREAD = """
-mutation ResolveReviewThread($threadId: ID!) {
-  resolveReviewThread(input: {threadId: $threadId}) {
-    thread {
-      id
-      isResolved
-    }
-  }
-}
-"""
-
-# GraphQL query to get review threads for a pull request
-GET_PR_REVIEW_THREADS = """
-query GetPullRequestReviewThreads($owner: String!, $name: String!, $number: Int!, $cursor: String) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) {
-      reviewThreads(first: 50, after: $cursor) {
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
-        nodes {
-          id
-          isResolved
-          isOutdated
-          line
-          originalLine
-          diffSide
-          startLine
-          originalStartLine
-          path
-          comments(first: 10) {
-            nodes {
-              id
-              author {
-                login
-              }
-              body
-              createdAt
-            }
-          }
-        }
-      }
-    }
-  }
-}
-"""
-
-# GraphQL mutation to enable auto-merge on a pull request
-ENABLE_AUTO_MERGE = """
-mutation EnableAutoMerge($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod) {
-  enablePullRequestAutoMerge(input: {
-    pullRequestId: $pullRequestId
-    mergeMethod: $mergeMethod
-  }) {
-    pullRequest {
-      autoMergeRequest {
-        enabledAt
-        enabledBy { login }
-        mergeMethod
-      }
-    }
-  }
-}
-"""
-
-# GraphQL query to get branch protection settings for a repository
-GET_BRANCH_PROTECTION = """
-query GetBranchProtection($owner: String!, $name: String!, $branch: String!) {
-  repository(owner: $owner, name: $name) {
-    mergeCommitAllowed
-    squashMergeAllowed
-    rebaseMergeAllowed
-    ref(qualifiedName: $branch) {
-      branchProtectionRule {
-        requiresLinearHistory
-        requiresCommitSignatures
-        requiredStatusCheckContexts
-        requiresStatusChecks
-        requiresApprovingReviews
-        requiredApprovingReviewCount
-        dismissesStaleReviews
-        requiresCodeOwnerReviews
-        restrictsPushes
-        restrictsReviewDismissals
       }
     }
   }

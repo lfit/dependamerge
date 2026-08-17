@@ -533,7 +533,9 @@ class TestRebaseModuleRecordsRebases:
         ctx = self._make_ctx(AsyncMock(), record)
 
         with patch.object(
-            rebase_module, "local_rebase_pr", new=AsyncMock(return_value=True)
+            rebase_module.local_rebase,
+            "local_rebase_pr",
+            new=AsyncMock(return_value=True),
         ):
             await rebase_module._run_local_path(
                 ctx=ctx,
@@ -551,7 +553,9 @@ class TestRebaseModuleRecordsRebases:
         ctx = self._make_ctx(AsyncMock(), record)
 
         with patch.object(
-            rebase_module, "local_rebase_pr", new=AsyncMock(return_value=False)
+            rebase_module.local_rebase,
+            "local_rebase_pr",
+            new=AsyncMock(return_value=False),
         ):
             await rebase_module._run_local_path(
                 ctx=ctx,
@@ -579,7 +583,9 @@ class TestRebaseModuleRecordsRebases:
         pr = _make_pr()
 
         with patch.object(
-            rebase_module, "local_rebase_pr", new=AsyncMock(return_value=rebase_ok)
+            rebase_module.local_rebase,
+            "local_rebase_pr",
+            new=AsyncMock(return_value=rebase_ok),
         ):
             await rebase_module._run_local_path(
                 ctx=ctx,
