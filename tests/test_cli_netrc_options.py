@@ -77,7 +77,7 @@ class TestNetrcFileOption:
         # Typer validates file existence before command runs
         assert result.exit_code != 0
 
-    @patch("dependamerge.cli.GitHubClient")
+    @patch("dependamerge.cli._deps.GitHubClient")
     def test_netrc_file_option_accepts_valid_file(
         self, mock_client_class, runner, netrc_file
     ):
@@ -104,7 +104,7 @@ class TestNetrcFileOption:
 class TestNoNetrcOption:
     """Tests for --no-netrc option."""
 
-    @patch("dependamerge.cli.GitHubClient")
+    @patch("dependamerge.cli._deps.GitHubClient")
     def test_no_netrc_option_accepted(self, mock_client_class, runner, netrc_file):
         """Test that --no-netrc option is accepted."""
         mock_client = Mock()
@@ -147,7 +147,7 @@ class TestNetrcRequiredOption:
                 # For now, just verify the option is accepted
                 assert "--netrc-required" not in result.output or result.exit_code != 0
 
-    @patch("dependamerge.cli.GitHubClient")
+    @patch("dependamerge.cli._deps.GitHubClient")
     def test_netrc_required_succeeds_when_present(
         self, mock_client_class, runner, netrc_file
     ):
@@ -174,7 +174,7 @@ class TestNetrcRequiredOption:
 class TestNetrcOptionalOption:
     """Tests for --netrc-optional option (default behavior)."""
 
-    @patch("dependamerge.cli.GitHubClient")
+    @patch("dependamerge.cli._deps.GitHubClient")
     def test_netrc_optional_option_accepted(self, mock_client_class, runner):
         """Test that --netrc-optional option is accepted."""
         mock_client = Mock()
@@ -193,7 +193,7 @@ class TestNetrcOptionalOption:
         # Option should be accepted without syntax error
         assert "No such option" not in result.output
 
-    @patch("dependamerge.cli.GitHubClient")
+    @patch("dependamerge.cli._deps.GitHubClient")
     def test_default_is_netrc_optional(
         self, mock_client_class, runner, empty_netrc_dir
     ):
