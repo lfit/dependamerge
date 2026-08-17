@@ -96,9 +96,7 @@ class TestShouldUseLocalRebaseGate:
         use_local, reason = await rebase_module.should_use_local_rebase(
             github_client=client,
             pr_info=pr,
-            owner="owner",
-            repo="repo",
-            base_branch="main",
+            base=rebase_module.BaseRef(owner="owner", repo="repo", branch="main"),
             rebase_local=mgr.rebase_local,
             log=mgr.log,
         )
@@ -120,9 +118,7 @@ class TestShouldUseLocalRebaseGate:
         use_local, reason = await rebase_module.should_use_local_rebase(
             github_client=client,
             pr_info=pr,
-            owner="owner",
-            repo="repo",
-            base_branch="main",
+            base=rebase_module.BaseRef(owner="owner", repo="repo", branch="main"),
             rebase_local=mgr.rebase_local,
             log=mgr.log,
         )
@@ -140,9 +136,7 @@ class TestShouldUseLocalRebaseGate:
         use_local, reason = await rebase_module.should_use_local_rebase(
             github_client=client,
             pr_info=pr,
-            owner="owner",
-            repo="repo",
-            base_branch="main",
+            base=rebase_module.BaseRef(owner="owner", repo="repo", branch="main"),
             rebase_local=mgr.rebase_local,
             log=mgr.log,
         )
@@ -164,9 +158,7 @@ class TestShouldUseLocalRebaseGate:
         use_local, reason = await rebase_module.should_use_local_rebase(
             github_client=client,
             pr_info=pr,
-            owner="owner",
-            repo="repo",
-            base_branch="main",
+            base=rebase_module.BaseRef(owner="owner", repo="repo", branch="main"),
             rebase_local=mgr.rebase_local,
             log=mgr.log,
         )
@@ -182,9 +174,7 @@ class TestShouldUseLocalRebaseGate:
         use_local, reason = await rebase_module.should_use_local_rebase(
             github_client=client,
             pr_info=pr,
-            owner="owner",
-            repo="repo",
-            base_branch="main",
+            base=rebase_module.BaseRef(owner="owner", repo="repo", branch="main"),
             rebase_local=mgr.rebase_local,
             log=mgr.log,
         )
@@ -204,9 +194,7 @@ class TestShouldUseLocalRebaseGate:
         use_local, reason = await rebase_module.should_use_local_rebase(
             github_client=client,
             pr_info=pr,
-            owner="owner",
-            repo="repo",
-            base_branch="main",
+            base=rebase_module.BaseRef(owner="owner", repo="repo", branch="main"),
             rebase_local=mgr.rebase_local,
             log=mgr.log,
         )
@@ -221,9 +209,7 @@ class TestShouldUseLocalRebaseGate:
         use_local, reason = await rebase_module.should_use_local_rebase(
             github_client=None,
             pr_info=pr,
-            owner="owner",
-            repo="repo",
-            base_branch="main",
+            base=rebase_module.BaseRef(owner="owner", repo="repo", branch="main"),
             rebase_local=mgr.rebase_local,
             log=mgr.log,
         )
@@ -247,9 +233,7 @@ class TestShouldUseLocalRebaseGate:
         use_local, _reason = await rebase_module.should_use_local_rebase(
             github_client=client,
             pr_info=pr,
-            owner="owner",
-            repo="repo",
-            base_branch="main",
+            base=rebase_module.BaseRef(owner="owner", repo="repo", branch="main"),
             rebase_local=mgr.rebase_local,
             log=mgr.log,
         )
@@ -277,9 +261,7 @@ class TestShouldUseLocalRebaseGate:
         use_local, reason = await rebase_module.should_use_local_rebase(
             github_client=client,
             pr_info=pr,
-            owner="owner",
-            repo="repo",
-            base_branch="main",
+            base=rebase_module.BaseRef(owner="owner", repo="repo", branch="main"),
             rebase_local=mgr.rebase_local,
             log=mgr.log,
         )
@@ -328,7 +310,7 @@ class TestStep5DispatchLocalRebase:
 
         with (
             patch(
-                "dependamerge.rebase.local_rebase_pr",
+                "dependamerge.rebase.local_rebase.local_rebase_pr",
                 new_callable=AsyncMock,
                 return_value=True,
             ) as mock_local_rebase,
@@ -414,7 +396,7 @@ class TestStep5DispatchLocalRebase:
 
         with (
             patch(
-                "dependamerge.rebase.local_rebase_pr",
+                "dependamerge.rebase.local_rebase.local_rebase_pr",
                 new_callable=AsyncMock,
                 return_value=False,
             ) as mock_local_rebase,
@@ -502,7 +484,7 @@ class TestStep5DispatchLocalRebase:
 
         with (
             patch(
-                "dependamerge.rebase.local_rebase_pr",
+                "dependamerge.rebase.local_rebase.local_rebase_pr",
                 new_callable=AsyncMock,
                 return_value=True,
             ) as mock_local_rebase,
@@ -581,7 +563,7 @@ class TestStep5DispatchLocalRebase:
 
         with (
             patch(
-                "dependamerge.rebase.local_rebase_pr",
+                "dependamerge.rebase.local_rebase.local_rebase_pr",
                 new_callable=AsyncMock,
                 return_value=True,
             ) as mock_local_rebase,
@@ -670,7 +652,7 @@ class TestStep5DispatchDependabotMacro:
 
         with (
             patch(
-                "dependamerge.rebase.local_rebase_pr",
+                "dependamerge.rebase.local_rebase.local_rebase_pr",
                 new_callable=AsyncMock,
                 return_value=True,
             ) as mock_local_rebase,
@@ -753,7 +735,7 @@ class TestStep5DispatchDependabotMacro:
 
         with (
             patch(
-                "dependamerge.rebase.local_rebase_pr",
+                "dependamerge.rebase.local_rebase.local_rebase_pr",
                 new_callable=AsyncMock,
                 return_value=True,
             ) as mock_local_rebase,
@@ -873,7 +855,7 @@ class TestLocalRebaseAutoMergeUnavailable:
 
         with (
             patch(
-                "dependamerge.rebase.local_rebase_pr",
+                "dependamerge.rebase.local_rebase.local_rebase_pr",
                 new_callable=AsyncMock,
                 return_value=True,
             ),
