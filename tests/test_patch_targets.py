@@ -36,12 +36,69 @@ _TARGET = re.compile(
 )
 
 
+def _module_aliases(tree: ast.Module) -> dict[str, str]:
+    """Map local names bound to a ``dependamerge`` module onto its path.
+
+    Covers ``import dependamerge.x as m``, ``from dependamerge import x``
+    and ``from dependamerge import x as m``. These appear inside test
+    function bodies as often as at module level, so the whole tree is
+    walked.
+    """
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "dependamerge" or alias.name.startswith(
+                    "dependamerge."
+                ):
+                    bound = alias.asname or alias.name
+                    aliases[bound] = alias.name.removeprefix("dependamerge.")
+        elif isinstance(node, ast.ImportFrom) and node.module == "dependamerge":
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = alias.name
+    return aliases
+
+
+def _aliased_targets(tree: ast.Module) -> set[tuple[str, str]]:
+    """Find ``setattr(m, "name", …)`` and ``patch.object(m, "name")`` calls.
+
+    The substitutions that motivated this guard are written this way
+    rather than as dotted strings, so a scan of string literals alone
+    would miss precisely the cases it exists to protect.
+    """
+    aliases = _module_aliases(tree)
+    found: set[tuple[str, str]] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or len(node.args) < 2:
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if name not in ("setattr", "object"):
+            continue
+        target, attr = node.args[0], node.args[1]
+        if not (isinstance(attr, ast.Constant) and isinstance(attr.value, str)):
+            continue
+        # ``m`` or ``m.submodule``
+        parts: list[str] = []
+        while isinstance(target, ast.Attribute):
+            parts.insert(0, target.attr)
+            target = target.value
+        if not isinstance(target, ast.Name) or target.id not in aliases:
+            continue
+        module = ".".join([aliases[target.id], *parts])
+        found.add((module, attr.value))
+    return found
+
+
 def _patch_targets() -> dict[str, set[str]]:
     """Map ``dependamerge.<module>`` to the names tests substitute on it."""
     targets: dict[str, set[str]] = defaultdict(set)
     for path in _TESTS.rglob("*.py"):
-        for match in _TARGET.finditer(path.read_text(encoding="utf-8")):
+        source = path.read_text(encoding="utf-8")
+        for match in _TARGET.finditer(source):
             targets[match.group(1)].add(match.group(2))
+        for module, name in _aliased_targets(ast.parse(source)):
+            targets[module].add(name)
     return targets
 
 
