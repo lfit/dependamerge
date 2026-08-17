@@ -14,9 +14,11 @@ Three trackers share one surface:
   when progress display is disabled.
 
 ``Live``, ``Text``, ``Console`` and ``RICH_AVAILABLE`` are re-exported
-here because they are part of this package's historical module surface:
-assigning ``dependamerge.progress_tracker.Live`` swaps the class the
-trackers instantiate.
+here because they are part of this package's historical module surface.
+They are not the substitution point: ``scan.py`` binds ``Live`` from
+``rich_compat``, so a call site resolves it from that module rather than
+from this one. Tests that swap the class patch
+``dependamerge.progress_tracker.scan.Live``.
 """
 
 from __future__ import annotations

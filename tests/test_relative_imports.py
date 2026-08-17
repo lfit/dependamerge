@@ -24,12 +24,17 @@ _SRC_ROOT = Path(__file__).resolve().parent.parent / "src" / "dependamerge"
 
 
 def _target_exists(base: Path, module: str | None) -> bool:
-    """Report whether ``module`` resolves to a file or package under ``base``."""
+    """Report whether ``module`` resolves to a file or package under ``base``.
+
+    The whole dotted path is resolved, not just its first component:
+    ``from .github_async.missing import X`` must fail even though
+    ``github_async/`` exists.
+    """
     if module is None:
         # ``from . import x`` — the package itself always exists.
         return True
-    head = module.split(".")[0]
-    return (base / f"{head}.py").exists() or (base / head).is_dir()
+    target = base.joinpath(*module.split("."))
+    return target.with_suffix(".py").exists() or target.is_dir()
 
 
 def _relative_imports() -> list[tuple[Path, int, str, int]]:
@@ -56,9 +61,10 @@ class TestRelativeImportsResolve:
             if not _target_exists(base, module or None):
                 rel = path.relative_to(_SRC_ROOT.parent.parent)
                 dots = "." * level
+                resolved = base.joinpath(*module.split(".")) if module else base
                 violations.append(
                     f"  {rel}:{line}: from {dots}{module} import …\n"
-                    f"    resolves to {base / module.split('.')[0]}, which does not exist"
+                    f"    resolves to {resolved}, which does not exist"
                 )
         assert not violations, (
             "Relative imports naming a non-existent module:\n"
