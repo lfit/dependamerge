@@ -167,15 +167,15 @@ class TestSubstitutionsReachTheirCallSites:
                 referenced = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
                 for node in _module_scope_relative_imports(tree):
                     for alias in node.names:
+                        # An alias freezes the original object just as an
+                        # unaliased import does, so what matters is whether
+                        # the *bound* name is used, not what it is called.
                         bound = alias.asname or alias.name
-                        if (
-                            alias.name in names
-                            and bound == alias.name
-                            and alias.name in referenced
-                        ):
+                        if alias.name in names and bound in referenced:
+                            renamed = f" as {bound}" if bound != alias.name else ""
                             violations.append(
                                 f"  {sibling.relative_to(_ROOT)}:{node.lineno} binds "
-                                f"{alias.name}, which tests substitute at "
+                                f"{alias.name}{renamed}, which tests substitute at "
                                 f"dependamerge.{module}.{alias.name}"
                             )
         assert not violations, (
