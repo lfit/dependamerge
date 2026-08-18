@@ -61,11 +61,12 @@ def derive_api_urls(host: str) -> tuple[str, str]:
     serve the API from ``https://HOST/api/v3`` (REST) and
     ``https://HOST/api/graphql`` (GraphQL).
 
-    GHE is not yet wired through the service/client constructors (the
-    URL parsers still reject non-github.com hosts), but centralising
-    the derivation here means enabling GHE later is a matter of relaxing
-    that single guard and threading the returned URLs through — see the
-    GHE tracking issue.
+    GHE is not yet wired through the service/client constructors.  The
+    repository and owner-wide parsers reject non-github.com hosts; a
+    direct pull request URL is accepted for any host, since ``/pull/``
+    identifies it structurally.  Centralising the derivation here means
+    enabling GHE later is a matter of relaxing those two guards and
+    threading the returned URLs through — see the GHE tracking issue.
 
     Args:
         host: The hostname (e.g. ``github.com`` or ``ghe.example.com``).
