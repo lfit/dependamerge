@@ -36,26 +36,36 @@ _TARGET = re.compile(
 )
 
 
-def _module_aliases(tree: ast.Module) -> dict[str, str]:
+def _module_aliases(tree: ast.Module) -> dict[str, tuple[str, ...]]:
     """Map local names bound to a ``dependamerge`` module onto its path.
 
-    Covers ``import dependamerge.x as m``, ``from dependamerge import x``
-    and ``from dependamerge import x as m``. These appear inside test
-    function bodies as often as at module level, so the whole tree is
-    walked.
+    Covers ``import dependamerge.x``, ``import dependamerge.x as m``,
+    ``from dependamerge import x`` and ``from dependamerge import x as m``.
+    These appear inside test function bodies as often as at module level,
+    so the whole tree is walked.
+
+    ``import a.b`` without ``as`` binds only the root name ``a``, so it
+    maps to an empty prefix and the attribute chain at the call site
+    supplies the rest. Treating the dotted name as the bound one would
+    miss ``setattr(dependamerge.github_async, …)`` entirely.
     """
-    aliases: dict[str, str] = {}
+    aliases: dict[str, tuple[str, ...]] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name == "dependamerge" or alias.name.startswith(
+                if alias.name != "dependamerge" and not alias.name.startswith(
                     "dependamerge."
                 ):
-                    bound = alias.asname or alias.name
-                    aliases[bound] = alias.name.removeprefix("dependamerge.")
+                    continue
+                suffix = alias.name.removeprefix("dependamerge").lstrip(".")
+                parts = tuple(p for p in suffix.split(".") if p)
+                if alias.asname:
+                    aliases[alias.asname] = parts
+                else:
+                    aliases["dependamerge"] = ()
         elif isinstance(node, ast.ImportFrom) and node.module == "dependamerge":
             for alias in node.names:
-                aliases[alias.asname or alias.name] = alias.name
+                aliases[alias.asname or alias.name] = (alias.name,)
     return aliases
 
 
@@ -85,8 +95,12 @@ def _aliased_targets(tree: ast.Module) -> set[tuple[str, str]]:
             target = target.value
         if not isinstance(target, ast.Name) or target.id not in aliases:
             continue
-        module = ".".join([aliases[target.id], *parts])
-        found.add((module, attr.value))
+        components = [*aliases[target.id], *parts]
+        if not components:
+            # ``setattr(dependamerge, "x", …)`` patches the root package,
+            # which owns no module namespace of its own here.
+            continue
+        found.add((".".join(components), attr.value))
     return found
 
 
