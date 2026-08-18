@@ -10,14 +10,18 @@ it into a package silently removed the second, because a package is not
 executable without a ``__main__`` submodule.
 
 Both are exercised as subprocesses rather than through Typer's test
-runner, since the failure being guarded against is in module resolution
-and only appears when Python launches the process itself.
+runner, since the failures being guarded against are in module
+resolution and entry-point wiring, and appear only when Python launches
+the process itself.
 """
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
+
+import pytest
 
 
 def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -30,6 +34,9 @@ def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
+_CONSOLE_SCRIPT = shutil.which("dependamerge")
+
+
 class TestEntryPoints:
     """Both documented invocations must start the CLI."""
 
@@ -38,6 +45,24 @@ class TestEntryPoints:
         result = _run([sys.executable, "-m", "dependamerge.cli", "--version"])
         assert result.returncode == 0, (
             f"python -m dependamerge.cli failed ({result.returncode}):\n{result.stderr}"
+        )
+        assert "dependamerge" in result.stdout.lower()
+
+    @pytest.mark.skipif(
+        _CONSOLE_SCRIPT is None,
+        reason="dependamerge console script is not on PATH",
+    )
+    def test_console_script_works(self) -> None:
+        """The ``dependamerge`` console script must launch the app.
+
+        This is the entry point almost every user actually invokes, so a
+        broken ``[project.scripts]`` mapping matters more than the module
+        form above.
+        """
+        assert _CONSOLE_SCRIPT is not None
+        result = _run([_CONSOLE_SCRIPT, "--version"])
+        assert result.returncode == 0, (
+            f"dependamerge --version failed ({result.returncode}):\n{result.stderr}"
         )
         assert "dependamerge" in result.stdout.lower()
 
