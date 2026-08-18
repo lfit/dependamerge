@@ -46,12 +46,24 @@ def _package_exports(base: Path) -> set[str]:
     return _bound_at_module_scope(ast.parse(init.read_text(encoding="utf-8")).body)
 
 
+def _is_type_checking(test: ast.expr) -> bool:
+    """Recognise ``if TYPE_CHECKING:`` in either import style."""
+    return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+        isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+    )
+
+
 def _bound_at_module_scope(body: list[ast.stmt]) -> set[str]:
     """Collect names bound by ``body``, descending only into control flow.
 
     ``if`` / ``try`` branches still bind at module scope, so they are
     followed; function and class bodies introduce their own scope and
     are not.
+
+    A ``TYPE_CHECKING`` branch never executes, so names it imports are
+    not real exports. Counting them would let ``from . import X`` pass
+    while still raising at run time --- the ``else`` branch is still
+    followed, since that one does execute.
     """
     names: set[str] = set()
     for node in body:
@@ -64,7 +76,8 @@ def _bound_at_module_scope(body: list[ast.stmt]) -> set[str]:
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             names.add(node.target.id)
         elif isinstance(node, ast.If):
-            names |= _bound_at_module_scope(node.body)
+            if not _is_type_checking(node.test):
+                names |= _bound_at_module_scope(node.body)
             names |= _bound_at_module_scope(node.orelse)
         elif isinstance(node, ast.Try):
             names |= _bound_at_module_scope(node.body)
