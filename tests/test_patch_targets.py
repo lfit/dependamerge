@@ -117,14 +117,29 @@ def _patch_targets() -> dict[str, set[str]]:
 
 
 def _is_type_checking(test: ast.expr) -> bool:
-    """Recognise ``if TYPE_CHECKING:`` in either import style."""
-    return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
-        isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+    """Recognise ``if TYPE_CHECKING:`` and ``if typing.TYPE_CHECKING:``.
+
+    The attribute form is matched only against ``typing``, so an
+    unrelated runtime flag such as ``settings.TYPE_CHECKING`` is not
+    mistaken for the sentinel and skipped.
+    """
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    return (
+        isinstance(test, ast.Attribute)
+        and test.attr == "TYPE_CHECKING"
+        and isinstance(test.value, ast.Name)
+        and test.value.id == "typing"
     )
 
 
-def _executing_relative_imports(tree: ast.Module) -> list[tuple[ast.ImportFrom, bool]]:
-    """Every relative import that runs, paired with whether it is function-local.
+def _executing_imports(tree: ast.Module) -> list[tuple[ast.ImportFrom, bool]]:
+    """Every executing import of a ``dependamerge`` module, and its scope.
+
+    Relative and absolute forms both bind the same object:
+    ``from dependamerge.github_async import _now`` shadows a package
+    substitution exactly as ``from . import _now`` does, so restricting
+    this to relative imports left an ordinary spelling unguarded.
 
     ``TYPE_CHECKING`` bodies are excluded because they never execute.
     Both scopes are collected: being inside a function is not on its own
@@ -132,9 +147,17 @@ def _executing_relative_imports(tree: ast.Module) -> list[tuple[ast.ImportFrom, 
     """
     found: list[tuple[ast.ImportFrom, bool]] = []
 
+    def collect(node: ast.ImportFrom) -> bool:
+        return bool(node.level) or bool(
+            node.module
+            and (
+                node.module == "dependamerge" or node.module.startswith("dependamerge.")
+            )
+        )
+
     def walk(body: list[ast.stmt], *, local: bool) -> None:
         for node in body:
-            if isinstance(node, ast.ImportFrom) and node.level:
+            if isinstance(node, ast.ImportFrom) and collect(node):
                 found.append((node, local))
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 walk(node.body, local=True)
@@ -159,6 +182,10 @@ def _executing_relative_imports(tree: ast.Module) -> list[tuple[ast.ImportFrom, 
 
 def _import_source(sibling: Path, node: ast.ImportFrom) -> Path:
     """Resolve the namespace an import reads from, as a path."""
+    if not node.level:
+        # Absolute: dependamerge.a.b -> <src>/a/b
+        suffix = (node.module or "").removeprefix("dependamerge").lstrip(".")
+        return _SRC.joinpath(*[p for p in suffix.split(".") if p])
     base = sibling.parent
     for _ in range(node.level - 1):
         base = base.parent
@@ -195,12 +222,22 @@ def _resolve_target(module: str) -> Path | None:
     return None
 
 
+def _dotted_name(path: Path) -> str:
+    """Return the ``dependamerge``-relative dotted name of a module file."""
+    rel = path.relative_to(_SRC)
+    parts = list(rel.parts[:-1])
+    if rel.stem != "__init__":
+        parts.append(rel.stem)
+    return ".".join(parts)
+
+
 class TestSubstitutionsReachTheirCallSites:
     """Patched names must not be shadowed by a sibling's direct binding."""
 
     def test_no_sibling_shadows_a_patch_target(self) -> None:
+        all_targets = _patch_targets()
         violations: list[str] = []
-        for module, names in sorted(_patch_targets().items()):
+        for module, names in sorted(all_targets.items()):
             target = _resolve_target(module)
             if target is None:
                 continue
@@ -214,7 +251,7 @@ class TestSubstitutionsReachTheirCallSites:
                     continue
                 tree = ast.parse(sibling.read_text(encoding="utf-8"))
                 referenced = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-                for node, is_local in _executing_relative_imports(tree):
+                for node, is_local in _executing_imports(tree):
                     if is_local and _reads_target_namespace(
                         _import_source(sibling, node), target
                     ):
@@ -226,13 +263,19 @@ class TestSubstitutionsReachTheirCallSites:
                         # unaliased import does, so what matters is whether
                         # the *bound* name is used, not what it is called.
                         bound = alias.asname or alias.name
-                        if alias.name in names and bound in referenced:
-                            renamed = f" as {bound}" if bound != alias.name else ""
-                            violations.append(
-                                f"  {sibling.relative_to(_ROOT)}:{node.lineno} binds "
-                                f"{alias.name}{renamed}, which tests substitute at "
-                                f"dependamerge.{module}.{alias.name}"
-                            )
+                        if alias.name not in names or bound not in referenced:
+                            continue
+                        if alias.name in all_targets.get(_dotted_name(sibling), set()):
+                            # The sibling owns its own binding and tests
+                            # substitute it there, so it is deliberate
+                            # rather than a shadow of this target.
+                            continue
+                        renamed = f" as {bound}" if bound != alias.name else ""
+                        violations.append(
+                            f"  {sibling.relative_to(_ROOT)}:{node.lineno} binds "
+                            f"{alias.name}{renamed}, which tests substitute at "
+                            f"dependamerge.{module}.{alias.name}"
+                        )
         assert not violations, (
             "Substituted names shadowed by a direct import:\n"
             + "\n".join(sorted(set(violations)))
