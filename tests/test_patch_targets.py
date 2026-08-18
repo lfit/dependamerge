@@ -102,31 +102,66 @@ def _patch_targets() -> dict[str, set[str]]:
     return targets
 
 
-def _module_scope_relative_imports(tree: ast.Module) -> list[ast.ImportFrom]:
-    """Relative imports bound at module scope, which shadow for the whole module.
+def _is_type_checking(test: ast.expr) -> bool:
+    """Recognise ``if TYPE_CHECKING:`` in either import style."""
+    return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+        isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+    )
 
-    Imports inside a function body are re-resolved on every call, so a
-    substitution applied before the call is still observed. Only a
-    module-scope binding freezes the name at import time, and only that
-    can shadow silently. ``TYPE_CHECKING`` blocks never execute.
+
+def _executing_relative_imports(tree: ast.Module) -> list[tuple[ast.ImportFrom, bool]]:
+    """Every relative import that runs, paired with whether it is function-local.
+
+    ``TYPE_CHECKING`` bodies are excluded because they never execute.
+    Both scopes are collected: being inside a function is not on its own
+    enough to make an import safe --- see :func:`_reads_target_namespace`.
     """
-    imports: list[ast.ImportFrom] = []
-    for node in tree.body:
-        if isinstance(node, ast.ImportFrom) and node.level:
-            imports.append(node)
-        elif isinstance(node, ast.If):
-            test = node.test
-            is_type_checking = (
-                isinstance(test, ast.Name) and test.id == "TYPE_CHECKING"
-            ) or (isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING")
-            if is_type_checking:
-                continue
-            imports.extend(
-                child
-                for child in node.body
-                if isinstance(child, ast.ImportFrom) and child.level
-            )
-    return imports
+    found: list[tuple[ast.ImportFrom, bool]] = []
+
+    def walk(body: list[ast.stmt], *, local: bool) -> None:
+        for node in body:
+            if isinstance(node, ast.ImportFrom) and node.level:
+                found.append((node, local))
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                walk(node.body, local=True)
+            elif isinstance(node, ast.ClassDef):
+                walk(node.body, local=local)
+            elif isinstance(node, ast.If):
+                if not _is_type_checking(node.test):
+                    walk(node.body, local=local)
+                walk(node.orelse, local=local)
+            elif isinstance(node, ast.Try):
+                walk(node.body, local=local)
+                walk(node.orelse, local=local)
+                walk(node.finalbody, local=local)
+                for handler in node.handlers:
+                    walk(handler.body, local=local)
+            elif isinstance(node, (ast.With, ast.AsyncWith, ast.For, ast.While)):
+                walk(node.body, local=local)
+
+    walk(tree.body, local=False)
+    return found
+
+
+def _import_source(sibling: Path, node: ast.ImportFrom) -> Path:
+    """Resolve the namespace an import reads from, as a path."""
+    base = sibling.parent
+    for _ in range(node.level - 1):
+        base = base.parent
+    return base.joinpath(*node.module.split(".")) if node.module else base
+
+
+def _reads_target_namespace(source: Path, target: Path) -> bool:
+    """Report whether ``source`` names the same namespace as ``target``.
+
+    A substitution replaces an attribute of one namespace. Only an import
+    that reads *that* namespace can observe it. A function-local
+    ``from ._errors import _now`` is re-resolved per call but still reads
+    ``_errors``, so it ignores a substitution on the package just as
+    silently as a module-scope binding would.
+    """
+    namespace = target.parent if target.name == "__init__.py" else target
+    return source == namespace or source.with_suffix(".py") == namespace
 
 
 def _resolve_target(module: str) -> Path | None:
@@ -165,7 +200,13 @@ class TestSubstitutionsReachTheirCallSites:
                     continue
                 tree = ast.parse(sibling.read_text(encoding="utf-8"))
                 referenced = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-                for node in _module_scope_relative_imports(tree):
+                for node, is_local in _executing_relative_imports(tree):
+                    if is_local and _reads_target_namespace(
+                        _import_source(sibling, node), target
+                    ):
+                        # Re-resolved per call, from the namespace being
+                        # substituted, so it observes the substitution.
+                        continue
                     for alias in node.names:
                         # An alias freezes the original object just as an
                         # unaliased import does, so what matters is whether
