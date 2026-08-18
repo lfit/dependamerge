@@ -605,7 +605,7 @@ class TestRebaseModuleRecordsRebases:
         ctx = self._make_ctx(client, record)
 
         with patch.object(
-            rebase_module,
+            rebase_module.polling,
             "_poll_post_rebase",
             new=AsyncMock(return_value=(True, "clean")),
         ):
