@@ -249,3 +249,26 @@ class TestSubstitutionsReachTheirCallSites:
             f"Only {total} patch targets found across {len(targets)} modules; "
             "the scan is probably not reaching the test suite."
         )
+
+    def test_check_finds_module_object_substitutions(self) -> None:
+        """The aggregate count alone cannot protect the AST scan.
+
+        Scanning string literals by itself already finds enough targets
+        to satisfy the count above, so a regression that dropped the
+        ``setattr(mod, "name", …)`` handling would pass unnoticed --- and
+        those are the substitutions this guard exists for. They are named
+        explicitly here because they are reachable *only* through the AST
+        path.
+        """
+        found = _patch_targets().get("github_async", set())
+        expected = {
+            "_now",
+            "_is_transient_server_error",
+            "_APPROVE_RETRY_BASE_DELAY",
+        }
+        assert expected <= found, (
+            f"Module-object substitutions missing from the scan: "
+            f"{sorted(expected - found)}. These are written as "
+            f'monkeypatch.setattr(mod, "name", …) and are invisible to a '
+            "scan of dotted string literals."
+        )
