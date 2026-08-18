@@ -30,16 +30,31 @@ def _module_exists(base: Path, dotted: str) -> bool:
 
 
 def _package_exports(base: Path) -> set[str]:
-    """Top-level names bound by ``base/__init__.py``.
+    """Names bound at module scope by ``base/__init__.py``.
 
     ``from . import x`` is satisfied by a submodule *or* by a name the
     package's ``__init__`` defines or re-exports, so both are collected.
+
+    Only module scope counts. Descending into function and class bodies
+    would treat a local variable as an export, letting a broken
+    ``from . import x`` pass whenever some unrelated local happened to
+    share the name.
     """
     init = base / "__init__.py"
     if not init.exists():
         return set()
+    return _bound_at_module_scope(ast.parse(init.read_text(encoding="utf-8")).body)
+
+
+def _bound_at_module_scope(body: list[ast.stmt]) -> set[str]:
+    """Collect names bound by ``body``, descending only into control flow.
+
+    ``if`` / ``try`` branches still bind at module scope, so they are
+    followed; function and class bodies introduce their own scope and
+    are not.
+    """
     names: set[str] = set()
-    for node in ast.walk(ast.parse(init.read_text(encoding="utf-8"))):
+    for node in body:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             names.update(a.asname or a.name.split(".")[0] for a in node.names)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -48,6 +63,15 @@ def _package_exports(base: Path) -> set[str]:
             names.update(t.id for t in node.targets if isinstance(t, ast.Name))
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             names.add(node.target.id)
+        elif isinstance(node, ast.If):
+            names |= _bound_at_module_scope(node.body)
+            names |= _bound_at_module_scope(node.orelse)
+        elif isinstance(node, ast.Try):
+            names |= _bound_at_module_scope(node.body)
+            names |= _bound_at_module_scope(node.orelse)
+            names |= _bound_at_module_scope(node.finalbody)
+            for handler in node.handlers:
+                names |= _bound_at_module_scope(handler.body)
     return names
 
 
