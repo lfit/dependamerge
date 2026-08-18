@@ -142,9 +142,9 @@ def _select_repo_prs(
         console.print(f"  #{pr.number} {pr.title} (by {pr.author})")
 
     # Only prompt when human PRs are actually in scope, not merely
-    # because --include-human-prs was supplied.  A dry run never prompts;
-    # it mirrors the safe default (exclude human PRs) so the preview
-    # matches a real run where the operator presses Enter at the prompt.
+    # because --include-human-prs was supplied.  A dry run never prompts:
+    # it keeps opted-in human PRs in the preview, so the output mirrors
+    # what a real --include-human-prs run would attempt (see below).
     needs_human_confirm = bool(human_prs) and not ctx.no_confirm and not ctx.dry_run
     if needs_human_confirm:
         console.print("\n⚠️ Human-authored PRs are included in this merge operation.")

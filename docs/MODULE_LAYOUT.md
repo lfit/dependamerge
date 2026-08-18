@@ -11,18 +11,33 @@ that are easy to break and expensive to debug.
 
 ## Why packages
 
-The `aislop` scanner reports `complexity/file-too-large` above about 330
-code lines and `complexity/function-too-long` above 80. Measured against
-the whole tree, the metric counts non-blank, non-comment lines rather than
-the physical line count it prints, so a file can display as 430 lines and
-still pass.
+The `aislop` scanner applies a 10% tolerance to its configured limits, and
+measures files and functions differently:
+
+| Rule | Limit | Measured as | Flags above |
+| --- | --- | --- | --- |
+| `complexity/file-too-large` | 400 | physical lines | **440** |
+| `complexity/function-too-long` | 80 | logical body lines | **88** |
+
+The distinction matters. A file's raw length counts against it, blank lines and
+comments included. A function's logical lines count instead, so a long
+parameter list or a wrapped call counts once — which is why a command with a
+50-line signature passes while a shorter, denser one does not.
+
+The number the scanner *prints* is the physical span in both cases, so a
+flagged function reporting "269 lines" can correspond to 89 logical ones. Do
+not read the printed figure as the measured one.
+
+Measured directly against v0.13.1: a 439-line file passes and a 441-line file
+does not; an 88-logical-line function passes and an 89-line one does not,
+regardless of how much blank space surrounds it.
 
 Practical budgets, with margin:
 
 | Unit | Budget |
 | --- | --- |
-| Module | 320 code lines |
-| Function | 80 code lines |
+| Module | 400 physical lines |
+| Function | 80 logical lines |
 | Parameters | 6 |
 | Nesting | 5 levels |
 
