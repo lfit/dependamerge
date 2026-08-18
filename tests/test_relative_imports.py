@@ -47,9 +47,19 @@ def _package_exports(base: Path) -> set[str]:
 
 
 def _is_type_checking(test: ast.expr) -> bool:
-    """Recognise ``if TYPE_CHECKING:`` in either import style."""
-    return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
-        isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+    """Recognise ``if TYPE_CHECKING:`` and ``if typing.TYPE_CHECKING:``.
+
+    The attribute form is matched only against ``typing``, so an
+    unrelated runtime flag such as ``settings.TYPE_CHECKING`` is not
+    mistaken for the sentinel and skipped.
+    """
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    return (
+        isinstance(test, ast.Attribute)
+        and test.attr == "TYPE_CHECKING"
+        and isinstance(test.value, ast.Name)
+        and test.value.id == "typing"
     )
 
 
