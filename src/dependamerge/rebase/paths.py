@@ -25,9 +25,8 @@ import asyncio
 
 from ..models import PullRequestInfo
 from ..slot_lease import parked
-from . import local_rebase
+from . import local_rebase, polling
 from .context import RebaseContext, Step5Outcome, _record_rebase, _set_tracker_state
-from .polling import _log_post_rebase_status, _poll_post_rebase
 
 
 async def _run_local_path(
@@ -249,7 +248,10 @@ async def _run_rest_path(
         async with parked():
             await asyncio.sleep(min(2.0, ctx.merge_recheck_interval))
 
-            updated_mergeable, updated_mergeable_state = await _poll_post_rebase(
+            (
+                updated_mergeable,
+                updated_mergeable_state,
+            ) = await polling._poll_post_rebase(
                 ctx=ctx,
                 pr_info=pr_info,
                 owner=owner,
@@ -284,7 +286,7 @@ async def _run_rest_path(
         ctx.rebased_prs.add(f"{owner}/{repo}#{pr_info.number}")
 
         _set_tracker_state(ctx, pr_info, None)
-        _log_post_rebase_status(ctx=ctx, pr_info=pr_info)
+        polling._log_post_rebase_status(ctx=ctx, pr_info=pr_info)
         return Step5Outcome()
 
     except Exception as exc:
