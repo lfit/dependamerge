@@ -3,7 +3,7 @@
 
 # aislop quality gate configuration.
 #
-# The default pass threshold is 75. This repository scored 39 before the
+# The default pass threshold is 70. This repository scored 39 before the
 # complexity refactor and does not yet clear the default, so the gate is
 # pinned just under the current score to ratchet in the right direction
 # rather than to assert a standard that is not met yet.
