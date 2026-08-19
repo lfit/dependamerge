@@ -10,6 +10,13 @@ This module provides a typed wrapper for Gerrit REST API calls with:
 
 The client uses pygerrit2 for all Gerrit REST API interactions.
 
+The error types, the pure retry helpers and the request machinery live in
+the sibling modules ``_client_errors`` and ``_client_requests`` and are
+re-exported here, so this module's surface is unchanged.  ``GerritRestAPI``,
+``HTTPBasicAuth`` and ``get_credentials_for_host`` are deliberately resolved
+in *this* module's namespace only, so that substituting them here is
+observed by the code that uses them.
+
 Usage:
     from dependamerge.gerrit.client import GerritRestClient, build_client
 
@@ -21,109 +28,35 @@ from __future__ import annotations
 
 import logging
 import os
-import random
-import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import Any
 
 from pygerrit2 import GerritRestAPI, HTTPBasicAuth
-from requests.exceptions import RequestException
 
 from dependamerge.netrc import NetrcParseError, get_credentials_for_host
+
+# The sibling modules below carry the parts of this module that never touch
+# GerritRestAPI / HTTPBasicAuth / get_credentials_for_host.  Redundant ``as``
+# aliases mark deliberate re-exports: every name here has always been
+# reachable as ``dependamerge.gerrit.client.<name>``.
+from ._client_errors import _RETRYABLE_HTTP_CODES as _RETRYABLE_HTTP_CODES
+from ._client_errors import _TRANSIENT_ERR_SUBSTRINGS as _TRANSIENT_ERR_SUBSTRINGS
+from ._client_errors import (
+    GerritAuthError,
+    GerritNotFoundError,
+    GerritRestError,
+    _Auth,
+    _mask_secret,
+)
+from ._client_errors import _calculate_backoff as _calculate_backoff
+from ._client_errors import _extract_status_code as _extract_status_code
+from ._client_errors import _is_transient_error as _is_transient_error
+from ._client_requests import _GerritRequestMixin
 
 log = logging.getLogger("dependamerge.gerrit.client")
 
 
-_TRANSIENT_ERR_SUBSTRINGS: Final[tuple[str, ...]] = (
-    "timed out",
-    "temporarily unavailable",
-    "temporary failure",
-    "connection reset",
-    "connection aborted",
-    "broken pipe",
-    "connection refused",
-    "bad gateway",
-    "service unavailable",
-    "gateway timeout",
-)
-
-_RETRYABLE_HTTP_CODES: Final[frozenset[int]] = frozenset({429, 500, 502, 503, 504})
-
-
-class GerritRestError(RuntimeError):
-    """Raised for non-retryable REST errors or exhausted retries."""
-
-    def __init__(
-        self,
-        message: str,
-        status_code: int | None = None,
-        response_body: str | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-        self.response_body = response_body
-
-
-class GerritAuthError(GerritRestError):
-    """Raised for authentication failures (401/403)."""
-
-
-class GerritNotFoundError(GerritRestError):
-    """Raised when a resource is not found (404)."""
-
-
-@dataclass(frozen=True)
-class _Auth:
-    """Authentication credentials."""
-
-    user: str
-    password: str
-
-
-def _mask_secret(s: str) -> str:
-    """Mask a secret for logging, preserving first/last 2 chars."""
-    if not s:
-        return s
-    if len(s) <= 4:
-        return "****"
-    return s[:2] + "*" * (len(s) - 4) + s[-2:]
-
-
-def _is_transient_error(exc: Exception) -> bool:
-    """Check if an exception represents a transient/retryable error."""
-    exc_str = str(exc).lower()
-    return any(sub in exc_str for sub in _TRANSIENT_ERR_SUBSTRINGS)
-
-
-def _calculate_backoff(
-    attempt: int,
-    base_delay: float = 1.0,
-    max_delay: float = 30.0,
-    jitter: float = 0.5,
-) -> float:
-    """Calculate exponential backoff delay with jitter."""
-    delay = min(base_delay * (2**attempt), max_delay)
-    jitter_amount = delay * jitter * float(random.random())
-    return float(delay + jitter_amount)
-
-
-def _extract_status_code(exc: Exception) -> int | None:
-    """Extract HTTP status code from a requests exception if available."""
-    # Check for response attribute (requests.HTTPError)
-    response = getattr(exc, "response", None)
-    if response is not None:
-        status_code = getattr(response, "status_code", None)
-        if status_code is not None:
-            return int(status_code)
-    exc_str = str(exc)
-    for code in (401, 403, 404, 429, 500, 502, 503, 504):
-        if str(code) in exc_str:
-            return code
-    return None
-
-
-class GerritRestClient:
+class GerritRestClient(_GerritRequestMixin):
     """
     REST client for Gerrit with retry and timeout handling.
 
@@ -253,164 +186,6 @@ class GerritRestClient:
             GerritAuthError: On authentication failures.
         """
         return self._request_with_retry("DELETE", path)
-
-    def _request_with_retry(
-        self,
-        method: str,
-        path: str,
-        data: Any | None = None,
-    ) -> Any:
-        """Perform a request with automatic retry on transient failures."""
-        last_exception: Exception | None = None
-
-        for attempt in range(self._max_attempts):
-            try:
-                return self._request(method, path, data)
-            except GerritAuthError:
-                # Don't retry authentication failures
-                raise
-            except GerritNotFoundError:
-                # Don't retry not found errors
-                raise
-            except GerritRestError as exc:
-                last_exception = exc
-                # Check if this is a retryable HTTP error or transient network error
-                is_retryable_http = (
-                    exc.status_code and exc.status_code in _RETRYABLE_HTTP_CODES
-                )
-                is_transient = _is_transient_error(exc)
-
-                if is_retryable_http or is_transient:
-                    if attempt < self._max_attempts - 1:
-                        delay = _calculate_backoff(attempt)
-                        if exc.status_code:
-                            log.warning(
-                                "Gerrit REST %s %s failed (HTTP %d), "
-                                "retrying in %.1fs (attempt %d/%d)",
-                                method,
-                                path,
-                                exc.status_code,
-                                delay,
-                                attempt + 1,
-                                self._max_attempts,
-                            )
-                        else:
-                            log.warning(
-                                "Gerrit REST %s %s failed (%s), "
-                                "retrying in %.1fs (attempt %d/%d)",
-                                method,
-                                path,
-                                exc,
-                                delay,
-                                attempt + 1,
-                                self._max_attempts,
-                            )
-                        time.sleep(delay)
-                        continue
-                raise
-            except Exception as exc:
-                last_exception = exc
-                if _is_transient_error(exc):
-                    if attempt < self._max_attempts - 1:
-                        delay = _calculate_backoff(attempt)
-                        log.warning(
-                            "Gerrit REST %s %s failed (%s), "
-                            "retrying in %.1fs (attempt %d/%d)",
-                            method,
-                            path,
-                            exc,
-                            delay,
-                            attempt + 1,
-                            self._max_attempts,
-                        )
-                        time.sleep(delay)
-                        continue
-                raise GerritRestError(
-                    f"Gerrit REST {method} {path} failed: {exc}"
-                ) from exc
-
-        # Should not reach here, but just in case
-        if last_exception:
-            raise last_exception
-        raise GerritRestError(f"Gerrit REST {method} {path} failed unexpectedly")
-
-    def _request(
-        self,
-        method: str,
-        path: str,
-        data: Any | None = None,
-    ) -> Any:
-        """Perform a single HTTP request (no retry) using pygerrit2."""
-        if not path:
-            raise GerritRestError("path is required")
-
-        # Normalize path to start with /
-        api_path = path if path.startswith("/") else f"/{path}"
-
-        log.debug(
-            "Gerrit REST %s %s (auth=%s)",
-            method,
-            api_path,
-            "yes" if self._auth else "no",
-        )
-
-        try:
-            # aislop-ignore-next-line ai-slop/python-repetitive-dispatch -- each verb has distinct argument handling (data payload for POST/PUT)
-            if method == "GET":
-                return self._client.get(api_path, timeout=self._timeout)
-            elif method == "POST":
-                if data is not None:
-                    return self._client.post(api_path, data=data, timeout=self._timeout)
-                return self._client.post(api_path, timeout=self._timeout)
-            elif method == "PUT":
-                if data is not None:
-                    return self._client.put(api_path, data=data, timeout=self._timeout)
-                return self._client.put(api_path, timeout=self._timeout)
-            elif method == "DELETE":
-                return self._client.delete(api_path, timeout=self._timeout)
-            else:
-                raise GerritRestError(f"Unsupported HTTP method: {method}")
-
-        except RequestException as exc:
-            status_code = _extract_status_code(exc)
-            exc_str = str(exc).lower()
-
-            if status_code == 401 or "401" in exc_str or "unauthorized" in exc_str:
-                raise GerritAuthError(
-                    f"Authentication failed for {path}",
-                    status_code=401,
-                ) from exc
-            if status_code == 403 or "403" in exc_str or "forbidden" in exc_str:
-                raise GerritAuthError(
-                    f"Access forbidden for {path}",
-                    status_code=403,
-                ) from exc
-            if status_code == 404 or "404" in exc_str or "not found" in exc_str:
-                raise GerritNotFoundError(
-                    f"Resource not found: {path}",
-                    status_code=404,
-                ) from exc
-
-            raise GerritRestError(
-                f"Gerrit REST {method} {path} failed: {exc}",
-                status_code=status_code,
-            ) from exc
-
-        except Exception as exc:
-            exc_str = str(exc).lower()
-            if "401" in exc_str or "unauthorized" in exc_str:
-                raise GerritAuthError(
-                    f"Authentication failed: {exc}", status_code=401
-                ) from exc
-            if "403" in exc_str or "forbidden" in exc_str:
-                raise GerritAuthError(
-                    f"Access forbidden: {exc}", status_code=403
-                ) from exc
-            if "404" in exc_str or "not found" in exc_str:
-                raise GerritNotFoundError(
-                    f"Resource not found: {exc}", status_code=404
-                ) from exc
-            raise GerritRestError(f"Gerrit REST {method} failed: {exc}") from exc
 
     def __repr__(self) -> str:
         """String representation for debugging."""

@@ -189,7 +189,10 @@ class TestCloneWithToken:
     """clone(token=...) keeps the URL free of credentials."""
 
     def test_clone_forwards_token_and_clean_url(self) -> None:
-        with patch.object(git_ops, "run_git") as mock_run_git:
+        # Patch ``run_git`` where it is defined, not where it is re-exported:
+        # the network wrappers call it through the ``process`` module object,
+        # so this is the single target every caller observes.
+        with patch.object(git_ops.process, "run_git") as mock_run_git:
             clone(
                 "https://github.com/owner/repo.git",
                 "/tmp/dest",
