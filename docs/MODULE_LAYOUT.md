@@ -14,10 +14,10 @@ that are easy to break and expensive to debug.
 The `aislop` scanner applies a 10% tolerance to its configured limits, and
 measures files and functions differently:
 
-| Rule | Limit | Measured as | Flags above |
-| --- | --- | --- | --- |
-| `complexity/file-too-large` | 400 | physical lines | **440** |
-| `complexity/function-too-long` | 80 | logical body lines | **88** |
+| Rule                           | Limit | Measured as        | Flags above |
+| ------------------------------ | ----- | ------------------ | ----------- |
+| `complexity/file-too-large`    | 400   | physical lines     | **440**     |
+| `complexity/function-too-long` | 80    | logical body lines | **88**      |
 
 The distinction matters. A file's raw length counts against it, blank lines and
 comments included. A function's logical lines count instead, so a long
@@ -34,12 +34,12 @@ regardless of how much blank space surrounds it.
 
 Practical budgets, with margin:
 
-| Unit | Budget |
-| --- | --- |
-| Module | 400 physical lines |
-| Function | 80 logical lines |
-| Parameters | 6 |
-| Nesting | 5 levels |
+| Unit       | Budget             |
+| ---------- | ------------------ |
+| Module     | 400 physical lines |
+| Function   | 80 logical lines   |
+| Parameters | 6                  |
+| Nesting    | 5 levels           |
 
 `aislop ci` runs in under a second and is authoritative; treat the budgets
 above as planning figures and the scanner as the gate.
@@ -74,6 +74,33 @@ basedpyright reports as uninitialised instance variables. Those modules
 carry `# pyright: reportUninitializedInstanceVariable=false` on the line
 above `from __future__ import annotations`. The suppression is per-file and
 deliberate, so the rule keeps covering every real class.
+
+At `merge_manager`'s scale — 46 modules assembling one class from 41
+mixins — a base declaring all 97 methods would itself break the budget.
+The base carries stubs for the 64 methods that cross module boundaries. A
+method whose callers all sit in the module defining it needs no stub,
+because that module already sees it.
+
+### Threading state through a split method
+
+Splitting a long method differs from splitting a class. Where the phases
+of one method share local state, each phase returns that state and hands
+it to the next, rather than parking it on `self`: one manager instance
+serves every concurrent pull-request worker, so an attribute there races
+between unrelated pull requests.
+
+`merge_manager/_merge_state.py` holds the frozen records that
+`_merge_single_pr_impl` threads between its phases. Each phase takes the
+record it needs and returns what the later ones read.
+
+Two conventions keep the seams reviewable:
+
+- A phase that can end the attempt returns `MergeResult | None`, where
+  `None` means "carry on". Every terminal decision then stays visible in
+  the caller rather than hiding inside a helper.
+- Lifting a phase out of a `try` moves the code, never the call. Moving
+  the call too changes which handler sees an exception, and no test
+  necessarily catches that.
 
 ## Invariant 1: relative imports must name a real sibling
 

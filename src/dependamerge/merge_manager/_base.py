@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from ..models import PullRequestInfo
     from ..pr_poller import PullRequestStatePoller
     from ..progress_tracker import MergeProgressTracker
+    from ._merge_state import _Attempt, _DispatchOutcome, _RebaseOutcome, _WaitOutcome
     from ._models import MergeResult, MergeStatus
 
 
@@ -138,6 +139,30 @@ class _MergeManagerBase:
         async def _merge_single_pr_impl(
             self, pr_info: PullRequestInfo
         ) -> MergeResult: ...
+
+        async def _route_to_gerrit(self, attempt: _Attempt) -> MergeResult | None: ...
+
+        async def _check_merge_eligibility(
+            self, attempt: _Attempt
+        ) -> MergeResult | None: ...
+
+        async def _process_copilot_feedback(
+            self, attempt: _Attempt
+        ) -> MergeResult | None: ...
+
+        async def _rebase_if_required(self, attempt: _Attempt) -> _RebaseOutcome: ...
+
+        async def _wait_for_required_checks(
+            self, attempt: _Attempt, rebased: _RebaseOutcome
+        ) -> _WaitOutcome: ...
+
+        async def _dispatch_merge(
+            self, attempt: _Attempt, rebased: _RebaseOutcome, waited: _WaitOutcome
+        ) -> _DispatchOutcome: ...
+
+        async def _report_merge_outcome(
+            self, attempt: _Attempt, merged: bool | None
+        ) -> None: ...
 
         async def _handle_not_mergeable_pr(
             self, pr_info: PullRequestInfo, result: MergeResult

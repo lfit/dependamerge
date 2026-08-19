@@ -29,6 +29,7 @@ from ._approvals import _ApprovalsMixin
 from ._auto_merge_arm import _AutoMergeArmMixin
 from ._auto_merge_wait import _AutoMergeWaitMixin
 from ._branch_approval import _BranchApprovalMixin
+from ._check_wait import _CheckWaitMixin
 from ._comments import _CommentsMixin
 from ._conflict_helpers import _ConflictHelpersMixin
 from ._conflicts import _ConflictsMixin
@@ -37,12 +38,15 @@ from ._constants import (
     DEFAULT_MERGE_TIMEOUT,
 )
 from ._dependabot_recreate import _DependabotRecreateMixin
+from ._direct_merge import _DirectMergeMixin
 from ._failure_reporting import _FailureReportingMixin
 from ._gerrit_host import _GerritHostMixin
 from ._gerrit_submit import _GerritSubmitMixin
 from ._lifecycle import _LifecycleMixin
 from ._merge_flow import _MergeFlowMixin
+from ._merge_gates import _MergeGatesMixin
 from ._merge_method import _MergeMethodMixin
+from ._merge_outcome import _MergeOutcomeMixin
 from ._mergeability import _MergeabilityMixin
 from ._models import MergeResult
 from ._orchestration import _OrchestrationMixin
@@ -52,6 +56,7 @@ from ._pr_state import _PrStateMixin
 from ._precommit_ci import _PrecommitCiMixin
 from ._prediction import _PredictionMixin
 from ._rebase_checks import _RebaseChecksMixin
+from ._rebase_step import _RebaseStepMixin
 from ._recreated_pr_wait import _RecreatedPrWaitMixin
 from ._required_workflows import _RequiredWorkflowsMixin
 from ._requirements import _RequirementsMixin
@@ -76,6 +81,11 @@ class AsyncMergeManager(
     _GerritHostMixin,
     _SinglePrMixin,
     _MergeFlowMixin,
+    _MergeGatesMixin,
+    _RebaseStepMixin,
+    _CheckWaitMixin,
+    _DirectMergeMixin,
+    _MergeOutcomeMixin,
     _MergeabilityMixin,
     _RebaseChecksMixin,
     _CommentsMixin,
