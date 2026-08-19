@@ -9,12 +9,16 @@ Asking dependabot to recreate a pull request whose checks stuck.
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING, Any
 
 import dependamerge.merge_manager as _pkg
 
 from ..bot_identity import is_dependabot
 from ..models import PullRequestInfo
 from ._base import _MergeManagerBase
+
+if TYPE_CHECKING:
+    from ..github_async import GitHubAsync
 
 
 class _DependabotRecreateMixin(_MergeManagerBase):
@@ -45,6 +49,7 @@ class _DependabotRecreateMixin(_MergeManagerBase):
         if not self._github_client:
             return None
 
+        client = self._github_client
         repo_owner, repo_name = pr_info.repository_full_name.split("/", 1)
 
         # 1. Only applies to dependabot PRs
@@ -52,35 +57,80 @@ class _DependabotRecreateMixin(_MergeManagerBase):
             return None
 
         # 2. Check whether the branch requires signed commits
+        if not await self._recreate_requires_signatures(
+            client, pr_info, repo_owner, repo_name
+        ):
+            return None
+
+        # 3. Check whether any commits are unverified
+        unverified_shas = await self._recreate_unverified_shas(
+            client, pr_info, repo_owner, repo_name
+        )
+        if unverified_shas is None:
+            return None
+
+        # 4. Guard against duplicate recreate comments
+        if await self._recreate_already_requested(
+            client, pr_info, repo_owner, repo_name
+        ):
+            return None
+
+        # 5. Post the recreate comment
+        if not await self._post_recreate_comment(
+            client, pr_info, repo_owner, repo_name, unverified_shas
+        ):
+            return None
+
+        # 6. Poll for the old PR to close and a replacement to appear
+        return await self._await_recreated_pr(client, pr_info, repo_owner, repo_name)
+
+    async def _recreate_requires_signatures(
+        self, client: GitHubAsync, pr_info: PullRequestInfo, owner: str, repo: str
+    ) -> bool:
+        """Report whether the base branch demands signed commits.
+
+        Split out so the trigger reads as a sequence of guards.  An API
+        failure and an explicit "no requirement" are treated alike: both
+        mean the recreate does not apply, so both answer False.
+        """
         try:
-            requires_signatures = await self._github_client.requires_commit_signatures(
-                repo_owner, repo_name, pr_info.base_branch or "main"
+            requires_signatures = await client.requires_commit_signatures(
+                owner, repo, pr_info.base_branch or "main"
             )
             if not requires_signatures:
                 self.log.debug(
                     "Branch %s/%s:%s does not require commit signatures; "
                     "skipping dependabot recreate.",
-                    repo_owner,
-                    repo_name,
+                    owner,
+                    repo,
                     pr_info.base_branch or "main",
                 )
-                return None
+                return False
         except Exception as e:
             self.log.debug(
                 "Could not determine signature requirement for %s: %s",
                 pr_info.repository_full_name,
                 e,
             )
-            return None
+            return False
+        return True
 
-        # 3. Check whether any commits are unverified
+    async def _recreate_unverified_shas(
+        self, client: GitHubAsync, pr_info: PullRequestInfo, owner: str, repo: str
+    ) -> list[str] | None:
+        """Collect the SHAs of the PR's unverified commits.
+
+        Returns the unverified SHAs when a recreate is warranted, and
+        ``None`` when it is not — every commit is already verified, or the
+        check could not be made.  Kept separate so those two "give up"
+        cases share one exit while the caller still receives the SHAs its
+        status line reports.
+        """
         try:
             (
                 all_verified,
                 unverified_shas,
-            ) = await self._github_client.check_pr_commit_signatures(
-                repo_owner, repo_name, pr_info.number
-            )
+            ) = await client.check_pr_commit_signatures(owner, repo, pr_info.number)
             if all_verified:
                 self.log.debug(
                     "All commits on %s#%s are verified; recreate not needed.",
@@ -96,26 +146,30 @@ class _DependabotRecreateMixin(_MergeManagerBase):
                 e,
             )
             return None
+        return unverified_shas
 
-        # 4. Guard against duplicate recreate comments
+    async def _recreate_already_requested(
+        self, client: GitHubAsync, pr_info: PullRequestInfo, owner: str, repo: str
+    ) -> bool:
+        """Report whether a recreate was already asked for on this PR.
+
+        Failing to list the comments also counts as "already requested":
+        a duplicate cannot be ruled out, and asking twice makes dependabot
+        churn through two replacement pull requests.
+        """
         try:
-            comments = await self._github_client.get(
-                f"/repos/{repo_owner}/{repo_name}/issues/{pr_info.number}/comments"
+            comments = await client.get(
+                f"/repos/{owner}/{repo}/issues/{pr_info.number}/comments"
                 f"?per_page=100&direction=desc"
             )
-            if isinstance(comments, list):
-                for c in comments:
-                    if not isinstance(c, dict):
-                        continue
-                    body = c.get("body")
-                    if isinstance(body, str) and "@dependabot recreate" in body:
-                        self.log.info(
-                            "Found existing @dependabot recreate comment on "
-                            "%s#%s; skipping duplicate.",
-                            pr_info.repository_full_name,
-                            pr_info.number,
-                        )
-                        return None
+            if self._comments_contain_recreate(comments):
+                self.log.info(
+                    "Found existing @dependabot recreate comment on "
+                    "%s#%s; skipping duplicate.",
+                    pr_info.repository_full_name,
+                    pr_info.number,
+                )
+                return True
         except Exception as e:
             self.log.warning(
                 "Could not list comments for %s#%s to check for existing "
@@ -124,9 +178,42 @@ class _DependabotRecreateMixin(_MergeManagerBase):
                 pr_info.number,
                 e,
             )
-            return None
+            return True
+        return False
 
-        # 5. Post the recreate comment
+    @staticmethod
+    def _comments_contain_recreate(
+        comments: dict[str, Any] | list[dict[str, Any]],
+    ) -> bool:
+        """Report whether a comment payload holds a recreate request.
+
+        Pure inspection of the API response, separated so the scan over
+        comments stays clear of the error handling around the fetch.
+        """
+        if not isinstance(comments, list):
+            return False
+        for c in comments:
+            if not isinstance(c, dict):
+                continue
+            body = c.get("body")
+            if isinstance(body, str) and "@dependabot recreate" in body:
+                return True
+        return False
+
+    async def _post_recreate_comment(
+        self,
+        client: GitHubAsync,
+        pr_info: PullRequestInfo,
+        owner: str,
+        repo: str,
+        unverified_shas: list[str],
+    ) -> bool:
+        """Announce and post the ``@dependabot recreate`` comment.
+
+        Returns True once the comment is posted and the retrigger
+        recorded, False if it could not be posted — in which case
+        dependabot was never asked, so there is nothing to poll for.
+        """
         self._pr_status(
             f"🔄 Requesting dependabot recreate: {pr_info.html_url} "
             f"[unverified commits: {', '.join(unverified_shas)}]",
@@ -134,8 +221,8 @@ class _DependabotRecreateMixin(_MergeManagerBase):
         )
 
         try:
-            await self._github_client.post_issue_comment(
-                repo_owner, repo_name, pr_info.number, "@dependabot recreate"
+            await client.post_issue_comment(
+                owner, repo, pr_info.number, "@dependabot recreate"
             )
             self._record_retrigger()
         except Exception as e:
@@ -145,14 +232,20 @@ class _DependabotRecreateMixin(_MergeManagerBase):
                 pr_info.number,
                 e,
             )
-            return None
+            return False
+        return True
 
-        # 6. Poll for the old PR to close and a replacement to appear.
-        #    Dependabot typically responds within 30-90 seconds.
-        #    We poll using the centralised merge timeout.  The whole
-        #    poll (including the nested recreated-PR checks wait) is a
-        #    wait on dependabot + CI, so the worker's concurrency slot
-        #    is released for its duration (``parked()``).
+    async def _await_recreated_pr(
+        self, client: GitHubAsync, pr_info: PullRequestInfo, owner: str, repo: str
+    ) -> PullRequestInfo | None:
+        """Poll for the old PR to close and a replacement to appear.
+
+        Dependabot typically responds within 30-90 seconds.  We poll
+        using the centralised merge timeout.  The whole poll (including
+        the nested recreated-PR checks wait) is a wait on dependabot +
+        CI, so the worker's concurrency slot is released for its
+        duration (``parked()``).
+        """
         max_polls = self._merge_poll_max_attempts
         old_pr_closed = False
 
@@ -160,75 +253,17 @@ class _DependabotRecreateMixin(_MergeManagerBase):
             for attempt in range(max_polls):
                 await asyncio.sleep(self._merge_recheck_interval)
 
-                # 6a. Check if the old PR has been closed
                 if not old_pr_closed:
-                    try:
-                        old_pr_data = await self._github_client.get(
-                            f"/repos/{repo_owner}/{repo_name}/pulls/{pr_info.number}"
-                        )
-                        if isinstance(old_pr_data, dict):
-                            if old_pr_data.get("state") == "closed":
-                                old_pr_closed = True
-                                self._pr_status(
-                                    f"✅ Old PR closed by dependabot: "
-                                    f"{pr_info.html_url} "
-                                    f"({(attempt + 1) * self._merge_recheck_interval:.0f}s elapsed)",
-                                    level="info",
-                                )
-                    except Exception as e:
-                        self.log.debug(
-                            "Error polling old PR state for %s#%s: %s",
-                            pr_info.repository_full_name,
-                            pr_info.number,
-                            e,
-                        )
+                    old_pr_closed = await self._old_pr_is_closed(
+                        client, pr_info, owner, repo, attempt
+                    )
 
-                # 6b. Once the old PR is closed, look for the replacement
                 if old_pr_closed:
-                    try:
-                        # Search for open PRs from dependabot on the same head branch
-                        prs = await self._github_client.get(
-                            f"/repos/{repo_owner}/{repo_name}/pulls"
-                            f"?state=open&head={repo_owner}:{pr_info.head_branch}&per_page=5"
-                        )
-                        if isinstance(prs, list):
-                            for pr_data in prs:
-                                if not isinstance(pr_data, dict):
-                                    continue
-                                pr_author = (pr_data.get("user") or {}).get("login", "")
-                                if not is_dependabot(pr_author):
-                                    continue
-
-                                new_number = pr_data.get("number")
-                                if new_number is None or new_number == pr_info.number:
-                                    continue
-
-                                # Verify the replacement targets the same base branch
-                                new_base = (pr_data.get("base") or {}).get("ref", "")
-                                if new_base != (pr_info.base_branch or "main"):
-                                    self.log.debug(
-                                        "Skipping candidate PR #%s: targets %s, "
-                                        "expected %s",
-                                        new_number,
-                                        new_base,
-                                        pr_info.base_branch or "main",
-                                    )
-                                    continue
-
-                                # Found a replacement — now wait for checks to pass
-                                new_pr_info = await self._wait_for_recreated_pr_checks(
-                                    repo_owner, repo_name, new_number, pr_data
-                                )
-                                # Always return after the first wait attempt to avoid
-                                # performing multiple long waits for the same PR.
-                                return new_pr_info
-                    except Exception as e:
-                        self.log.debug(
-                            "Error searching for replacement PR for %s#%s: %s",
-                            pr_info.repository_full_name,
-                            pr_info.number,
-                            e,
-                        )
+                    found, new_pr_info = await self._find_recreated_pr(
+                        client, pr_info, owner, repo
+                    )
+                    if found:
+                        return new_pr_info
 
                 if attempt % 3 == 2:
                     self.log.debug(
@@ -245,3 +280,107 @@ class _DependabotRecreateMixin(_MergeManagerBase):
             pr_info.number,
         )
         return None
+
+    async def _old_pr_is_closed(
+        self,
+        client: GitHubAsync,
+        pr_info: PullRequestInfo,
+        owner: str,
+        repo: str,
+        attempt: int,
+    ) -> bool:
+        """Take one poll of the original PR's state.
+
+        Announces the closure, with the elapsed time, at the moment it is
+        first observed; the caller only asks while the PR is still open.
+        Errors are swallowed so a transient API failure costs one
+        interval rather than the whole recreate.
+        """
+        closed = False
+        try:
+            old_pr_data = await client.get(
+                f"/repos/{owner}/{repo}/pulls/{pr_info.number}"
+            )
+            if isinstance(old_pr_data, dict):
+                if old_pr_data.get("state") == "closed":
+                    closed = True
+                    self._pr_status(
+                        f"✅ Old PR closed by dependabot: "
+                        f"{pr_info.html_url} "
+                        f"({(attempt + 1) * self._merge_recheck_interval:.0f}s elapsed)",
+                        level="info",
+                    )
+        except Exception as e:
+            self.log.debug(
+                "Error polling old PR state for %s#%s: %s",
+                pr_info.repository_full_name,
+                pr_info.number,
+                e,
+            )
+        return closed
+
+    async def _find_recreated_pr(
+        self, client: GitHubAsync, pr_info: PullRequestInfo, owner: str, repo: str
+    ) -> tuple[bool, PullRequestInfo | None]:
+        """Search the head branch for the replacement PR and wait on it.
+
+        Returns ``(True, result)`` once a replacement has been found and
+        waited on — ``result`` is None when its checks never passed — and
+        ``(False, None)`` while there is nothing to act on yet.  The flag
+        is what stops the caller starting a second long checks wait for
+        the same PR on a later poll.
+        """
+        try:
+            prs = await client.get(
+                f"/repos/{owner}/{repo}/pulls"
+                f"?state=open&head={owner}:{pr_info.head_branch}&per_page=5"
+            )
+            if isinstance(prs, list):
+                for pr_data in prs:
+                    if not isinstance(pr_data, dict):
+                        continue
+                    new_number = self._recreated_pr_number(pr_data, pr_info)
+                    if new_number is None:
+                        continue
+                    new_pr_info = await self._wait_for_recreated_pr_checks(
+                        owner, repo, new_number, pr_data
+                    )
+                    return True, new_pr_info
+        except Exception as e:
+            self.log.debug(
+                "Error searching for replacement PR for %s#%s: %s",
+                pr_info.repository_full_name,
+                pr_info.number,
+                e,
+            )
+        return False, None
+
+    def _recreated_pr_number(
+        self, pr_data: dict[str, Any], pr_info: PullRequestInfo
+    ) -> int | None:
+        """Return an open PR's number if it is the awaited replacement.
+
+        The head-branch search can return a PR from another author, the
+        original PR itself, or one retargeted at a different base branch,
+        so candidates are vetted before committing to a long checks wait.
+        ``None`` means "not the replacement", not "no number".
+        """
+        pr_author = (pr_data.get("user") or {}).get("login", "")
+        if not is_dependabot(pr_author):
+            return None
+
+        new_number: int | None = pr_data.get("number")
+        if new_number is None or new_number == pr_info.number:
+            return None
+
+        new_base = (pr_data.get("base") or {}).get("ref", "")
+        if new_base != (pr_info.base_branch or "main"):
+            self.log.debug(
+                "Skipping candidate PR #%s: targets %s, expected %s",
+                new_number,
+                new_base,
+                pr_info.base_branch or "main",
+            )
+            return None
+
+        return new_number

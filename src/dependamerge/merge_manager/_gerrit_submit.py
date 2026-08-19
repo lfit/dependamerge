@@ -8,6 +8,8 @@ Submission of GitHub pull requests that mirror Gerrit changes.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import dependamerge.merge_manager as _pkg
 
 from ..gerrit import (
@@ -24,6 +26,10 @@ from ..github2gerrit_detector import (
 from ..models import PullRequestInfo
 from ..netrc import NetrcParseError
 from ._base import _MergeManagerBase
+
+if TYPE_CHECKING:
+    from ..gerrit import GerritChangeInfo
+    from ..netrc import GerritCredentials
 
 
 class _GerritSubmitMixin(_MergeManagerBase):
@@ -108,7 +114,49 @@ class _GerritSubmitMixin(_MergeManagerBase):
             )
             return False
 
-        # Resolve credentials
+        credentials = self._resolve_gerrit_submit_credentials(gerrit_host, mapping)
+        if credentials is None:
+            return False
+
+        try:
+            return await self._submit_with_gerrit_credentials(
+                mapping, pr_info, gerrit_host, gerrit_base_path, credentials
+            )
+        except (GerritAuthError, GerritRestError) as exc:
+            self.log.warning(
+                "Gerrit error submitting change for topic %s: %s",
+                mapping.topic,
+                exc,
+            )
+            return False
+        except Exception as exc:
+            self.log.warning(
+                "Unexpected error submitting Gerrit change for topic %s: %s",
+                mapping.topic,
+                exc,
+            )
+            return False
+
+    def _resolve_gerrit_submit_credentials(
+        self,
+        gerrit_host: str,
+        mapping: GitHub2GerritMapping,
+    ) -> GerritCredentials | None:
+        """
+        Resolve usable Gerrit credentials for a submission, or report why not.
+
+        Kept apart from the submission itself because it is the one phase
+        that must run *outside* the caller's Gerrit error handler: a
+        malformed .netrc is a local configuration fault rather than a
+        remote one, and is reported as its own warning.
+
+        Args:
+            gerrit_host: Gerrit host the credentials must cover.
+            mapping: The parsed mapping, used only for the topic in logs.
+
+        Returns:
+            Valid credentials, or None if none could be resolved.
+        """
         try:
             credentials = _pkg.resolve_gerrit_credentials(
                 host=gerrit_host,
@@ -126,104 +174,146 @@ class _GerritSubmitMixin(_MergeManagerBase):
                 gerrit_host,
                 mapping.topic,
             )
+            return None
+
+        return credentials
+
+    async def _submit_with_gerrit_credentials(
+        self,
+        mapping: GitHub2GerritMapping,
+        pr_info: PullRequestInfo,
+        gerrit_host: str,
+        gerrit_base_path: str | None,
+        credentials: GerritCredentials,
+    ) -> bool:
+        """
+        Submit the mapped Gerrit change and act on the result.
+
+        Holds every step that talks to Gerrit once the host and
+        credentials are known, so the caller can wrap the whole exchange
+        in a single error handler rather than repeating one per step.
+
+        Args:
+            mapping: The parsed GitHub2Gerrit mapping.
+            pr_info: The GitHub pull request info.
+            gerrit_host: Resolved Gerrit host.
+            gerrit_base_path: Resolved Gerrit base path, if any.
+            credentials: Validated Gerrit credentials.
+
+        Returns:
+            True if the Gerrit change was submitted (or, in preview mode,
+            would have been).
+        """
+        gerrit_change = self._find_open_gerrit_change(
+            mapping, gerrit_host, gerrit_base_path, credentials
+        )
+        if gerrit_change is None:
             return False
 
-        try:
-            service = _pkg.create_gerrit_service(
-                host=gerrit_host,
-                base_path=gerrit_base_path,
-                username=credentials.username,
-                password=credentials.password,
-            )
+        submit_manager = _pkg.create_submit_manager(
+            host=gerrit_host,
+            base_path=gerrit_base_path,
+            username=credentials.username,
+            password=credentials.password,
+        )
 
-            # Query Gerrit for the change using the primary Change-ID
-            change_id = mapping.primary_change_id
-            changes = service._query_changes(
-                query=f"change:{change_id} status:open",
-                limit=5,
-                offset=0,
-                options=[
-                    "CURRENT_REVISION",
-                    "LABELS",
-                    "DETAILED_LABELS",
-                    "SUBMIT_REQUIREMENTS",
-                ],
-            )
+        results = submit_manager.submit_changes(
+            [(gerrit_change, None)],
+            review_labels={"Code-Review": 2},
+            dry_run=self.preview_mode,
+        )
 
-            if not changes:
-                self.log.warning(
-                    "No open Gerrit change found for Change-Id %s on %s",
-                    change_id,
-                    gerrit_host,
-                )
-                return False
-
-            # Use the first matching change
-            gerrit_change = changes[0]
+        if results and results[0].submitted:
             self.log.info(
-                "Found Gerrit change %s #%d for Change-Id %s",
+                "Successfully submitted Gerrit change %s #%d",
                 gerrit_change.project,
                 gerrit_change.number,
+            )
+
+            # Post a comment on the GitHub PR and close it
+            gerrit_url = build_gerrit_change_url_from_mapping(
+                mapping, gerrit_host, gerrit_base_path
+            )
+            await self._close_github_pr_after_gerrit_submit(
+                pr_info, mapping, gerrit_url
+            )
+
+            return True
+
+        if results and results[0].success and self.preview_mode:
+            # Dry-run succeeded
+            return True
+
+        error_msg = results[0].error if results else "Unknown error"
+        self.log.warning(
+            "Failed to submit Gerrit change %s #%d: %s",
+            gerrit_change.project,
+            gerrit_change.number,
+            error_msg,
+        )
+        return False
+
+    def _find_open_gerrit_change(
+        self,
+        mapping: GitHub2GerritMapping,
+        gerrit_host: str,
+        gerrit_base_path: str | None,
+        credentials: GerritCredentials,
+    ) -> GerritChangeInfo | None:
+        """
+        Look up the open Gerrit change the mapping's Change-Id names.
+
+        Separate from the submission because the lookup needs its own
+        Gerrit service, distinct from the submit manager, and because
+        "no such open change" is an ordinary outcome rather than an error.
+
+        Args:
+            mapping: The parsed GitHub2Gerrit mapping.
+            gerrit_host: Resolved Gerrit host.
+            gerrit_base_path: Resolved Gerrit base path, if any.
+            credentials: Validated Gerrit credentials.
+
+        Returns:
+            The first matching open change, or None if there is none.
+        """
+        service = _pkg.create_gerrit_service(
+            host=gerrit_host,
+            base_path=gerrit_base_path,
+            username=credentials.username,
+            password=credentials.password,
+        )
+
+        # Query Gerrit for the change using the primary Change-ID
+        change_id = mapping.primary_change_id
+        changes = service._query_changes(
+            query=f"change:{change_id} status:open",
+            limit=5,
+            offset=0,
+            options=[
+                "CURRENT_REVISION",
+                "LABELS",
+                "DETAILED_LABELS",
+                "SUBMIT_REQUIREMENTS",
+            ],
+        )
+
+        if not changes:
+            self.log.warning(
+                "No open Gerrit change found for Change-Id %s on %s",
                 change_id,
+                gerrit_host,
             )
+            return None
 
-            submit_manager = _pkg.create_submit_manager(
-                host=gerrit_host,
-                base_path=gerrit_base_path,
-                username=credentials.username,
-                password=credentials.password,
-            )
-
-            results = submit_manager.submit_changes(
-                [(gerrit_change, None)],
-                review_labels={"Code-Review": 2},
-                dry_run=self.preview_mode,
-            )
-
-            if results and results[0].submitted:
-                self.log.info(
-                    "Successfully submitted Gerrit change %s #%d",
-                    gerrit_change.project,
-                    gerrit_change.number,
-                )
-
-                # Post a comment on the GitHub PR and close it
-                gerrit_url = build_gerrit_change_url_from_mapping(
-                    mapping, gerrit_host, gerrit_base_path
-                )
-                await self._close_github_pr_after_gerrit_submit(
-                    pr_info, mapping, gerrit_url
-                )
-
-                return True
-
-            if results and results[0].success and self.preview_mode:
-                # Dry-run succeeded
-                return True
-
-            error_msg = results[0].error if results else "Unknown error"
-            self.log.warning(
-                "Failed to submit Gerrit change %s #%d: %s",
-                gerrit_change.project,
-                gerrit_change.number,
-                error_msg,
-            )
-            return False
-
-        except (GerritAuthError, GerritRestError) as exc:
-            self.log.warning(
-                "Gerrit error submitting change for topic %s: %s",
-                mapping.topic,
-                exc,
-            )
-            return False
-        except Exception as exc:
-            self.log.warning(
-                "Unexpected error submitting Gerrit change for topic %s: %s",
-                mapping.topic,
-                exc,
-            )
-            return False
+        # Use the first matching change
+        gerrit_change = changes[0]
+        self.log.info(
+            "Found Gerrit change %s #%d for Change-Id %s",
+            gerrit_change.project,
+            gerrit_change.number,
+            change_id,
+        )
+        return gerrit_change
 
     async def _close_github_pr_after_gerrit_submit(
         self,

@@ -8,13 +8,18 @@ Detection of a required check that has stopped reporting.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..models import PullRequestInfo
 from ._base import _MergeManagerBase
 from ._constants import (
     STUCK_CHECK_THRESHOLD_SECONDS,
 )
+
+if TYPE_CHECKING:
+    from datetime import datetime
+
+    from ..github_async import GitHubAsync
 
 
 class _StuckChecksMixin(_MergeManagerBase):
@@ -65,64 +70,71 @@ class _StuckChecksMixin(_MergeManagerBase):
             ``age_seconds`` is the time the check has been pending
             (or ``0.0`` when no candidate check was found).
         """
-        if not self._github_client:
+        client = self._github_client
+        if not client:
             return False, None, 0.0
 
         repo_owner, repo_name = pr_info.repository_full_name.split("/", 1)
-        threshold = STUCK_CHECK_THRESHOLD_SECONDS
 
         from datetime import datetime, timezone
 
-        def _parse_ts(value: Any) -> datetime | None:
-            if not isinstance(value, str) or not value:
-                return None
-            try:
-                # GitHub returns RFC 3339 with a trailing ``Z``.
-                ts = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError:
-                return None
-            # A timestamp without tz info parses to a naive datetime,
-            # which raises ``TypeError`` when subtracted from the
-            # tz-aware ``now`` below.  Treat it as unparsable (fail
-            # closed) so the detector degrades gracefully instead of
-            # aborting the merge run.
-            if ts.tzinfo is None:
-                return None
-            return ts
-
-        def _is_dco_name(name: str) -> bool:
-            """Return True when ``name`` looks like a DCO check.
-
-            Matches the common variants emitted by the GitHub DCO
-            App and similar bots: ``DCO``, ``dco/dco``, ``dcobot``,
-            and any name containing ``signoff`` / ``sign-off`` /
-            ``signed-off`` (case-insensitive).
-            """
-            n = (name or "").strip().lower()
-            if not n:
-                return False
-            if n in {"dco", "dco/dco", "dcobot"} or n.startswith("dco/"):
-                return True
-            return "signoff" in n or "sign-off" in n or "signed-off" in n
-
-        def _is_precommit_name(name: str) -> bool:
-            """Return True when ``name`` is a pre-commit.ci check.
-
-            pre-commit.ci reports as ``pre-commit.ci - pr`` (and the
-            ``- ci`` variant).  It is excluded from this detector
-            because dependabot's ``recreate`` macro does not
-            retrigger it; ``_trigger_stale_precommit_ci`` handles it
-            via the ``pre-commit.ci run`` comment instead.
-            """
-            n = (name or "").strip().lower()
-            return "pre-commit.ci" in n or "pre-commit-ci" in n
-
-        # 1. PR-level age floor — don't fire on PRs we caught right
-        #    after they were opened or force-pushed; checks on those
-        #    are simply running normally.
         now = datetime.now(timezone.utc)
+        pr_updated = await self._stuck_check_pr_reference(
+            client, pr_info, repo_owner, repo_name, now
+        )
+        if pr_updated is None:
+            return False, None, 0.0
+
+        required_contexts = await self._required_stuck_check_contexts(
+            client, pr_info, repo_owner, repo_name
+        )
+
+        runs = await self._fetch_stuck_check_runs(
+            client, pr_info, repo_owner, repo_name
+        )
+        candidate_name, candidate_age = self._stuck_check_run_candidate(
+            runs, required_contexts, now, pr_updated
+        )
+
+        statuses = await self._fetch_stuck_commit_statuses(
+            client, pr_info, repo_owner, repo_name
+        )
+        status_name, status_age = self._stuck_status_context_candidate(
+            statuses, required_contexts, now, pr_updated
+        )
+        if status_age > candidate_age:
+            candidate_name, candidate_age = status_name, status_age
+
+        if candidate_name is None:
+            return False, None, 0.0
+        return True, candidate_name, candidate_age
+
+    async def _stuck_check_pr_reference(
+        self,
+        client: GitHubAsync,
+        pr_info: PullRequestInfo,
+        repo_owner: str,
+        repo_name: str,
+        now: datetime,
+    ) -> datetime | None:
+        """Return the PR's ``updated_at`` once it clears the age floor.
+
+        A PR opened or force-pushed less than
+        :data:`STUCK_CHECK_THRESHOLD_SECONDS` before ``now`` has checks
+        that are simply running normally, so this answers ``None`` and
+        none of its checks are examined.  ``None`` also covers a PR
+        fetch that failed and timestamps that would not parse: without
+        timing data stuckness cannot be judged, so the detector fails
+        closed.
+
+        Held apart from the check scans because the value it returns is
+        both the gate and the reference every per-check age is later
+        measured from.  ``now`` is sampled by the caller before this
+        fetch, so the fetch's own latency counts towards the ages.
+        """
+        threshold = STUCK_CHECK_THRESHOLD_SECONDS
         try:
-            pr_data = await self._github_client.get(
+            pr_data = await client.get(
                 f"/repos/{repo_owner}/{repo_name}/pulls/{pr_info.number}"
             )
         except Exception as exc:
@@ -132,30 +144,67 @@ class _StuckChecksMixin(_MergeManagerBase):
                 pr_info.number,
                 exc,
             )
-            return False, None, 0.0
+            return None
 
         if not isinstance(pr_data, dict):
-            return False, None, 0.0
+            return None
 
-        pr_created = _parse_ts(pr_data.get("created_at"))
-        pr_updated = _parse_ts(pr_data.get("updated_at"))
+        pr_created = self._parse_check_timestamp(pr_data.get("created_at"))
+        pr_updated = self._parse_check_timestamp(pr_data.get("updated_at"))
         if pr_created is None or pr_updated is None:
-            # Without timing data we cannot safely judge stuckness;
-            # fail closed.
-            return False, None, 0.0
+            return None
 
         pr_age = (now - pr_created).total_seconds()
         pr_idle = (now - pr_updated).total_seconds()
         if pr_age < threshold or pr_idle < threshold:
-            return False, None, 0.0
+            return None
+        return pr_updated
 
-        # 2. Determine which checks are *required* on the base branch
-        #    so a non-blocking check is never treated as stuck.  On
-        #    any failure we fall back to an empty set, leaving the
-        #    DCO safety net (below) as the only eligible matcher.
+    @staticmethod
+    def _parse_check_timestamp(value: Any) -> datetime | None:
+        """Parse a GitHub RFC 3339 timestamp, or answer ``None``.
+
+        ``None`` means "no usable timestamp", which every caller reads
+        as too little evidence to judge stuckness.  A value that will
+        not parse and one that parses to a naive datetime are equally
+        unusable — the latter raises ``TypeError`` when subtracted from
+        the tz-aware ``now`` — so both fail closed here, in one place,
+        letting the detector degrade gracefully instead of aborting the
+        merge run.
+        """
+        from datetime import datetime
+
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            # GitHub returns RFC 3339 with a trailing ``Z``.
+            ts = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if ts.tzinfo is None:
+            return None
+        return ts
+
+    async def _required_stuck_check_contexts(
+        self,
+        client: GitHubAsync,
+        pr_info: PullRequestInfo,
+        repo_owner: str,
+        repo_name: str,
+    ) -> set[str]:
+        """Return the lower-cased contexts required on the base branch.
+
+        A check that cannot block the merge is never worth calling
+        stuck, so this set decides what the scans may consider.  A
+        branch protection lookup that fails degrades to an empty set
+        rather than an error, leaving the DCO safety net in
+        :meth:`_is_eligible_stuck_check` as the only eligible matcher —
+        the conservative outcome, and the reason the failure is
+        swallowed here rather than surfaced.
+        """
         required_contexts: set[str] = set()
         try:
-            required = await self._github_client.get_required_status_checks(
+            required = await client.get_required_status_checks(
                 repo_owner, repo_name, pr_info.base_branch or "main"
             )
             if isinstance(required, list):
@@ -173,26 +222,65 @@ class _StuckChecksMixin(_MergeManagerBase):
                 exc,
             )
             required_contexts = set()
+        return required_contexts
 
-        def _is_eligible(name: str) -> bool:
-            """Return True when a stuck ``name`` should drive recreate.
+    def _is_eligible_stuck_check(self, name: str, required_contexts: set[str]) -> bool:
+        """Return True when a stuck ``name`` should drive recreate.
 
-            Eligible when the check is required on the base branch or
-            is a DCO-shaped check (safety net), and is *not* a
-            pre-commit.ci check (handled separately).
-            """
-            if _is_precommit_name(name):
-                return False
-            return (name or "").strip().lower() in required_contexts or _is_dco_name(
-                name
-            )
+        Eligible when the check is required on the base branch or is a
+        DCO-shaped check (safety net), and is *not* a pre-commit.ci
+        check (handled separately).  Both scans ask the same question,
+        so the rule lives in one place.
+        """
+        if self._is_precommit_check_name(name):
+            return False
+        normalised = (name or "").strip().lower()
+        return normalised in required_contexts or self._is_dco_check_name(name)
 
-        # 3. Examine check-runs and status contexts on the head SHA.
-        candidate_name: str | None = None
-        candidate_age: float = 0.0
+    @staticmethod
+    def _is_dco_check_name(name: str) -> bool:
+        """Return True when ``name`` looks like a DCO check.
 
+        Matches the common variants emitted by the GitHub DCO App and
+        similar bots: ``DCO``, ``dco/dco``, ``dcobot``, and any name
+        containing ``signoff`` / ``sign-off`` / ``signed-off``
+        (case-insensitive).
+        """
+        n = (name or "").strip().lower()
+        if not n:
+            return False
+        if n in {"dco", "dco/dco", "dcobot"} or n.startswith("dco/"):
+            return True
+        return "signoff" in n or "sign-off" in n or "signed-off" in n
+
+    @staticmethod
+    def _is_precommit_check_name(name: str) -> bool:
+        """Return True when ``name`` is a pre-commit.ci check.
+
+        pre-commit.ci reports as ``pre-commit.ci - pr`` (and the
+        ``- ci`` variant).  It is excluded from this detector because
+        dependabot's ``recreate`` macro does not retrigger it;
+        ``_trigger_stale_precommit_ci`` handles it via the
+        ``pre-commit.ci run`` comment instead.
+        """
+        n = (name or "").strip().lower()
+        return "pre-commit.ci" in n or "pre-commit-ci" in n
+
+    async def _fetch_stuck_check_runs(
+        self,
+        client: GitHubAsync,
+        pr_info: PullRequestInfo,
+        repo_owner: str,
+        repo_name: str,
+    ) -> dict[str, Any] | list[dict[str, Any]] | None:
+        """Read the head SHA's check-runs, or ``None`` on failure.
+
+        The commit status contexts are still worth scanning when this
+        half of the picture cannot be read, so a failed fetch is logged
+        and answered with ``None`` rather than ending the detection.
+        """
         try:
-            runs = await self._github_client.get(
+            return await client.get(
                 f"/repos/{repo_owner}/{repo_name}/commits/{pr_info.head_sha}/check-runs"
             )
         except Exception as exc:
@@ -202,30 +290,64 @@ class _StuckChecksMixin(_MergeManagerBase):
                 pr_info.number,
                 exc,
             )
-            runs = None
+            return None
 
-        if isinstance(runs, dict):
-            for run in runs.get("check_runs") or []:
-                if not isinstance(run, dict):
-                    continue
-                name = run.get("name", "")
-                if not _is_eligible(name):
-                    continue
-                status = run.get("status")
-                if status not in ("queued", "in_progress"):
-                    continue
-                started = _parse_ts(run.get("started_at"))
-                # Use the *latest* of started_at and PR updated_at
-                # as the reference so a stale started_at left over
-                # from a prior head SHA does not inflate the age.
-                ref = max(started, pr_updated) if started else pr_updated
-                age = (now - ref).total_seconds()
-                if age >= threshold and age > candidate_age:
-                    candidate_name = name
-                    candidate_age = age
+    def _stuck_check_run_candidate(
+        self,
+        runs: dict[str, Any] | list[dict[str, Any]] | None,
+        required_contexts: set[str],
+        now: datetime,
+        pr_updated: datetime,
+    ) -> tuple[str | None, float]:
+        """Return the longest-stuck eligible check-run and its age.
 
+        Answers ``(None, 0.0)`` when nothing eligible has been queued or
+        in progress for longer than
+        :data:`STUCK_CHECK_THRESHOLD_SECONDS`.  Separate from the status
+        context scan because the two APIs describe pendency
+        differently, and collapsing them would hide which timestamp is
+        compared against what.
+        """
+        candidate_name: str | None = None
+        candidate_age: float = 0.0
+        if not isinstance(runs, dict):
+            return candidate_name, candidate_age
+
+        for run in runs.get("check_runs") or []:
+            if not isinstance(run, dict):
+                continue
+            name = run.get("name", "")
+            if not self._is_eligible_stuck_check(name, required_contexts):
+                continue
+            status = run.get("status")
+            if status not in ("queued", "in_progress"):
+                continue
+            started = self._parse_check_timestamp(run.get("started_at"))
+            # Use the *latest* of started_at and PR updated_at
+            # as the reference so a stale started_at left over
+            # from a prior head SHA does not inflate the age.
+            ref = max(started, pr_updated) if started else pr_updated
+            age = (now - ref).total_seconds()
+            if age >= STUCK_CHECK_THRESHOLD_SECONDS and age > candidate_age:
+                candidate_name = name
+                candidate_age = age
+        return candidate_name, candidate_age
+
+    async def _fetch_stuck_commit_statuses(
+        self,
+        client: GitHubAsync,
+        pr_info: PullRequestInfo,
+        repo_owner: str,
+        repo_name: str,
+    ) -> dict[str, Any] | list[dict[str, Any]] | None:
+        """Read the head SHA's status contexts, or ``None`` on failure.
+
+        Any check-run candidate already found still stands when this
+        fetch fails, so the failure is logged and answered with ``None``
+        rather than discarding the detection so far.
+        """
         try:
-            statuses = await self._github_client.get(
+            return await client.get(
                 f"/repos/{repo_owner}/{repo_name}/commits/{pr_info.head_sha}/status"
             )
         except Exception as exc:
@@ -235,24 +357,41 @@ class _StuckChecksMixin(_MergeManagerBase):
                 pr_info.number,
                 exc,
             )
-            statuses = None
+            return None
 
-        if isinstance(statuses, dict):
-            for s in statuses.get("statuses") or []:
-                if not isinstance(s, dict):
-                    continue
-                ctx = s.get("context", "")
-                if not _is_eligible(ctx):
-                    continue
-                if s.get("state") != "pending":
-                    continue
-                updated = _parse_ts(s.get("updated_at")) or pr_updated
-                ref = max(updated, pr_updated)
-                age = (now - ref).total_seconds()
-                if age >= threshold and age > candidate_age:
-                    candidate_name = ctx
-                    candidate_age = age
+    def _stuck_status_context_candidate(
+        self,
+        statuses: dict[str, Any] | list[dict[str, Any]] | None,
+        required_contexts: set[str],
+        now: datetime,
+        pr_updated: datetime,
+    ) -> tuple[str | None, float]:
+        """Return the longest-stuck eligible status context and its age.
 
-        if candidate_name is None:
-            return False, None, 0.0
-        return True, candidate_name, candidate_age
+        The older commit status API reports ``pending`` rather than
+        ``queued`` / ``in_progress`` and carries ``updated_at`` rather
+        than ``started_at``, so its scan stays distinct from the
+        check-run one.  The caller keeps whichever of the two candidates
+        is older, so ``(None, 0.0)`` here leaves any check-run candidate
+        untouched.
+        """
+        candidate_name: str | None = None
+        candidate_age: float = 0.0
+        if not isinstance(statuses, dict):
+            return candidate_name, candidate_age
+
+        for s in statuses.get("statuses") or []:
+            if not isinstance(s, dict):
+                continue
+            ctx = s.get("context", "")
+            if not self._is_eligible_stuck_check(ctx, required_contexts):
+                continue
+            if s.get("state") != "pending":
+                continue
+            updated = self._parse_check_timestamp(s.get("updated_at")) or pr_updated
+            ref = max(updated, pr_updated)
+            age = (now - ref).total_seconds()
+            if age >= STUCK_CHECK_THRESHOLD_SECONDS and age > candidate_age:
+                candidate_name = ctx
+                candidate_age = age
+        return candidate_name, candidate_age
