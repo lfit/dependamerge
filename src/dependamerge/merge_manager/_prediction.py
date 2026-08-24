@@ -52,6 +52,14 @@ class _PredictionMixin(_MergeManagerBase):
         GitHub's actual response (Step 6 and ``_merge_pr_with_retry``) as
         authoritative.  Only the preview path calls this method.
 
+        The ``except`` below covers **only the probe requests**, not the
+        verdict derived from them.  The optimistic "assuming mergeable"
+        fallback exists so an unreachable API does not block a run; it is
+        not meant to absorb defects in our own reasoning.  A bug in the
+        derivation therefore propagates to ``_predicted_merge_verdict``,
+        which logs it and returns "no verdict" — a visibly absent answer
+        rather than a confidently wrong one.
+
         Args:
             owner: Repository owner
             repo: Repository name
@@ -75,18 +83,16 @@ class _PredictionMixin(_MergeManagerBase):
             pr_data = await self._github_client.get(
                 f"/repos/{owner}/{repo}/pulls/{pr_number}"
             )
-
-            if isinstance(pr_data, dict):
-                verdict = await self._predict_from_pr_state(
-                    owner, repo, pr_number, pr_data
-                )
-                if verdict is not None:
-                    return verdict
-
-            return True, "merge capability test passed"
-
         except Exception as e:
             return self._prediction_verdict_for_error(owner, repo, pr_number, e)
+
+        # Derivation sits outside the guard on purpose — see the docstring.
+        if isinstance(pr_data, dict):
+            verdict = await self._predict_from_pr_state(owner, repo, pr_number, pr_data)
+            if verdict is not None:
+                return verdict
+
+        return True, "merge capability test passed"
 
     async def _predict_from_pr_state(
         self, owner: str, repo: str, pr_number: int, pr_data: dict[str, Any]
@@ -141,8 +147,11 @@ class _PredictionMixin(_MergeManagerBase):
         block_reason = await self._lookup_block_reason(owner, repo, pr_number, pr_data)
 
         # If the PR is only blocked because it needs approval, allow it
-        # through — the tool will approve it before attempting merge.
-        if "requires approval" in block_reason.lower():
+        # through --- the tool will approve it before attempting merge.
+        # The falsy guard keeps this branch safe even if a caller supplies
+        # a block reason that did not come through
+        # ``_lookup_block_reason``.
+        if block_reason and "requires approval" in block_reason.lower():
             self.log.info(
                 f"PR {owner}/{repo}#{pr_number} is blocked pending approval — tool will approve before merge"
             )
@@ -182,7 +191,15 @@ class _PredictionMixin(_MergeManagerBase):
             self.log.debug(
                 f"PR {owner}/{repo}#{pr_number} block reason: {block_reason}"
             )
-            return block_reason
+            # The client's annotation promises a ``str``, but coerce here
+            # anyway so this method's own ``-> str`` contract holds at the
+            # boundary.  Without it a ``None`` would reach ``.lower()`` in
+            # ``_predict_blocked_verdict`` and raise ``AttributeError``,
+            # which ``_predict_merge_outcome``'s outer handler converts
+            # into the optimistic "assuming mergeable" verdict --- turning
+            # a missing block reason into a prediction that the PR is fine
+            # to merge, which is the wrong direction to fail in.
+            return block_reason or ""
         except Exception as analyze_err:
             self.log.debug(
                 f"Could not analyze block reason for {owner}/{repo}#{pr_number}: {analyze_err}"
