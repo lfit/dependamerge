@@ -165,57 +165,67 @@ class _FailureReportingMixin(_FailureSummaryFromExceptionMixin):
             return f"merge failed: {pr_info.mergeable_state}"
 
     async def _blocked_failure_summary(self, pr_info: PullRequestInfo) -> str:
-        """Summarise a ``blocked`` PR, naming the blocker where possible."""
+        """Summarise a ``blocked`` PR, naming the blocker where possible.
+
+        The guard covers **only** the analysis probe.  Wrapping the
+        conversion chain as well would make a defect in that chain
+        indistinguishable from a genuine analysis failure --- both would
+        surface as the generic fallback, which is plausible enough that a
+        silently broken conversion could persist indefinitely, with every
+        blocked PR simply reporting the generic reason.
+        """
         try:
             detailed_reason = await self._analyze_block_reason_async(pr_info)
-            # Convert the detailed reason to a more concise format for console output
-            if detailed_reason.startswith("Blocked by failing check:"):
-                check_name = detailed_reason.replace("Blocked by failing check: ", "")
-                return f"failing check: {check_name}"
-            elif (
-                detailed_reason.startswith("Blocked by")
-                and "failing checks" in detailed_reason
-            ):
-                return detailed_reason.replace("Blocked by ", "").lower()
-            elif "Human reviewer requested changes" in detailed_reason:
-                return "human reviewer requested changes"
-            elif "Copilot" in detailed_reason:
-                return detailed_reason.replace("Blocked by ", "").lower()
-            elif "ruleset" in detailed_reason.lower():
-                return "repository ruleset prevents merge"
-            elif "undetermined reason" in detailed_reason.lower():
-                return "blocked for an undetermined reason"
-            elif "branch protection" in detailed_reason.lower():
-                return "branch protection rules prevent merge"
-            else:
-                return detailed_reason.replace("Blocked by ", "").lower()
         except Exception as e:
             self.log.debug(f"Failed to get detailed block reason: {e}")
-            # Fallback to generic message
-
-        # Fallback logic when detailed analysis fails
-        if pr_info.mergeable is True:
-            return "branch protection rules prevent merge"
-        else:
+            # Fallback logic when detailed analysis fails
+            if pr_info.mergeable is True:
+                return "branch protection rules prevent merge"
             return "blocked by failing status checks"
 
+        # Convert the detailed reason to a more concise format for console output
+        if detailed_reason.startswith("Blocked by failing check:"):
+            check_name = detailed_reason.replace("Blocked by failing check: ", "")
+            return f"failing check: {check_name}"
+        elif (
+            detailed_reason.startswith("Blocked by")
+            and "failing checks" in detailed_reason
+        ):
+            return detailed_reason.replace("Blocked by ", "").lower()
+        elif "Human reviewer requested changes" in detailed_reason:
+            return "human reviewer requested changes"
+        elif "Copilot" in detailed_reason:
+            return detailed_reason.replace("Blocked by ", "").lower()
+        elif "ruleset" in detailed_reason.lower():
+            return "repository ruleset prevents merge"
+        elif "undetermined reason" in detailed_reason.lower():
+            return "blocked for an undetermined reason"
+        elif "branch protection" in detailed_reason.lower():
+            return "branch protection rules prevent merge"
+        else:
+            return detailed_reason.replace("Blocked by ", "").lower()
+
     async def _unknown_state_failure_summary(self, pr_info: PullRequestInfo) -> str:
-        """Summarise a PR whose mergeable state GitHub reports as unknown."""
+        """Summarise a PR whose mergeable state GitHub reports as unknown.
+
+        Scoped like :meth:`_blocked_failure_summary`, and for the same
+        reason: only the probe is guarded, so a conversion defect cannot
+        masquerade as a failed analysis.
+        """
         try:
             detailed_reason = await self._analyze_block_reason_async(pr_info)
-            if "failing check" in detailed_reason.lower():
-                if detailed_reason.startswith("Blocked by failing check:"):
-                    check_name = detailed_reason.replace(
-                        "Blocked by failing check: ", ""
-                    )
-                    return f"failing check: {check_name}"
-                else:
-                    return detailed_reason.replace("Blocked by ", "").lower()
-            else:
-                return detailed_reason.replace("Blocked by ", "").lower()
         except Exception as e:
             self.log.debug(f"Failed to analyze unknown state: {e}")
             return "status checks pending or failed"
+
+        if "failing check" in detailed_reason.lower():
+            if detailed_reason.startswith("Blocked by failing check:"):
+                check_name = detailed_reason.replace("Blocked by failing check: ", "")
+                return f"failing check: {check_name}"
+            else:
+                return detailed_reason.replace("Blocked by ", "").lower()
+        else:
+            return detailed_reason.replace("Blocked by ", "").lower()
 
     async def _get_merge_method_for_repo(self, owner: str, repo: str) -> str:
         """

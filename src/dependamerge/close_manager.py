@@ -136,7 +136,10 @@ class AsyncCloseManager:
 
                 target = self._resolve_close_target(pr_info, result)
                 if target is None:
-                    self._results.append(result)
+                    # No append here: the ``finally`` below is the single
+                    # append point.  Appending on this path too would
+                    # record every skipped PR twice, because ``return``
+                    # inside ``try`` runs ``finally`` first.
                     return result
 
                 repo_owner, repo_name = target
@@ -165,6 +168,10 @@ class AsyncCloseManager:
 
             finally:
                 result.duration = time.time() - start_time
+                # The single point at which a result enters ``_results``.
+                # ``get_summary`` and ``get_results`` both read this list,
+                # so a second append anywhere would inflate the counts the
+                # close command reports.
                 self._results.append(result)
 
         return result
@@ -257,6 +264,16 @@ class AsyncCloseManager:
                     f"✅ Closed: {pr_info.html_url}",
                     level="info",
                 )
+
+            except GitHubPermissionError:
+                # Broader than this clause, and deliberately ahead of it:
+                # a permission denial must reach the dedicated handler in
+                # ``_close_single_pr``, which explains *which* scope the
+                # token lacks.  Letting the generic clause below catch it
+                # would retry pointlessly --- the token cannot gain scopes
+                # between attempts --- and discard that guidance, turning
+                # an actionable failure into a vague one.
+                raise
 
             except Exception as e:
                 error_msg = str(e)
