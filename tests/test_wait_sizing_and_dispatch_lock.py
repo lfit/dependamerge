@@ -3,7 +3,7 @@
 
 """Wait sizing and merge-dispatch serialisation on the recovery paths.
 
-A defect on a path reached only after something has already gone
+Two defects, both on paths reached only after something has already gone
 wrong, which is why neither had coverage.
 
 **#436** --- ``_apply_wait_head_start`` sized its skip-ahead from the
@@ -17,10 +17,17 @@ that situation is the latency of a wait that has already elapsed --- so a
 pull request that had gone green could sleep up to half its remaining
 budget before the first live poll.
 
+**#435** --- two recovery paths dispatched ``merge_pull_request``
+**outside** the per-repository dispatch lock, defeating the serialisation
+that lock exists to provide.  Both are reached only after a rejected
+first attempt, and the consequence is a merge raced against
+freshly-propagated branch protection: an intermittent, hard-to-attribute
+failure rather than anything pointing at the lock.
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -208,6 +215,106 @@ class TestTheHeadStartIsSizedFromLiveState:
 
         assert "head-start" in order, order
         assert order.index("poll") < order.index("head-start"), order
+
+
+class TestEveryMergeDispatchHoldsTheRepoLock:
+    """The lock's guarantee is worthless if a recovery path skips it."""
+
+    @pytest.mark.asyncio
+    async def test_approve_on_demand_retry_is_locked(self) -> None:
+        mgr, client = _mgr()
+        pr = _pr()
+        owner, repo = "lfreleng-actions", "slow-repo"
+        lock = asyncio.Lock()
+        mgr._get_merge_dispatch_lock = AsyncMock(return_value=lock)  # type: ignore[method-assign]
+        mgr._last_merge_exception[f"{owner}/{repo}#1"] = Exception(
+            "GitHub: At least 1 approving review is required by reviewers "
+            "with write access."
+        )
+        mgr._ensure_pr_approved = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+        observed: dict[str, bool] = {}
+
+        async def _retry(*_args: Any, **_kwargs: Any) -> bool:
+            observed["locked"] = lock.locked()
+            return True
+
+        mgr._merge_pr_with_retry = _retry  # type: ignore[method-assign]
+
+        assert await mgr._approve_and_retry_if_review_required(pr, owner, repo) is True
+        assert observed["locked"] is True
+
+    @pytest.mark.asyncio
+    async def test_the_heuristic_path_retry_is_locked(self) -> None:
+        """The same function reaches the retry twice; both must be locked."""
+        mgr, client = _mgr()
+        pr = _pr()
+        owner, repo = "lfreleng-actions", "slow-repo"
+        lock = asyncio.Lock()
+        mgr._get_merge_dispatch_lock = AsyncMock(return_value=lock)  # type: ignore[method-assign]
+        client.analyze_block_reason = AsyncMock(
+            return_value="PR requires approval from a code owner"
+        )
+        mgr._ensure_pr_approved = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+        observed: dict[str, bool] = {}
+
+        async def _retry(*_args: Any, **_kwargs: Any) -> bool:
+            observed["locked"] = lock.locked()
+            return True
+
+        mgr._merge_pr_with_retry = _retry  # type: ignore[method-assign]
+
+        assert await mgr._approve_and_retry_if_review_required(pr, owner, repo) is True
+        assert observed["locked"] is True
+
+    @pytest.mark.asyncio
+    async def test_required_workflow_retry_is_locked(self) -> None:
+        mgr, client = _mgr()
+        pr = _pr()
+        owner, repo = "lfreleng-actions", "slow-repo"
+        lock = asyncio.Lock()
+        mgr._get_merge_dispatch_lock = AsyncMock(return_value=lock)  # type: ignore[method-assign]
+        mgr._wait_for_auto_merge = AsyncMock(return_value=(False, False))  # type: ignore[method-assign]
+
+        observed: dict[str, bool] = {}
+
+        async def _merge(*_args: Any, **_kwargs: Any) -> bool:
+            observed["locked"] = lock.locked()
+            return True
+
+        client.merge_pull_request = _merge
+
+        assert await mgr._wait_for_required_workflows_and_retry(pr, owner, repo) is True
+        assert observed["locked"] is True
+
+    @pytest.mark.asyncio
+    async def test_the_lock_is_not_held_across_the_wait(self) -> None:
+        """Holding it through the wait would block the whole repository.
+
+        The lock serialises the *moment of merge*, not the waiting that
+        precedes it. Holding it across a multi-minute wait would queue
+        every sibling in the repository behind this one pull request ---
+        the head-of-line blocking the design deliberately avoids.
+        """
+        mgr, client = _mgr()
+        pr = _pr()
+        owner, repo = "lfreleng-actions", "slow-repo"
+        lock = asyncio.Lock()
+        mgr._get_merge_dispatch_lock = AsyncMock(return_value=lock)  # type: ignore[method-assign]
+
+        observed: dict[str, bool] = {}
+
+        async def _wait(*_args: Any, **_kwargs: Any) -> tuple[bool, bool]:
+            observed["locked_during_wait"] = lock.locked()
+            return False, False
+
+        mgr._wait_for_auto_merge = _wait  # type: ignore[method-assign]
+        client.merge_pull_request = AsyncMock(return_value=True)
+
+        await mgr._wait_for_required_workflows_and_retry(pr, owner, repo)
+
+        assert observed["locked_during_wait"] is False
 
 
 class TestTheHeadStartNeedsAUsableReading:
