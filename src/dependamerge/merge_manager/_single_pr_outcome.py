@@ -13,9 +13,10 @@ rescue.
 
 from __future__ import annotations
 
+from ..models import PullRequestInfo
 from ._single_pr_context import _MergeFlow
 from ._single_pr_recreate import _SinglePrRecreateMixin
-from ._types import MergeResult, MergeStatus
+from ._types import MergeResult, MergeStatus, RecreateOutcome
 
 
 class _SinglePrOutcomeMixin(_SinglePrRecreateMixin):
@@ -68,9 +69,27 @@ class _SinglePrOutcomeMixin(_SinglePrRecreateMixin):
         # decision and the final error reporting.
         failure_reason = await self._get_failure_summary(flow.pr_info)
 
-        recreated_pr = await self._maybe_recreate_dependabot_pr(flow, failure_reason)
-        if recreated_pr is not None:
-            await self._merge_recreated_pr(flow, recreated_pr)
+        recreate = await self._maybe_recreate_dependabot_pr(flow, failure_reason)
+        if recreate.outcome is RecreateOutcome.READY and recreate.pr_info is not None:
+            await self._merge_recreated_pr(flow, recreate.pr_info)
+        elif (
+            recreate.outcome is RecreateOutcome.MERGED and recreate.pr_info is not None
+        ):
+            # Auto-merge is armed on the replacement before the wait
+            # begins, so it can complete between polls.  Record the
+            # success rather than attempting a merge on a closed PR.
+            self._record_recreated_merge(flow, recreate.pr_info)
+        elif (
+            recreate.outcome is RecreateOutcome.PENDING and recreate.pr_info is not None
+        ):
+            # We stopped waiting, but the replacement is open, approved
+            # and armed, so it is expected to merge on its own.
+            # Reporting the original as FAILED would under-report a
+            # success, and ``_confirm_failure`` could not correct it:
+            # it rechecks the original PR, not the replacement.
+            self._record_recreated_pending(flow, recreate.pr_info)
+        elif recreate.outcome is RecreateOutcome.ABANDONED:
+            self._record_recreated_abandoned(flow, recreate.pr_info)
         else:
             await self._report_merge_failure(
                 flow.pr_info,
@@ -80,6 +99,75 @@ class _SinglePrOutcomeMixin(_SinglePrRecreateMixin):
                 failure_reason,
             )
         return None
+
+    def _record_recreated_merge(
+        self, flow: _MergeFlow, recreated_pr: PullRequestInfo
+    ) -> None:
+        """Record a replacement PR that merged while we were waiting."""
+        flow.result.status = MergeStatus.MERGED
+        flow.result.pr_info = recreated_pr
+        self._pr_status(
+            f"✅ Merged (recreated, by auto-merge): {recreated_pr.html_url}",
+            level="debug",
+        )
+
+    def _record_recreated_pending(
+        self, flow: _MergeFlow, recreated_pr: PullRequestInfo
+    ) -> None:
+        """Record a replacement PR left in flight under auto-merge.
+
+        The same treatment ``--max-wait`` gives any armed-but-unfinished
+        merge: report it as pending rather than as a failure, so the
+        run's counts describe what is actually going to happen.
+
+        The reason goes on ``error`` because that is the field the
+        end-of-run report reads (``cli/_merge_report.py``), and the
+        convention every other ``AUTO_MERGE_PENDING`` path already
+        follows.  Putting it on ``warning`` would leave the operator
+        looking at "no reason reported".
+        """
+        flow.result.status = MergeStatus.AUTO_MERGE_PENDING
+        flow.result.pr_info = recreated_pr
+        flow.result.error = (
+            "auto-merge pending: dependabot recreated this PR as "
+            f"#{recreated_pr.number}, which is approved and armed"
+        )
+        self._pr_status(
+            f"⏳ Auto-merge pending (recreated): {recreated_pr.html_url}",
+            level="debug",
+        )
+
+    def _record_recreated_abandoned(
+        self, flow: _MergeFlow, replacement: PullRequestInfo | None
+    ) -> None:
+        """Record a replacement that will not merge without help.
+
+        ``BLOCKED`` rather than ``FAILED``, because after a recreate the
+        **original** PR is closed unmerged by dependabot --- so a
+        ``FAILED`` result is rewritten to ``CLOSED`` by
+        ``_confirm_failure``, which documents ``CLOSED`` as "nothing for
+        the operator to follow up on".  That is the opposite of what a
+        conflicted or closed-unmerged replacement needs.
+        ``_confirm_failure`` returns early for any status other than
+        ``FAILED``, so ``BLOCKED`` survives it, and it is the status
+        already used elsewhere for "will not merge on its own".
+        """
+        flow.result.status = MergeStatus.BLOCKED
+        if replacement is not None:
+            flow.result.pr_info = replacement
+            flow.result.error = (
+                f"dependabot recreated this PR as #{replacement.number}, "
+                "which is conflicted or closed unmerged and needs attention"
+            )
+        else:
+            flow.result.error = (
+                "dependabot recreated this PR, but the replacement is "
+                "conflicted or closed unmerged and needs attention"
+            )
+        self._pr_status(
+            f"🛑 Blocked (recreated): {flow.result.pr_info.html_url}",
+            level="debug",
+        )
 
     async def _external_closure_result(self, flow: _MergeFlow) -> MergeResult | None:
         """Recognise a PR that merged or closed outside this run.

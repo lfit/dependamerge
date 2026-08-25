@@ -13,6 +13,7 @@ from typing import Any
 from ..bot_identity import is_dependabot
 from ..models import PullRequestInfo
 from ._base import _MergeManagerBase
+from ._types import RecreateCause, RecreateResult
 
 
 def _has_recreate_comment(comments: Any) -> bool:
@@ -32,64 +33,73 @@ class _DependabotRecreateMixin(_MergeManagerBase):
     """Driving the ``@dependabot recreate`` command."""
 
     async def _trigger_dependabot_recreate(
-        self, pr_info: PullRequestInfo
-    ) -> PullRequestInfo | None:
+        self, pr_info: PullRequestInfo, cause: RecreateCause
+    ) -> RecreateResult:
         """
-        Detect an unsigned dependabot commit and ask dependabot to recreate
-        the pull request so that the new commit is properly signed.
+        Ask dependabot to recreate a pull request from scratch.
 
-        When a repository's branch protection requires commit signatures,
-        dependabot PRs can end up with unverified commits (e.g. after a
-        rebase or force-push by GitHub).  Posting ``@dependabot recreate``
-        causes dependabot to close the current PR and open a fresh one
-        whose commit is signed by GitHub.
+        Two unrelated problems are recoverable this way, and the gates
+        differ between them:
+
+        ``UNSIGNED``
+            When a repository's branch protection requires commit
+            signatures, dependabot PRs can end up with unverified
+            commits (e.g. after a rebase or force-push by GitHub).
+            Posting ``@dependabot recreate`` produces a fresh PR whose
+            commit is signed by GitHub.  The signature checks decide
+            whether a recreate would help, so both are applied.
+
+        ``STUCK_CHECK``
+            A required check that never reported.  This is a *timing*
+            problem; signatures are irrelevant to it.  Applying the
+            signature gates here would make the recovery inert on every
+            repository that does not enforce signatures --- while still
+            telling the user a recreate was requested.
 
         Args:
             pr_info: Pull request information for the failing PR.
+            cause: Why the recreate is being requested.
 
         Returns:
-            A new ``PullRequestInfo`` for the recreated PR if the recreate
-            was triggered, the old PR was closed, and a replacement was
-            found.  Returns ``None`` if the recreate was not applicable or
-            did not succeed within the polling window.
+            A :class:`RecreateResult` describing what became of the
+            request.
         """
         if not self._github_client:
-            return None
+            return RecreateResult.none()
 
         repo_owner, repo_name = pr_info.repository_full_name.split("/", 1)
 
-        # 1. Only applies to dependabot PRs
+        # Applies to both causes: only dependabot answers the macro.
         if not is_dependabot(pr_info.author):
-            return None
+            return RecreateResult.none()
 
-        # 2. Check whether the branch requires signed commits
-        if not await self._recreate_branch_requires_signatures(
-            repo_owner, repo_name, pr_info
-        ):
-            return None
+        detail = ""
+        if cause is RecreateCause.UNSIGNED:
+            if not await self._recreate_branch_requires_signatures(
+                repo_owner, repo_name, pr_info
+            ):
+                return RecreateResult.none()
 
-        # 3. Check whether any commits are unverified
-        unverified_shas = await self._recreate_unverified_shas(
-            repo_owner, repo_name, pr_info
-        )
-        if unverified_shas is None:
-            return None
+            unverified_shas = await self._recreate_unverified_shas(
+                repo_owner, repo_name, pr_info
+            )
+            if unverified_shas is None:
+                return RecreateResult.none()
+            detail = f" [unverified commits: {', '.join(unverified_shas)}]"
 
-        # 4. Guard against duplicate recreate comments
+        # Guard against duplicate recreate comments
         if await self._recreate_already_requested(repo_owner, repo_name, pr_info):
-            return None
+            return RecreateResult.none()
 
-        # 5. Post the recreate comment
         self._pr_status(
-            f"🔄 Requesting dependabot recreate: {pr_info.html_url} "
-            f"[unverified commits: {', '.join(unverified_shas)}]",
+            f"🔄 Requesting dependabot recreate: {pr_info.html_url}{detail}",
             level="info",
         )
 
         if not await self._post_recreate_comment(repo_owner, repo_name, pr_info):
-            return None
+            return RecreateResult.none()
 
-        # 6. Poll for the old PR to close and a replacement to appear.
+        # Poll for the old PR to close and a replacement to appear.
         return await self._await_dependabot_recreate(repo_owner, repo_name, pr_info)
 
     async def _recreate_branch_requires_signatures(
@@ -215,26 +225,65 @@ class _DependabotRecreateMixin(_MergeManagerBase):
 
     async def _await_dependabot_recreate(
         self, repo_owner: str, repo_name: str, pr_info: PullRequestInfo
-    ) -> PullRequestInfo | None:
+    ) -> RecreateResult:
         """Wait for the old PR to close and its replacement to appear.
 
-        Dependabot typically responds within 30-90 seconds.  We poll
-        using the centralised merge timeout.  The whole poll (including
-        the nested recreated-PR checks wait) is a wait on dependabot +
-        CI, so the worker's concurrency slot is released for its
-        duration (``parked()``).
+        Dependabot typically responds within 30-90 seconds.  The whole
+        poll --- including the nested recreated-PR checks wait --- is a
+        wait on dependabot and CI, so the worker's concurrency slot is
+        released for its duration (``parked()``).
+
+        **One** deadline governs the whole path.  It is established here
+        and passed into the nested wait, which previously started a
+        fresh budget of its own: finding a replacement near the ceiling
+        could then add another complete ``merge_timeout`` on top of
+        whatever this loop had already spent, so a single PR could
+        consume ``2 x merge_timeout`` beyond ``--max-wait`` while
+        holding its slot lease.
         """
         # Resolved through the package at call time rather than bound at
         # import time, so that a test rebinding the constant on
         # ``dependamerge.merge_manager`` is observed here.
         from dependamerge import merge_manager as _mm
 
+        # ``--max-wait 0`` promises never to block.  The recreate macro
+        # has been posted, so dependabot still acts on it --- but note
+        # what this does **not** do: returning here means the
+        # replacement is never discovered, so nothing approves or arms
+        # auto-merge on it.  Dependabot typically takes 30-90 seconds to
+        # open the replacement, so there is nothing to find yet, and
+        # searching for it would be the very wait this flag forbids.
+        #
+        # The replacement is therefore left for a later run to collect
+        # and merge normally.  Under ``--max-wait 0`` this PR is
+        # reported as a failure, which is accurate: nothing will finish
+        # it without another run.
+        if self._no_wait:
+            self.log.debug(
+                "Not waiting for dependabot recreate on %s#%s (--max-wait 0)",
+                pr_info.repository_full_name,
+                pr_info.number,
+            )
+            return RecreateResult.none()
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._merge_timeout
+        if self._run_deadline is not None:
+            deadline = min(deadline, self._run_deadline)
+
         max_polls = self._merge_poll_max_attempts
         old_pr_closed = False
 
         async with _mm.parked():
             for attempt in range(max_polls):
-                await asyncio.sleep(self._merge_recheck_interval)
+                # Clamped rather than merely checked: sleeping a whole
+                # interval with less than that left would overshoot the
+                # ceiling, which is what the other deadline-aware waits
+                # avoid.
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(self._merge_recheck_interval, remaining))
 
                 # 6a. Check if the old PR has been closed
                 if not old_pr_closed:
@@ -244,13 +293,13 @@ class _DependabotRecreateMixin(_MergeManagerBase):
 
                 # 6b. Once the old PR is closed, look for the replacement
                 if old_pr_closed:
-                    resolved, new_pr_info = await self._find_recreated_pr(
-                        repo_owner, repo_name, pr_info
+                    resolved, recreate = await self._find_recreated_pr(
+                        repo_owner, repo_name, pr_info, deadline
                     )
                     # Always return after the first wait attempt to avoid
                     # performing multiple long waits for the same PR.
                     if resolved:
-                        return new_pr_info
+                        return recreate
 
                 if attempt % 3 == 2:
                     self.log.debug(
@@ -266,7 +315,7 @@ class _DependabotRecreateMixin(_MergeManagerBase):
             pr_info.repository_full_name,
             pr_info.number,
         )
-        return None
+        return RecreateResult.none()
 
     async def _old_pr_is_closed(
         self,
@@ -300,33 +349,32 @@ class _DependabotRecreateMixin(_MergeManagerBase):
         return False
 
     async def _find_recreated_pr(
-        self, repo_owner: str, repo_name: str, pr_info: PullRequestInfo
-    ) -> tuple[bool, PullRequestInfo | None]:
+        self,
+        repo_owner: str,
+        repo_name: str,
+        pr_info: PullRequestInfo,
+        deadline: float | None = None,
+    ) -> tuple[bool, RecreateResult]:
         """Look for the replacement PR and wait for its checks.
 
-        Returns a ``(resolved, pr_info)`` pair.  ``resolved`` is True once
+        Returns a ``(resolved, result)`` pair.  ``resolved`` is True once
         a replacement has been found and waited on, whatever the outcome
         of that wait; the caller then stops polling.
+
+        The guard covers **only** the search request.  Wrapping the wait
+        as well would contradict the caller's own comment --- "always
+        return after the first wait attempt" --- because a failure
+        inside a multi-minute wait would be swallowed as a failed search
+        and the caller would repeat the whole wait.
         """
         if not self._github_client:
-            return False, None
+            return False, RecreateResult.none()
         try:
             # Search for open PRs from dependabot on the same head branch
             prs = await self._github_client.get(
                 f"/repos/{repo_owner}/{repo_name}/pulls"
                 f"?state=open&head={repo_owner}:{pr_info.head_branch}&per_page=5"
             )
-            if isinstance(prs, list):
-                for pr_data in prs:
-                    new_number = self._recreated_pr_number(pr_data, pr_info)
-                    if new_number is None:
-                        continue
-
-                    # Found a replacement — now wait for checks to pass
-                    new_pr_info = await self._wait_for_recreated_pr_checks(
-                        repo_owner, repo_name, new_number, pr_data
-                    )
-                    return True, new_pr_info
         except Exception as e:
             self.log.debug(
                 "Error searching for replacement PR for %s#%s: %s",
@@ -334,7 +382,22 @@ class _DependabotRecreateMixin(_MergeManagerBase):
                 pr_info.number,
                 e,
             )
-        return False, None
+            return False, RecreateResult.none()
+
+        if isinstance(prs, list):
+            for pr_data in prs:
+                new_number = self._recreated_pr_number(pr_data, pr_info)
+                if new_number is None:
+                    continue
+
+                # Found a replacement --- now wait for checks to pass.
+                # Deliberately outside the guard above: a failure here
+                # must propagate rather than trigger a second full wait.
+                recreate = await self._wait_for_recreated_pr_checks(
+                    repo_owner, repo_name, new_number, pr_data, deadline
+                )
+                return True, recreate
+        return False, RecreateResult.none()
 
     def _recreated_pr_number(self, pr_data: Any, pr_info: PullRequestInfo) -> Any:
         """Return the PR number when ``pr_data`` is a viable replacement.

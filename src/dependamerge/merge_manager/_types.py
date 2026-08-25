@@ -53,6 +53,72 @@ class MergeResult:
     duration: float = 0.0
 
 
+class RecreateCause(Enum):
+    """Why a Dependabot recreate was requested.
+
+    The two causes are unrelated, and the gates that apply to one do not
+    apply to the other.  ``UNSIGNED`` is the original case: branch
+    protection requires signed commits and this PR carries unverified
+    ones, so the signature checks decide whether a recreate would help.
+    ``STUCK_CHECK`` is a *timing* problem --- a required check that never
+    reported --- where signatures are irrelevant.
+    """
+
+    UNSIGNED = "unsigned"
+    STUCK_CHECK = "stuck_check"
+
+
+class RecreateOutcome(Enum):
+    """What became of a recreate request.
+
+    ``NONE`` covers only the paths where **no replacement was acted
+    on**: the recreate was not applicable, was not triggered, or no
+    replacement was ever found.
+
+    ``MERGED`` is a success --- auto-merge is armed on the replacement
+    before the wait begins, so it can complete between polls.
+
+    ``ABANDONED`` is a *resolved* failure: the replacement is closed or
+    conflicted, so there is nothing left to wait for and nothing to
+    merge.
+
+    ``PENDING`` is the replacement we found, armed and then stopped
+    waiting on --- because the ceiling arrived, the poll budget ran
+    out, or ``--max-wait 0`` asked us not to block at all.  It is
+    deliberately distinct from ``NONE``: the replacement is real, open
+    and expected to merge on its own, so reporting the original as a
+    failure would under-report a success exactly as the closed/merged
+    case did.  ``_confirm_failure`` cannot rescue that, since it
+    rechecks only the original PR.
+    """
+
+    NONE = "none"
+    READY = "ready"
+    MERGED = "merged"
+    ABANDONED = "abandoned"
+    PENDING = "pending"
+
+
+@dataclass(frozen=True)
+class RecreateResult:
+    """The terminal state of a recreate, and the PR it refers to.
+
+    Carrying the outcome separately from the PR is what stops a caller
+    merging a replacement that has already merged, or waiting on one
+    that has closed.  ``pr_info`` is populated for ``READY``,
+    ``MERGED`` and ``PENDING``; it may be present for ``ABANDONED`` to
+    name the PR in a message, and is always ``None`` for ``NONE``.
+    """
+
+    outcome: RecreateOutcome
+    pr_info: PullRequestInfo | None = None
+
+    @classmethod
+    def none(cls) -> RecreateResult:
+        """No replacement was acted on."""
+        return cls(RecreateOutcome.NONE)
+
+
 def _merged_from_payload(payload: dict[str, Any]) -> bool | None:
     """Whether a PR REST payload says the PR merged.
 

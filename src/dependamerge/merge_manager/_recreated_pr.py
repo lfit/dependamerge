@@ -10,34 +10,13 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
+from ..github_async import PermissionError as GitHubPermissionError
 from ..models import PullRequestInfo
 from ._base import _MergeManagerBase
+from ._types import RecreateOutcome, RecreateResult
 
 if TYPE_CHECKING:
-    from ..models import FileChange
-
-
-def _collect_file_changes(files_data: Any, into: list[FileChange]) -> None:
-    """Append one page of the files API response to ``into``.
-
-    Appends in place so a failure part-way through pagination keeps
-    whatever was already gathered, as the unrefactored loop did.
-    """
-    from ..models import FileChange
-
-    if not isinstance(files_data, list):
-        return
-    for f in files_data:
-        if isinstance(f, dict):
-            into.append(
-                FileChange(
-                    filename=f.get("filename", ""),
-                    additions=int(f.get("additions", 0)),
-                    deletions=int(f.get("deletions", 0)),
-                    changes=int(f.get("changes", 0)),
-                    status=f.get("status", "modified"),
-                )
-            )
+    pass
 
 
 class _RecreatedPullRequestMixin(_MergeManagerBase):
@@ -49,26 +28,44 @@ class _RecreatedPullRequestMixin(_MergeManagerBase):
         repo_name: str,
         new_number: int,
         pr_data: dict[str, Any],
-    ) -> PullRequestInfo | None:
+        deadline: float | None = None,
+    ) -> RecreateResult:
         """
         Wait for the recreated PR's status checks to complete.
 
-        Polls the new PR using the shared merge timeout settings. The
-        total wait here is controlled by ``self._merge_poll_max_attempts
-        * self._merge_recheck_interval`` (default: ~5 minutes), so
-        ``--merge-timeout`` also affects this loop.
+        Auto-merge is armed on the replacement **before** this poll
+        starts, so it can complete between iterations.  The wait
+        therefore distinguishes the terminal states rather than only
+        "mergeable" versus "keep polling": ready, already merged,
+        abandoned (closed unmerged, or conflicted), and still pending.
+        Reporting a merged replacement as a timeout would under-report a
+        success, which is the most damaging direction to be wrong in.
+
+        Giving up is **not** the same as finding nothing.  Once
+        auto-merge is armed the replacement is expected to merge on its
+        own, so a ceiling, an exhausted poll budget or ``--max-wait 0``
+        all yield ``PENDING`` carrying that PR, which the caller reports
+        as ``AUTO_MERGE_PENDING``.  ``NONE`` is reserved for the cases
+        where nothing was acted on --- including a replacement we could
+        not arm, which will not merge by itself.
 
         Args:
             repo_owner: Repository owner.
             repo_name: Repository name.
             new_number: The PR number of the recreated pull request.
             pr_data: The initial PR data dict from the GitHub API.
+            deadline: Monotonic deadline shared with the enclosing
+                recreate poll.  Passed in rather than derived here so
+                the recreate path spends **one** budget in total; a
+                fresh one would let a single PR consume a second full
+                ``merge_timeout`` on top of whatever the outer loop had
+                already spent.
 
         Returns:
-            A ``PullRequestInfo`` if the PR became mergeable, None on timeout.
+            A :class:`RecreateResult` naming the terminal state.
         """
         if not self._github_client:
-            return None
+            return RecreateResult.none()
 
         full_name = f"{repo_owner}/{repo_name}"
         html_url = pr_data.get(
@@ -80,48 +77,74 @@ class _RecreatedPullRequestMixin(_MergeManagerBase):
             level="info",
         )
 
-        await self._auto_merge_recreated_pr(repo_owner, repo_name, new_number, pr_data)
+        replacement = self._recreated_pr_stub(
+            repo_owner, repo_name, new_number, pr_data
+        )
+        armed = await self._auto_merge_recreated_pr(repo_owner, repo_name, replacement)
+
+        def _gave_up(reason: str) -> RecreateResult:
+            """Stop waiting without claiming the replacement failed."""
+            if not armed:
+                # Nothing will happen on its own, so there is no
+                # in-flight merge to report as pending.
+                self.log.warning(
+                    "Stopped waiting on recreated PR %s#%s (%s); "
+                    "auto-merge was not enabled",
+                    full_name,
+                    new_number,
+                    reason,
+                )
+                return RecreateResult.none()
+            self._pr_status(
+                f"⏳ Recreated PR left to auto-merge: {html_url} [{reason}]",
+                level="info",
+            )
+            return RecreateResult(RecreateOutcome.PENDING, replacement)
+
+        # ``--max-wait 0`` promises never to block.  Auto-merge has been
+        # armed above, so GitHub still completes the merge later --- the
+        # same fire-and-forget shape the other waits use.
+        if self._no_wait:
+            return _gave_up("--max-wait 0")
 
         # Poll for the new PR to become mergeable
+        loop = asyncio.get_running_loop()
         max_check_polls = self._merge_poll_max_attempts
         for check_attempt in range(max_check_polls):
-            await asyncio.sleep(self._merge_recheck_interval)
-            settled, ready = await self._poll_recreated_pr(
+            if deadline is None:
+                await asyncio.sleep(self._merge_recheck_interval)
+            else:
+                # Clamped to the remaining budget so a replacement found
+                # near ``--max-wait`` cannot extend the run past it by a
+                # further interval.
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return _gave_up("wait ceiling reached")
+                await asyncio.sleep(min(self._merge_recheck_interval, remaining))
+            outcome = await self._poll_recreated_pr(
                 full_name, new_number, html_url, check_attempt
             )
-            if settled:
-                return ready
+            if outcome is not None:
+                return outcome
 
-        self.log.warning(
-            "Timed out waiting for checks on recreated PR %s#%s",
-            full_name,
-            new_number,
-        )
-        return None
+        return _gave_up("timed out waiting for checks")
 
-    async def _auto_merge_recreated_pr(
+    def _recreated_pr_stub(
         self,
         repo_owner: str,
         repo_name: str,
         new_number: int,
         pr_data: dict[str, Any],
-    ) -> None:
-        """Enable auto-merge on the recreated PR.
+    ) -> PullRequestInfo:
+        """Build a minimal ``PullRequestInfo`` for the replacement.
 
-        Doing so means it still merges even if we time out waiting for
-        status checks.
+        The full object needs a files fetch this path does not need, so
+        the stub carries what arming auto-merge and reporting an
+        outcome require.  Shared by both, so a ``PENDING`` result names
+        exactly the PR auto-merge was armed on.
         """
-        if not pr_data.get("node_id"):
-            return
-
         full_name = f"{repo_owner}/{repo_name}"
-        html_url = pr_data.get(
-            "html_url", f"https://github.com/{full_name}/pull/{new_number}"
-        )
-
-        # We don't have a full PullRequestInfo yet, but we can
-        # construct a minimal one for the auto-merge helper.
-        _tmp_pr = PullRequestInfo(
+        return PullRequestInfo(
             number=new_number,
             node_id=pr_data.get("node_id"),
             title=pr_data.get("title", ""),
@@ -136,108 +159,109 @@ class _RecreatedPullRequestMixin(_MergeManagerBase):
             behind_by=None,
             files_changed=[],
             repository_full_name=full_name,
-            html_url=html_url,
+            html_url=pr_data.get(
+                "html_url", f"https://github.com/{full_name}/pull/{new_number}"
+            ),
         )
-        await self._enable_auto_merge_for_pr(_tmp_pr, repo_owner, repo_name)
 
-    async def _poll_recreated_pr(
+    async def _auto_merge_recreated_pr(
         self,
-        full_name: str,
-        new_number: int,
-        html_url: str,
-        check_attempt: int,
-    ) -> tuple[bool, PullRequestInfo | None]:
-        """Take one reading of the recreated PR's mergeability.
+        repo_owner: str,
+        repo_name: str,
+        replacement: PullRequestInfo,
+    ) -> bool:
+        """Approve the replacement and arm auto-merge, reporting **both**.
 
-        Returns a ``(settled, pr_info)`` pair.  ``settled`` is True once
-        the wait is over: either the PR is ready, in which case
-        ``pr_info`` describes it, or it is conflicted and the caller
-        should give up.
+        Arming auto-merge is a commitment to let GitHub finish the merge
+        once branch protection is satisfied, so the head must already
+        carry this run's approval --- otherwise, on a repository that
+        requires reviews, auto-merge waits forever.  The approval in
+        :meth:`_merge_recreated_pr` is reached only for ``READY``, so a
+        replacement we stop waiting on has no other chance to get one.
+
+        The approve-and-arm helper is deliberately **not** used here.
+        It swallows non-permission approval failures and returns the
+        *arming* result, so a ``True`` from it evidences only that
+        auto-merge is active --- a distinction that does not matter
+        where a real merge is attempted afterwards, but does here,
+        because ``PENDING`` is a claim about what will happen without
+        us.  Approving separately keeps the two signals apart.
+
+        Note the approval signal is **whether it raised**, not what it
+        returned.  ``_ensure_pr_approved`` returns ``True`` only when a
+        *new* review was submitted and ``False`` when the head is
+        already sufficiently approved --- by us or by anyone else ---
+        so treating ``False`` as "not approved" would reject exactly
+        the replacements that are ready to go.  Genuine failures arrive
+        as exceptions.
+
+        Returns True only when approval is satisfied **and** auto-merge
+        is active; anything less cannot be reported as pending.  Typed
+        permission errors propagate, as they do in the shared helper, so
+        the caller's dedicated handler can report them.
         """
-        if not self._github_client:
-            return False, None
+        if not replacement.node_id:
+            return False
+
+        pr_key = f"{repo_owner}/{repo_name}#{replacement.number}"
         try:
-            refreshed = await self._github_client.get(
-                f"/repos/{full_name}/pulls/{new_number}"
+            return await self._approve_and_arm_replacement(
+                repo_owner, repo_name, replacement
             )
-            if not isinstance(refreshed, dict):
-                return False, None
+        finally:
+            # Discard where it was added, rather than after the caller's
+            # outcome handling.  ``_ensure_pr_approved`` registers the
+            # replacement, but ``_merge_single_pr_impl``'s cleanup knows
+            # only about the *original* PR, so anything that leaves this
+            # path early --- an exception or cancellation while arming,
+            # polling or merging --- would strand the key.  A stale
+            # entry makes a later run on a reused manager treat a new
+            # head as already approved and skip approval recovery.
+            #
+            # Nothing in the recreate path reads the key: the ``READY``
+            # merge approves via ``_approve_pr`` directly, and GitHub
+            # itself de-duplicates a repeat approval.
+            self._recently_approved.discard(pr_key)
 
-            mergeable = refreshed.get("mergeable")
-            mergeable_state = refreshed.get("mergeable_state")
-
-            if mergeable_state == "clean" or (
-                mergeable is True and mergeable_state in ("clean", "unstable")
-            ):
-                self._pr_status(
-                    f"✅ Recreated PR is ready to merge: {html_url}",
-                    level="info",
-                )
-                files_changed = await self._recreated_pr_files(full_name, new_number)
-                return True, PullRequestInfo(
-                    number=new_number,
-                    node_id=refreshed.get("node_id"),
-                    title=refreshed.get("title", ""),
-                    body=refreshed.get("body"),
-                    author=((refreshed.get("user") or {}).get("login", "")),
-                    head_sha=((refreshed.get("head") or {}).get("sha", "")),
-                    base_branch=((refreshed.get("base") or {}).get("ref", "")),
-                    head_branch=((refreshed.get("head") or {}).get("ref", "")),
-                    state=refreshed.get("state", "open"),
-                    mergeable=mergeable,
-                    mergeable_state=mergeable_state,
-                    behind_by=None,
-                    files_changed=files_changed,
-                    repository_full_name=full_name,
-                    html_url=html_url,
-                )
-
-            if mergeable_state == "dirty":
-                self.log.warning(
-                    "Recreated PR %s#%s has merge conflicts; aborting wait.",
-                    full_name,
-                    new_number,
-                )
-                return True, None
-
-            # blocked / behind / unknown — keep polling
-            if check_attempt % 3 == 2:
-                self.log.debug(
-                    "Waiting for checks on recreated PR %s#%s "
-                    "(state=%s, %.0fs elapsed)",
-                    full_name,
-                    new_number,
-                    mergeable_state,
-                    (check_attempt + 1) * self._merge_recheck_interval,
-                )
-
-        except Exception as e:
-            self.log.debug(
-                "Error polling recreated PR %s#%s: %s",
-                full_name,
-                new_number,
-                e,
-            )
-        return False, None
-
-    async def _recreated_pr_files(
-        self, full_name: str, new_number: int
-    ) -> list[FileChange]:
-        """Gather the recreated PR's changed files, tolerating failure."""
-        files_changed: list[FileChange] = []
-        if not self._github_client:
-            return files_changed
+    async def _approve_and_arm_replacement(
+        self,
+        repo_owner: str,
+        repo_name: str,
+        replacement: PullRequestInfo,
+    ) -> bool:
+        """Approve then arm, reporting whether both succeeded."""
         try:
-            async for files_data in self._github_client.get_paginated(
-                f"/repos/{full_name}/pulls/{new_number}/files",
-                per_page=100,
-            ):
-                _collect_file_changes(files_data, files_changed)
-        except Exception as e:
-            self.log.debug(
-                "Failed to fetch files for recreated PR %s#%s: %s",
-                full_name,
-                new_number,
-                e,
+            # No propagation delay: we are arming auto-merge, not
+            # dispatching a merge, and GitHub re-checks branch
+            # protection when the required checks finish.
+            await self._ensure_pr_approved(
+                replacement, repo_owner, repo_name, propagation_delay=False
             )
-        return files_changed
+            approved = True
+        except GitHubPermissionError:
+            raise
+        except Exception as exc:
+            self.log.warning(
+                "Could not approve recreated PR %s/%s#%s: %s",
+                repo_owner,
+                repo_name,
+                replacement.number,
+                exc,
+            )
+            approved = False
+
+        armed = await self._enable_auto_merge_for_pr(replacement, repo_owner, repo_name)
+
+        if armed and not approved:
+            # Arming still helps --- the PR may merge if the repository
+            # needs no review --- but we cannot promise it, so the
+            # caller must not report it as pending.
+            self.log.warning(
+                "Auto-merge armed on %s/%s#%s but approval failed; "
+                "not reporting it as pending.",
+                repo_owner,
+                repo_name,
+                replacement.number,
+            )
+
+        return armed and approved

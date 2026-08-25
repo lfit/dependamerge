@@ -27,7 +27,7 @@ from ..bot_identity import is_dependabot
 from ..models import PullRequestInfo
 from ._base import _MergeManagerBase
 from ._single_pr_context import _MergeFlow
-from ._types import MergeStatus
+from ._types import MergeStatus, RecreateCause, RecreateResult
 
 
 class _SinglePrRecreateMixin(_MergeManagerBase):
@@ -35,24 +35,32 @@ class _SinglePrRecreateMixin(_MergeManagerBase):
 
     async def _maybe_recreate_dependabot_pr(
         self, flow: _MergeFlow, failure_reason: str
-    ) -> PullRequestInfo | None:
+    ) -> RecreateResult:
         """Ask dependabot to recreate the PR, when that can help."""
         pr_info = flow.pr_info
         if not (is_dependabot(pr_info.author) and not self.preview_mode):
-            return None
-        if not await self._should_request_recreate(flow, failure_reason):
-            return None
+            return RecreateResult.none()
+        cause = await self._should_request_recreate(flow, failure_reason)
+        if cause is None:
+            return RecreateResult.none()
 
         self._track_pr_state(pr_info, "recreating")
         try:
-            return await self._trigger_dependabot_recreate(pr_info)
+            return await self._trigger_dependabot_recreate(pr_info, cause)
         finally:
             self._track_pr_state(pr_info, None)
 
     async def _should_request_recreate(
         self, flow: _MergeFlow, failure_reason: str
-    ) -> bool:
-        """Whether the failure is one a fresh head SHA would clear."""
+    ) -> RecreateCause | None:
+        """Why a fresh head SHA would clear this failure, if it would.
+
+        Returning the *cause* rather than a bare boolean is what lets
+        ``_trigger_dependabot_recreate`` apply the signature gates to the
+        unsigned-commit case alone.  Applied to a stuck check they make
+        the recovery inert on any repository that does not require
+        signatures.
+        """
         pr_info = flow.pr_info
         reason_lower = failure_reason.lower()
         # Branch protection *and* repository rulesets can both block a
@@ -61,7 +69,7 @@ class _SinglePrRecreateMixin(_MergeManagerBase):
         # alike so the recreate path is not silently skipped on repos
         # that have migrated from classic protection to rulesets.
         if "branch protection" in reason_lower or "ruleset" in reason_lower:
-            return True
+            return RecreateCause.UNSIGNED
 
         try:
             (
@@ -76,9 +84,7 @@ class _SinglePrRecreateMixin(_MergeManagerBase):
                 pr_info.number,
                 exc,
             )
-            is_stuck = False
-            stuck_check = None
-            stuck_age = 0.0
+            return None
         if is_stuck:
             self._pr_status(
                 f"⏳ Stuck required check detected: {pr_info.html_url} "
@@ -86,8 +92,8 @@ class _SinglePrRecreateMixin(_MergeManagerBase):
                 f"{stuck_age:.0f}s, requesting recreate]",
                 level="info",
             )
-            return True
-        return False
+            return RecreateCause.STUCK_CHECK
+        return None
 
     async def _merge_recreated_pr(
         self, flow: _MergeFlow, recreated_pr: PullRequestInfo
@@ -109,20 +115,42 @@ class _SinglePrRecreateMixin(_MergeManagerBase):
                 f"✅ Merged (recreated): {recreated_pr.html_url}",
                 level="debug",
             )
-        else:
-            result.status = MergeStatus.FAILED
-            result.error = (
-                f"Dependabot recreated PR #{recreated_pr.number} but merge still failed"
-            )
-            self.log.error(
-                "Failed to merge recreated PR %s#%s",
-                recreated_pr.repository_full_name,
-                recreated_pr.number,
-            )
-            self._pr_status(
-                f"❌ Failed: {recreated_pr.html_url} [recreated PR merge failed]",
-                level="error",
-            )
+            return
+
+        # A ``False`` here is not yet evidence of failure.  Auto-merge
+        # was armed on this replacement before the checks wait began, so
+        # it can start between the wait's last poll and this dispatch ---
+        # in which case GitHub answers "merge already in progress",
+        # ``_dispatch_recreated_merge`` swallows it, and we would report
+        # a failure for a PR that is merging.  The outer
+        # ``_confirm_failure`` cannot catch that: it rechecks the
+        # *original* PR, which dependabot has already closed.
+        #
+        # So confirm against the **replacement** before reporting.
+        result.status = MergeStatus.FAILED
+        result.pr_info = recreated_pr
+        result.error = (
+            f"Dependabot recreated PR #{recreated_pr.number} but merge still failed"
+        )
+        await self._confirm_failure(recreated_pr, result)
+
+        if result.status is not MergeStatus.FAILED:
+            # Confirmation corrected it (merged, or closed unmerged).
+            return
+
+        # Genuinely unmerged.  Report BLOCKED rather than FAILED so the
+        # outer confirmation --- which rechecks the closed original ---
+        # cannot rewrite this to CLOSED, i.e. "nothing to follow up on".
+        result.status = MergeStatus.BLOCKED
+        self.log.error(
+            "Failed to merge recreated PR %s#%s",
+            recreated_pr.repository_full_name,
+            recreated_pr.number,
+        )
+        self._pr_status(
+            f"🛑 Blocked: {recreated_pr.html_url} [recreated PR merge failed]",
+            level="error",
+        )
 
     async def _dispatch_recreated_merge(
         self, new_owner: str, new_repo: str, recreated_pr: PullRequestInfo

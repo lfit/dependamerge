@@ -286,16 +286,42 @@ class _PrecommitCiMixin(_MergeManagerBase):
         PRs as unmergeable when the check simply hasn't finished yet.
         The whole poll is a wait on an external service, so the worker's
         concurrency slot is released for its duration (``parked()``).
+
+        The poll honours the run-wide ceiling ``--max-wait`` sets, in
+        the same way as the auto-merge and required-workflow waits: a
+        stale pre-commit status previously parked the worker for the
+        full ``merge_timeout`` even under ``--max-wait 0``, which
+        promises never to block.
         """
         # Resolved through the package at call time rather than bound at
         # import time, so that a test rebinding the constant on
         # ``dependamerge.merge_manager`` is observed here.
         from dependamerge import merge_manager as _mm
 
+        if self._no_wait:
+            self.log.debug(
+                "Not waiting for pre-commit.ci on %s#%s (--max-wait 0)",
+                pr_info.repository_full_name,
+                pr_info.number,
+            )
+            return False
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._merge_timeout
+        if self._run_deadline is not None:
+            deadline = min(deadline, self._run_deadline)
+
         max_polls = self._merge_poll_max_attempts
         async with _mm.parked():
             for attempt in range(max_polls):
-                await asyncio.sleep(self._merge_recheck_interval)
+                # Sleep no longer than the time remaining, matching
+                # ``_wait_for_auto_merge`` and the required-workflow
+                # wait.  Checking the deadline without clamping would
+                # still overshoot the ceiling by up to a full interval.
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(self._merge_recheck_interval, remaining))
                 outcome = await self._poll_precommit_status(
                     repo_owner, repo_name, pr_info
                 )
