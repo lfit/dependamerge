@@ -95,6 +95,7 @@ from ._pr_state import _PullRequestStateMixin
 from ._precommit_ci import _PrecommitCiMixin
 from ._prediction import _PredictionMixin
 from ._recreated_pr import _RecreatedPullRequestMixin
+from ._recreated_pr_poll import _RecreatedPollMixin
 from ._required_workflows import _RequiredWorkflowWaitMixin
 from ._requirements import _MergeRequirementsMixin
 from ._retry import _MergeRetryMixin
@@ -106,6 +107,9 @@ from ._ticker import _StatusTickerMixin
 from ._types import (
     MergeResult,
     MergeStatus,
+    RecreateCause,
+    RecreateOutcome,
+    RecreateResult,
     _merge_already_in_progress,  # noqa: F401  (see __all__ note below)
     _merged_from_payload,  # noqa: F401  (see __all__ note below)
 )
@@ -130,6 +134,7 @@ class AsyncMergeManager(
     _StuckCheckMixin,
     _DependabotRecreateMixin,
     _RecreatedPullRequestMixin,
+    _RecreatedPollMixin,
     _PullRequestStateMixin,
     _MergeabilityRefreshMixin,
     _MergeRetryMixin,
@@ -181,6 +186,9 @@ __all__ = [
     "PRECOMMIT_CI_STUCK_PENDING_SECONDS",
     "Path",
     "PullRequestInfo",
+    "RecreateCause",
+    "RecreateOutcome",
+    "RecreateResult",
     "PullRequestStatePoller",
     "STUCK_CHECK_THRESHOLD_SECONDS",
     "UNDISPATCHED_CONFIRM_DELAY_SECONDS",

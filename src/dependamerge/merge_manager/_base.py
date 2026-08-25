@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from ..models import ComparisonResult, PullRequestInfo
     from ..pr_poller import PullRequestStatePoller
     from ..progress_tracker import MergeProgressTracker
-    from ._types import MergeResult, MergeStatus
+    from ._types import MergeResult, MergeStatus, RecreateCause, RecreateResult
 
 
 class _MergeManagerBase:
@@ -297,6 +297,24 @@ class _MergeManagerBase:
     ) -> None:
         raise NotImplementedError
 
+    def _recreated_pr_stub(
+        self,
+        repo_owner: str,
+        repo_name: str,
+        new_number: int,
+        pr_data: dict[str, Any],
+    ) -> PullRequestInfo:
+        raise NotImplementedError
+
+    async def _poll_recreated_pr(
+        self,
+        full_name: str,
+        new_number: int,
+        html_url: str,
+        check_attempt: int,
+    ) -> RecreateResult | None:
+        raise NotImplementedError
+
     async def _report_merge_failure(
         self,
         pr_info: PullRequestInfo,
@@ -349,8 +367,8 @@ class _MergeManagerBase:
         raise NotImplementedError
 
     async def _trigger_dependabot_recreate(
-        self, pr_info: PullRequestInfo
-    ) -> PullRequestInfo | None:
+        self, pr_info: PullRequestInfo, cause: RecreateCause
+    ) -> RecreateResult:
         raise NotImplementedError
 
     async def _trigger_stale_precommit_ci(self, pr_info: PullRequestInfo) -> bool:
@@ -370,8 +388,13 @@ class _MergeManagerBase:
         raise NotImplementedError
 
     async def _wait_for_recreated_pr_checks(
-        self, repo_owner: str, repo_name: str, new_number: int, pr_data: dict[str, Any]
-    ) -> PullRequestInfo | None:
+        self,
+        repo_owner: str,
+        repo_name: str,
+        new_number: int,
+        pr_data: dict[str, Any],
+        deadline: float | None = None,
+    ) -> RecreateResult:
         raise NotImplementedError
 
     async def _wait_for_required_workflows_and_retry(

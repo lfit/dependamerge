@@ -28,7 +28,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from dependamerge.github_async import GitHubAsync
-from dependamerge.merge_manager import MergeStatus
+from dependamerge.merge_manager import (
+    MergeStatus,
+    RecreateCause,
+    RecreateOutcome,
+    RecreateResult,
+)
 from dependamerge.models import PullRequestInfo
 
 
@@ -376,24 +381,24 @@ class TestTriggerDependabotRecreateConditions:
     async def test_non_dependabot_author_returns_none(self):
         mgr, _client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info(author="some-human")
-        result = await mgr._trigger_dependabot_recreate(pr)
-        assert result is None
+        result = await mgr._trigger_dependabot_recreate(pr, RecreateCause.UNSIGNED)
+        assert result.outcome is RecreateOutcome.NONE
 
     @pytest.mark.asyncio
     async def test_no_github_client_returns_none(self):
         mgr, _client = _make_manager()  # typed mock client pattern (see conftest.py)
         mgr._github_client = None  # intentionally set to None for this test
         pr = _make_pr_info()
-        result = await mgr._trigger_dependabot_recreate(pr)
-        assert result is None
+        result = await mgr._trigger_dependabot_recreate(pr, RecreateCause.UNSIGNED)
+        assert result.outcome is RecreateOutcome.NONE
 
     @pytest.mark.asyncio
     async def test_no_signature_requirement_returns_none(self):
         mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
         client.requires_commit_signatures = AsyncMock(return_value=False)
-        result = await mgr._trigger_dependabot_recreate(pr)
-        assert result is None
+        result = await mgr._trigger_dependabot_recreate(pr, RecreateCause.UNSIGNED)
+        assert result.outcome is RecreateOutcome.NONE
         client.requires_commit_signatures.assert_called_once_with(
             "lfreleng-actions", "gerrit-clone-action", "main"
         )
@@ -404,8 +409,8 @@ class TestTriggerDependabotRecreateConditions:
         pr = _make_pr_info()
         client.requires_commit_signatures = AsyncMock(return_value=True)
         client.check_pr_commit_signatures = AsyncMock(return_value=(True, []))
-        result = await mgr._trigger_dependabot_recreate(pr)
-        assert result is None
+        result = await mgr._trigger_dependabot_recreate(pr, RecreateCause.UNSIGNED)
+        assert result.outcome is RecreateOutcome.NONE
 
     @pytest.mark.asyncio
     async def test_duplicate_recreate_comment_returns_none(self):
@@ -421,8 +426,8 @@ class TestTriggerDependabotRecreateConditions:
                 {"body": "@dependabot recreate", "user": {"login": "someuser"}},
             ]
         )
-        result = await mgr._trigger_dependabot_recreate(pr)
-        assert result is None
+        result = await mgr._trigger_dependabot_recreate(pr, RecreateCause.UNSIGNED)
+        assert result.outcome is RecreateOutcome.NONE
 
     @pytest.mark.asyncio
     async def test_signature_check_error_returns_none(self):
@@ -431,8 +436,8 @@ class TestTriggerDependabotRecreateConditions:
         client.requires_commit_signatures = AsyncMock(
             side_effect=Exception("API error")
         )
-        result = await mgr._trigger_dependabot_recreate(pr)
-        assert result is None
+        result = await mgr._trigger_dependabot_recreate(pr, RecreateCause.UNSIGNED)
+        assert result.outcome is RecreateOutcome.NONE
 
 
 # ---------------------------------------------------------------------------
@@ -502,12 +507,13 @@ class TestTriggerDependabotRecreateHappyPath:
         client.get_paginated = lambda *a, **kw: _async_gen([])
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
-            result = await mgr._trigger_dependabot_recreate(pr)
+            result = await mgr._trigger_dependabot_recreate(pr, RecreateCause.UNSIGNED)
 
-        assert result is not None
-        assert result.number == 107
-        assert result.mergeable is True
-        assert result.mergeable_state == "clean"
+        assert result.outcome is RecreateOutcome.READY
+        assert result.pr_info is not None
+        assert result.pr_info.number == 107
+        assert result.pr_info.mergeable is True
+        assert result.pr_info.mergeable_state == "clean"
         client.post_issue_comment.assert_called_once_with(
             "lfreleng-actions",
             "gerrit-clone-action",
@@ -527,8 +533,8 @@ class TestTriggerDependabotRecreateHappyPath:
         client.get = AsyncMock(return_value=[])  # no duplicate comments
         client.post_issue_comment = AsyncMock(side_effect=Exception("403 Forbidden"))
 
-        result = await mgr._trigger_dependabot_recreate(pr)
-        assert result is None
+        result = await mgr._trigger_dependabot_recreate(pr, RecreateCause.UNSIGNED)
+        assert result.outcome is RecreateOutcome.NONE
 
 
 # ---------------------------------------------------------------------------
@@ -557,9 +563,9 @@ class TestTriggerDependabotRecreateTimeout:
         )
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
-            result = await mgr._trigger_dependabot_recreate(pr)
+            result = await mgr._trigger_dependabot_recreate(pr, RecreateCause.UNSIGNED)
 
-        assert result is None
+        assert result.outcome is RecreateOutcome.NONE
 
     @pytest.mark.asyncio
     async def test_timeout_waiting_for_new_pr_checks(self):
@@ -604,9 +610,9 @@ class TestTriggerDependabotRecreateTimeout:
         client.get = AsyncMock(side_effect=call_sequence)
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
-            result = await mgr._trigger_dependabot_recreate(pr)
+            result = await mgr._trigger_dependabot_recreate(pr, RecreateCause.UNSIGNED)
 
-        assert result is None
+        assert result.outcome is RecreateOutcome.NONE
 
 
 # ---------------------------------------------------------------------------
@@ -646,9 +652,10 @@ class TestWaitForRecreatedPrChecks:
                 "owner", "repo", 107, pr_data
             )
 
-        assert result is not None
-        assert result.number == 107
-        assert result.mergeable_state == "clean"
+        assert result.outcome is RecreateOutcome.READY
+        assert result.pr_info is not None
+        assert result.pr_info.number == 107
+        assert result.pr_info.mergeable_state == "clean"
 
     @pytest.mark.asyncio
     async def test_returns_none_on_dirty(self):
@@ -669,14 +676,14 @@ class TestWaitForRecreatedPrChecks:
                 "owner", "repo", 107, pr_data
             )
 
-        assert result is None
+        assert result.outcome is RecreateOutcome.ABANDONED
 
     @pytest.mark.asyncio
     async def test_returns_none_without_client(self):
         mgr, _client = _make_manager()  # typed mock client pattern (see conftest.py)
         mgr._github_client = None  # intentionally set to None for this test
         result = await mgr._wait_for_recreated_pr_checks("owner", "repo", 107, {})
-        assert result is None
+        assert result.outcome is RecreateOutcome.NONE
 
     @pytest.mark.asyncio
     async def test_returns_pr_info_on_unstable_with_mergeable_true(self):
@@ -707,8 +714,9 @@ class TestWaitForRecreatedPrChecks:
                 "owner", "repo", 107, pr_data
             )
 
-        assert result is not None
-        assert result.number == 107
+        assert result.outcome is RecreateOutcome.READY
+        assert result.pr_info is not None
+        assert result.pr_info.number == 107
 
 
 # ---------------------------------------------------------------------------
@@ -768,7 +776,7 @@ class TestMergeSinglePrRecreateIntegration:
                 mgr,
                 "_trigger_dependabot_recreate",
                 new_callable=AsyncMock,
-                return_value=recreated_pr,
+                return_value=RecreateResult(RecreateOutcome.READY, recreated_pr),
             ) as mock_recreate,
             patch.object(
                 mgr,
@@ -782,7 +790,7 @@ class TestMergeSinglePrRecreateIntegration:
             result = await mgr._merge_single_pr(pr)
 
         # The recreate should have been attempted
-        mock_recreate.assert_called_once_with(pr)
+        mock_recreate.assert_called_once_with(pr, RecreateCause.UNSIGNED)
         assert result.status == MergeStatus.MERGED
         assert result.pr_info.number == 107
 
@@ -901,7 +909,7 @@ class TestMergeSinglePrRecreateIntegration:
                 mgr,
                 "_trigger_dependabot_recreate",
                 new_callable=AsyncMock,
-                return_value=None,
+                return_value=RecreateResult.none(),
             ),
             patch.object(
                 mgr,
@@ -959,7 +967,7 @@ class TestMergeSinglePrRecreateIntegration:
                 mgr,
                 "_trigger_dependabot_recreate",
                 new_callable=AsyncMock,
-                return_value=recreated_pr,
+                return_value=RecreateResult(RecreateOutcome.READY, recreated_pr),
             ),
             patch.object(
                 mgr,
@@ -969,7 +977,13 @@ class TestMergeSinglePrRecreateIntegration:
         ):
             result = await mgr._merge_single_pr(pr)
 
-        assert result.status == MergeStatus.FAILED
+        # BLOCKED, not FAILED: after a recreate the *original* PR is
+        # closed unmerged, so a FAILED result would be rewritten to
+        # CLOSED by ``_confirm_failure`` --- "nothing to follow up on"
+        # --- which is the opposite of what an unmerged replacement
+        # needs.  The result also points at the replacement now.
+        assert result.status == MergeStatus.BLOCKED
+        assert result.pr_info.number == 107
         assert "recreated" in (result.error or "").lower()
 
 
@@ -1015,9 +1029,9 @@ class TestNewPrDiscoveryEdgeCases:
         client.get = AsyncMock(side_effect=call_sequence)
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
-            result = await mgr._trigger_dependabot_recreate(pr)
+            result = await mgr._trigger_dependabot_recreate(pr, RecreateCause.UNSIGNED)
 
-        assert result is None
+        assert result.outcome is RecreateOutcome.NONE
 
     @pytest.mark.asyncio
     async def test_ignores_same_pr_number(self):
@@ -1054,9 +1068,9 @@ class TestNewPrDiscoveryEdgeCases:
         client.get = AsyncMock(side_effect=call_sequence)
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
-            result = await mgr._trigger_dependabot_recreate(pr)
+            result = await mgr._trigger_dependabot_recreate(pr, RecreateCause.UNSIGNED)
 
-        assert result is None
+        assert result.outcome is RecreateOutcome.NONE
 
 
 # ---------------------------------------------------------------------------
