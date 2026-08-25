@@ -21,6 +21,12 @@ wholesale, so neither exercised the real workspace preparation.
    the two checks that do answer that question, a same-repository PR
    opened inside a forked repository was classified as cross-repository
    and routed into defect 1.
+
+**#437** --- the post-``update_branch`` poll treated ``"unknown"`` and
+``""`` as terminal, though every other refresh in the codebase treats
+them, with ``None``, as "GitHub is still computing". This poll runs
+immediately after ``update_branch``, which is exactly when a recompute
+is most likely.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -35,6 +42,7 @@ from dependamerge.git_ops import GitError
 from dependamerge.models import PullRequestInfo
 from dependamerge.rebase.local_plan import _build_rebase_plan, _RebasePlan
 from dependamerge.rebase.local_workspace import _unshallow_remotes
+from dependamerge.rebase.polling import _poll_should_continue
 
 LOG = logging.getLogger("test")
 
@@ -363,4 +371,54 @@ class TestForkMeansCrossRepository:
                 log=LOG,
             )
             is None
+        )
+
+
+class TestTheRebasePollWaitsOutAComputingState:
+    """``null``, ``""`` and ``"unknown"`` all mean "still computing"."""
+
+    def _ctx(self) -> Any:
+        ctx = MagicMock()
+        ctx.merge_poll_max_attempts = 5
+        ctx.log = LOG
+        return ctx
+
+    @pytest.mark.parametrize("state", [None, "", "unknown"])
+    def test_a_computing_state_keeps_polling(self, state) -> None:
+        assert (
+            _poll_should_continue(
+                ctx=self._ctx(),
+                pr_info=_pr(),
+                attempt=0,
+                mergeable_state=state,
+                auto_merge_ok=False,
+            )
+            is True
+        )
+
+    @pytest.mark.parametrize("state", [None, "", "unknown"])
+    def test_a_computing_state_still_stops_on_the_last_attempt(self, state) -> None:
+        """The budget still bounds the wait; only the classification changed."""
+        assert (
+            _poll_should_continue(
+                ctx=self._ctx(),
+                pr_info=_pr(),
+                attempt=4,
+                mergeable_state=state,
+                auto_merge_ok=False,
+            )
+            is False
+        )
+
+    @pytest.mark.parametrize("state", ["clean", "dirty", "draft", "unstable"])
+    def test_a_concrete_state_still_ends_the_poll(self, state) -> None:
+        assert (
+            _poll_should_continue(
+                ctx=self._ctx(),
+                pr_info=_pr(),
+                attempt=0,
+                mergeable_state=state,
+                auto_merge_ok=False,
+            )
+            is False
         )

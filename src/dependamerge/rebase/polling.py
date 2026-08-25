@@ -108,13 +108,24 @@ def _poll_should_continue(
         )
         return True
 
-    if mergeable_state is None:
+    if mergeable_state in (None, "", "unknown"):
         # GitHub is still computing mergeability (typically right
         # after update_branch).  Treat as transient and keep
         # polling until the deadline or a concrete state arrives —
         # breaking here would otherwise exit prematurely and (if
         # auto-merge enablement failed) fall through to a manual
         # merge attempt against the still-resolving PR state.
+        #
+        # All three values mean the same thing: GitHub returns null,
+        # "" and "unknown" interchangeably while recomputing.  This
+        # poll runs immediately after ``update_branch``, which is
+        # precisely when a recompute is most likely, so answering
+        # "unknown" rather than null is close to a coin flip --- and
+        # testing only for null caught just some of the cases this
+        # branch was written for.  The same triple is used by
+        # ``_refresh_pr_mergeability``, ``_required_workflows`` and
+        # ``_check_wait``; this is a fourth site agreeing with them
+        # rather than holding a fourth opinion.
         if last_attempt:
             return False
         ctx.log.debug(
@@ -125,8 +136,8 @@ def _poll_should_continue(
         )
         return True
 
-    # Any other concrete state ("dirty", "draft", "unstable",
-    # "unknown", ...) ends the poll loop immediately.
+    # Any other concrete state ("dirty", "draft", "unstable", ...)
+    # ends the poll loop immediately.
     return False
 
 
