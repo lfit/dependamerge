@@ -182,7 +182,7 @@ class _PredictionMixin(_MergeManagerBase):
             self.log.debug(
                 f"PR {owner}/{repo}#{pr_number} block reason: {block_reason}"
             )
-            return block_reason
+            return block_reason or ""
         except Exception as analyze_err:
             self.log.debug(
                 f"Could not analyze block reason for {owner}/{repo}#{pr_number}: {analyze_err}"

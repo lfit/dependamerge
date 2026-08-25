@@ -80,6 +80,35 @@ class TestForceLevelNone:
     """Test default force level (none) - respects all protections."""
 
     @pytest.mark.asyncio
+    async def test_blocks_when_block_reason_probe_returns_none(self, mocker):
+        """A missing probe result must not become an optimistic verdict."""
+        mock_github = mocker.AsyncMock()
+        mock_github.get.side_effect = lambda url: (
+            {
+                "mergeable": False,
+                "mergeable_state": "blocked",
+                "head": {"sha": "abc123"},
+            }
+            if "/pulls/" in url
+            else {}
+        )
+        mock_github.analyze_block_reason.return_value = None
+
+        async with AsyncMergeManager(
+            token="fake_token",
+            force_level="none",
+            preview_mode=True,
+        ) as manager:
+            manager._github_client = mock_github
+
+            can_merge, reason = await manager._predict_merge_outcome(
+                "test-org", "test-repo", 123, "merge"
+            )
+
+        assert can_merge is False
+        assert reason == "branch protection rules prevent merge (blocked)"
+
+    @pytest.mark.asyncio
     async def test_blocks_on_code_owner_requirement(self, sample_pr_info, mocker):
         """Test that code owner requirements block merge with force=none."""
         mock_github = mocker.AsyncMock()
