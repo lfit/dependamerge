@@ -28,6 +28,7 @@ from ..git_ops import (
     push_force_with_lease,
     rebase,
     rebase_abort,
+    run_git,
 )
 from .local_plan import _RebasePlan
 
@@ -254,10 +255,36 @@ def _unshallow_remotes(
     token: str,
     log: logging.Logger,
 ) -> bool:
-    """Deepen the clone's remotes to full history.
+    """Deepen the clone to full history.
 
-    Returns False when the fetch failed, in which case the caller
-    must abandon the rebase.
+    Git's shallow state is **repository-wide, not per-remote**, but
+    ``--unshallow`` only completes the history reachable from the remote
+    being fetched.  Both halves of that matter here:
+
+    * Once the repository *is* complete, a second ``--unshallow`` is a
+      fatal error --- ``fatal: --unshallow on a complete repository does
+      not make sense``, exit 128.  The resulting :class:`GitError` was
+      caught below, logged at debug and reported as ``False``, so for
+      every fork pull request the workspace preparation silently
+      declared the local rebase impossible.
+
+    * But ``origin --unshallow`` does not necessarily complete the
+      repository.  ``upstream/<base>`` is fetched at ``depth=50``
+      (see :func:`_fetch_base_branch`), and when the base has advanced
+      further than that since the fork point, origin cannot supply the
+      missing ancestors.  The repository then stays shallow, a plain
+      ``upstream`` fetch sees an up-to-date ref and deepens nothing, and
+      the rebase still has no merge base.
+
+    So unshallow origin, then **ask git** whether the repository is
+    still shallow and deepen upstream accordingly.  Verified against
+    genuinely diverged remotes: after ``origin --unshallow`` the
+    repository remains shallow, ``upstream --unshallow`` then succeeds,
+    and a merge base exists --- whereas a plain fetch leaves
+    ``merge-base`` empty.
+
+    Returns False when a fetch failed, in which case the caller must
+    abandon the rebase.
     """
     try:
         fetch(
@@ -268,13 +295,24 @@ def _unshallow_remotes(
             token=token,
         )
         if plan.is_fork:
-            fetch(
-                "upstream",
-                cwd=workspace,
-                unshallow=True,
-                logger=log.debug,
-                token=token,
-            )
+            if _is_shallow(workspace=workspace, log=log):
+                # Origin could not supply upstream's missing ancestors.
+                fetch(
+                    "upstream",
+                    cwd=workspace,
+                    unshallow=True,
+                    logger=log.debug,
+                    token=token,
+                )
+            else:
+                # Already complete --- ``--unshallow`` here would be
+                # fatal, so fetch normally to pick up any new refs.
+                fetch(
+                    "upstream",
+                    cwd=workspace,
+                    logger=log.debug,
+                    token=token,
+                )
     except GitError as exc:
         log.debug(
             "Local rebase: unshallow failed for %s: %s",
@@ -283,3 +321,25 @@ def _unshallow_remotes(
         )
         return False
     return True
+
+
+def _is_shallow(*, workspace: Path, log: logging.Logger) -> bool:
+    """Report whether the working repository still has a shallow boundary.
+
+    Asked of git rather than inferred, because whether a single
+    ``--unshallow`` completed the repository depends on how far the two
+    remotes have diverged.  A failure to answer is treated as "not
+    shallow", which routes to the plain fetch: that can leave a rebase
+    without a merge base, but it cannot abort the whole preparation the
+    way an unwarranted ``--unshallow`` would.
+    """
+    try:
+        result = run_git(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=workspace,
+            logger=log.debug,
+        )
+    except GitError as exc:
+        log.debug("Local rebase: could not read shallow state: %s", exc)
+        return False
+    return result.stdout.strip() == "true"

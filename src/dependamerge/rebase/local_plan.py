@@ -93,18 +93,32 @@ def _build_rebase_plan(
     # or, worse, fetching stale state and pushing back to the
     # wrong remote.
     #
-    # Preference order, all defensive:
-    #   1. The explicit ``pr_info.is_fork`` flag from the API.
-    #   2. Direct comparison of head/base full_names.
-    #   3. Direct comparison of head/base clone URLs.
-    if pr_info.is_fork is not None:
-        is_fork = bool(pr_info.is_fork)
-    elif head_full and base_full and head_full != base_full:
-        is_fork = True
-    elif head_clone_url and base_clone_url and head_clone_url != base_clone_url:
-        is_fork = True
+    # What this needs to know is whether head and base are
+    # *different repositories*.  ``pr_info.is_fork`` does not answer
+    # that: it is populated from the head repository's own fork flag
+    # (``headRepository.isFork`` / ``head.repo.fork``), which says
+    # whether that repository is itself a fork of something --- not
+    # whether this pull request crosses repositories.  A
+    # same-repository PR opened inside a forked repository sets it
+    # true, and would then be given a redundant ``upstream`` remote.
+    #
+    # So consult identities, making the first available pair
+    # **decisive in both directions**.  Answering only "different
+    # means fork" leaves two gaps: equal full names with differently
+    # spelled clone URLs would be called a fork by the URL test, and
+    # equal clone URLs with no full names would fall through to the
+    # flag --- both misclassifying a same-repository PR.
+    #
+    # One of these pairs is always available: the function fails closed
+    # above unless the head has a name or a URL, ``base_full`` falls
+    # back to ``owner/repo``, and both clone URLs are synthesised from
+    # the names just above.  ``pr_info.is_fork`` is therefore never
+    # consulted, which is the point --- it answers a different
+    # question, and this no longer depends on it at all.
+    if head_full and base_full:
+        is_fork = head_full != base_full
     else:
-        is_fork = False
+        is_fork = head_clone_url != base_clone_url
 
     # Now safe to collapse ``head_full`` for the clone-URL
     # synthesis fallback. ``is_fork`` has already been computed
