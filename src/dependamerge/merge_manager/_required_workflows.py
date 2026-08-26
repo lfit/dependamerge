@@ -126,9 +126,17 @@ class _RequiredWorkflowWaitMixin(_MergeManagerBase):
                 if closed:
                     return merged_during
                 try:
-                    merged = await self._github_client.merge_pull_request(
-                        owner, repo, pr_info.number, merge_method
-                    )
+                    # Under the per-repo dispatch lock, like every other
+                    # merge call.  Held around the dispatch alone and
+                    # *not* across the wait above: holding it through a
+                    # multi-minute wait would serialise the whole
+                    # repository batch behind this one PR, which is the
+                    # head-of-line blocking the lock design avoids.
+                    dispatch_lock = await self._get_merge_dispatch_lock(owner, repo)
+                    async with dispatch_lock:
+                        merged = await self._github_client.merge_pull_request(
+                            owner, repo, pr_info.number, merge_method
+                        )
                 except GitHubPermissionError:
                     raise
                 except Exception as exc:

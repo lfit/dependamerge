@@ -83,8 +83,13 @@ class _AutoMergeWaitMixin(_MergeManagerBase):
         continue_states: tuple[str, ...],
         stop_on_clean: bool,
         measures_checks: bool,
-    ) -> None:
+    ) -> bool:
         """Sleep past the latency this repository has already demonstrated.
+
+        Returns whether it actually slept, so the caller can restore the
+        short first-poll cadence: the head start is sized to land as the
+        checks finish, and following it with the full steady-state
+        interval would add that interval to every wait it applies to.
 
         Applies only to waits that measure checks.  The figure describes
         check latency, so using it to skip ahead in a *rebase* wait would
@@ -97,21 +102,32 @@ class _AutoMergeWaitMixin(_MergeManagerBase):
         ``clean``; sleeping first would burn up to half the shared
         deadline before the loop noticed it should return immediately.
 
+        Called **after** the first live poll rather than before it, so
+        ``pr_info`` carries state the loop has just read.  Sizing it from
+        the run's opening snapshot meant that in a striped run --- where
+        a repository's PRs are deliberately serialised --- a sibling
+        could sleep up to half its remaining budget having *already* gone
+        green, because its snapshot still said ``blocked`` from minutes
+        earlier.  The head start exists to save time on slow
+        repositories, so spending it on a resolved PR is the exact
+        opposite of the intent, and most likely on precisely the
+        repositories it was added to help.
+
         Extracted from :meth:`_wait_for_auto_merge` to keep that method
         within the complexity budget; see :meth:`_wait_head_start` for
         the sizing decision.
         """
         if not measures_checks:
-            return
+            return False
         if stop_on_clean and pr_info.mergeable_state == "clean":
-            return
+            return False
         if continue_states and pr_info.mergeable_state not in continue_states:
             # Already outside the states this call waits through, so the
             # loop is about to exit; there is nothing to skip ahead to.
-            return
+            return False
         head_start = self._wait_head_start(pr_info.repository_full_name, remaining)
         if head_start <= 0:
-            return
+            return False
         self.log.debug(
             "Head start of %.0fs for %s: this repository's checks have "
             "taken that long already",
@@ -119,6 +135,7 @@ class _AutoMergeWaitMixin(_MergeManagerBase):
             pr_key,
         )
         await asyncio.sleep(head_start)
+        return True
 
     async def _wait_for_auto_merge(
         self,
@@ -195,6 +212,9 @@ class _AutoMergeWaitMixin(_MergeManagerBase):
         closed_during_wait = False
         merged_during_wait = False
         first_poll = True
+        # Set per iteration: whether that poll supplied a usable live
+        # ``mergeable_state``.  Guards the head start below.
+        live_state_seen = False
         # Bound before the try so the ``finally`` can always read it,
         # even if the parked block is never entered.
         wait_started = loop.time()
@@ -208,16 +228,11 @@ class _AutoMergeWaitMixin(_MergeManagerBase):
             # never starve runnable PRs (see ``slot_lease.py``).  The
             # polling GETs are paced by the HTTP client's own limits.
             async with _mm.parked():
-                # Skip ahead when this repository has already shown how
-                # long its checks take (see ``_wait_head_start``).
-                await self._apply_wait_head_start(
-                    pr_info,
-                    pr_key,
-                    max(0.0, deadline - loop.time()),
-                    continue_states,
-                    stop_on_clean,
-                    measures_checks,
-                )
+                # The head start is applied after the first live poll,
+                # not here: see ``_apply_wait_head_start``.  Sizing it
+                # from the fetch-time snapshot could sleep through a PR
+                # that had already gone green.
+                head_start_pending = measures_checks
                 while loop.time() < deadline:
                     if stop_on_clean and pr_info.mergeable_state == "clean":
                         break
@@ -254,6 +269,20 @@ class _AutoMergeWaitMixin(_MergeManagerBase):
                         )
                         continue
                     if isinstance(refreshed_wait, dict):
+                        # ``_apply_wait_refresh`` deliberately keeps the
+                        # previous value when GitHub answers ``null`` /
+                        # ``""`` / ``"unknown"`` while recomputing, and
+                        # ``_fetch_pr_state`` can return ``None`` without
+                        # raising when a per-PR fallback fails.  Either
+                        # way ``pr_info`` still holds the *snapshot*
+                        # value, so the head start must not be sized
+                        # from it --- that is the stale read this change
+                        # exists to remove.
+                        live_state_seen = refreshed_wait.get("mergeable_state") not in (
+                            None,
+                            "",
+                            "unknown",
+                        )
                         if self._apply_wait_refresh(pr_info, refreshed_wait):
                             closed_during_wait = True
                             merged_during_wait = bool(
@@ -271,6 +300,31 @@ class _AutoMergeWaitMixin(_MergeManagerBase):
                     # state, so exit and let the caller decide.
                     if pr_info.mergeable_state not in continue_states:
                         break
+
+                    # Reaching here means the PR has been read live and
+                    # genuinely still needs waiting through: it is not
+                    # clean, not closed, and still in a continue state.
+                    # Only now is a head start worth taking.  Pending
+                    # rather than tied to the first iteration, so a
+                    # transient fetch failure --- or a reading GitHub
+                    # could not supply --- defers it instead of
+                    # discarding it or spending it on a stale value.
+                    if head_start_pending and live_state_seen:
+                        head_start_pending = False
+                        if await self._apply_wait_head_start(
+                            pr_info,
+                            pr_key,
+                            max(0.0, deadline - loop.time()),
+                            continue_states,
+                            stop_on_clean,
+                            measures_checks,
+                        ):
+                            # The head start is sized to land as the
+                            # checks finish, so read promptly afterwards.
+                            # Without this the next sleep would be the
+                            # full steady-state interval, adding it to
+                            # every wait the optimisation applies to.
+                            first_poll = True
                 # Stop the clock inside the park: leaving it re-acquires
                 # this worker's slot, and that queue is the scheduler's
                 # time, not the repository's.  Only a wait that polled

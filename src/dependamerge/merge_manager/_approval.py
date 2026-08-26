@@ -126,7 +126,7 @@ class _ApprovalMixin(_MergeManagerBase):
             approved = await self._ensure_pr_approved(pr_info, owner, repo)
             if not approved:
                 return False
-            return await self._merge_pr_with_retry(pr_info, owner, repo)
+            return await self._retry_merge_under_dispatch_lock(pr_info, owner, repo)
 
         # Fall back to the heuristic block-reason classifier only when the
         # cached state actually shows the PR as ``blocked``.  A missing
@@ -167,7 +167,29 @@ class _ApprovalMixin(_MergeManagerBase):
         approved = await self._ensure_pr_approved(pr_info, owner, repo)
         if not approved:
             return False
-        return await self._merge_pr_with_retry(pr_info, owner, repo)
+        return await self._retry_merge_under_dispatch_lock(pr_info, owner, repo)
+
+    async def _retry_merge_under_dispatch_lock(
+        self, pr_info: PullRequestInfo, owner: str, repo: str
+    ) -> bool:
+        """Re-dispatch a merge with the per-repo lock held.
+
+        This recovery runs *after* the direct merge was rejected, by
+        which point the caller has released the dispatch lock.  Retrying
+        without re-acquiring it lets a same-repository worker slip a
+        merge in between the failed first attempt and this retry, so two
+        merge calls hit the repository back to back --- exactly the race
+        the lock exists to prevent, and which every other dispatch site
+        already avoids.
+
+        The consequence is a merge raced against freshly-propagated
+        branch protection, which surfaces as an intermittent and
+        hard-to-attribute failure rather than as anything pointing at
+        the lock.
+        """
+        dispatch_lock = await self._get_merge_dispatch_lock(owner, repo)
+        async with dispatch_lock:
+            return await self._merge_pr_with_retry(pr_info, owner, repo)
 
     @staticmethod
     def _merge_error_indicates_missing_approval(error_text: str) -> bool:
