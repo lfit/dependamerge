@@ -1,6 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
+# The attribute declarations below are exactly that --- declarations.
+# ``_MergeManagerBase`` is never instantiated and its ``__init__`` is
+# never written; ``_LifecycleMixin.__init__`` establishes every one of
+# these on the assembled ``AsyncMergeManager``.  Initialising them here
+# as well would create a second, competing definition of the manager's
+# state, so the rule is suppressed rather than satisfied.
+#
+# The same suppression appears on the other declaration-only bases and
+# mixin modules in this package --- ``github_async/_base.py``,
+# ``github_service/_base.py`` and their siblings --- for the same
+# reason, so this follows the established convention rather than
+# introducing an exception to it.
+# pyright: reportUninitializedInstanceVariable=false
+
 """
 The declaration point shared by the AsyncMergeManager mixins.
 """

@@ -18,6 +18,7 @@ covered here:
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 from unittest.mock import AsyncMock
 
 import httpx
@@ -603,7 +604,7 @@ class TestApproveRetry:
 
 class TestHasOwnApproval:
     @staticmethod
-    def _pages(*pages: list[dict]) -> object:
+    def _pages(*pages: list[dict[str, Any]]) -> object:
         async def _gen(*args: object, **kwargs: object):
             for page in pages:
                 yield page

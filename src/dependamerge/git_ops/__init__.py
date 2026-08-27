@@ -92,6 +92,7 @@ __all__ = [
     "clone",
     "add_remote",
     "fetch",
+    "fetch_branch",
     "checkout",
     "rebase",
     "rebase_continue",

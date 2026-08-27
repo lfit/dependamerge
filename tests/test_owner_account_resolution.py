@@ -25,6 +25,7 @@ network access or token is required.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
@@ -57,7 +58,7 @@ def _not_an_org_error(login: str) -> GraphQLError:
     )
 
 
-def _repos_connection(nodes: list[dict]) -> dict:
+def _repos_connection(nodes: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "totalCount": len(nodes),
         "pageInfo": {"hasNextPage": False, "endCursor": None},
@@ -65,7 +66,7 @@ def _repos_connection(nodes: list[dict]) -> dict:
     }
 
 
-def _make_user_account_graphql(login: str, repo_nodes: list[dict]):
+def _make_user_account_graphql(login: str, repo_nodes: list[dict[str, Any]]):
     """Return an async ``graphql`` stub that behaves like a user account.
 
     The ``organization(login:)`` probe raises ``NOT_FOUND`` (as GitHub
@@ -73,7 +74,7 @@ def _make_user_account_graphql(login: str, repo_nodes: list[dict]):
     supplied repositories.  Anything else returns an empty payload.
     """
 
-    async def _graphql(query: str, variables: dict | None = None):
+    async def _graphql(query: str, variables: dict[str, Any] | None = None):
         if "organization(login:" in query:
             raise _not_an_org_error(login)
         if "user(login:" in query:

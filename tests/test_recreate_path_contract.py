@@ -177,7 +177,9 @@ class TestAStuckCheckCanActuallyTriggerARecreate:
         await mgr._trigger_dependabot_recreate(_pr(), RecreateCause.STUCK_CHECK)
 
         client.post_issue_comment.assert_awaited_once()
-        assert "@dependabot recreate" in client.post_issue_comment.await_args.args[3]
+        await_args = client.post_issue_comment.await_args
+        assert await_args is not None
+        assert "@dependabot recreate" in await_args.args[3]
 
     @pytest.mark.asyncio
     async def test_a_stuck_check_ignores_verified_commits(self) -> None:
@@ -595,7 +597,9 @@ class TestTheFlowActsOnTheOutcome:
         await mgr._handle_failed_merge(self._flow(mgr))
 
         mgr._merge_recreated_pr.assert_awaited_once()
-        assert mgr._merge_recreated_pr.await_args.args[1] is replacement
+        await_args = mgr._merge_recreated_pr.await_args
+        assert await_args is not None
+        assert await_args.args[1] is replacement
 
     @pytest.mark.asyncio
     async def test_an_abandoned_replacement_is_blocked_not_failed(self) -> None:

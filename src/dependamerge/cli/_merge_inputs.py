@@ -127,10 +127,18 @@ def _fetch_and_validate_source_pr(ctx: _MergeContext) -> None:
     assert ctx.github_client is not None
 
     try:
-        ctx.source_pr = ctx.github_client.get_pull_request_info(
+        # Bind the result locally and read through that, rather than
+        # through ``ctx.source_pr`` --- which is declared
+        # ``PullRequestInfo | None``, so every access depends on the
+        # checker narrowing the assignment.  That narrowing degrades
+        # wherever the client's return type cannot be fully resolved
+        # (the pre-commit.ci sandbox, where third-party sources are
+        # absent), turning a safe access into a reported error.
+        source_pr = ctx.github_client.get_pull_request_info(
             ctx.owner, ctx.repo_name, ctx.pr_number
         )
-        if ctx.source_pr.state != "open":
+        ctx.source_pr = source_pr
+        if source_pr.state != "open":
             if ctx.progress_tracker:
                 ctx.progress_tracker.stop()
             exit_for_pr_state_error(

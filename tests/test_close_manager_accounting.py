@@ -61,11 +61,19 @@ def _pr(
     )
 
 
-def _mgr(**overrides) -> AsyncCloseManager:
+def _mgr(**overrides) -> tuple[AsyncCloseManager, MagicMock]:
+    """Build a manager with a typed reference to its stubbed console.
+
+    Returns ``(manager, console)``. The console reference is typed as
+    ``MagicMock`` --- the declared attribute is a real ``Console``, so
+    reading ``print.call_args_list`` off it would not type-check ---
+    mirroring the ``(manager, client)`` pattern in ``tests/conftest.py``.
+    """
     mgr = AsyncCloseManager(token="test-token", **overrides)
+    console = MagicMock()
     # Keep the console quiet and out of the assertions.
-    mgr._console = MagicMock()
-    return mgr
+    mgr._console = console
+    return mgr, console
 
 
 class TestEachOutcomeIsRecordedOnce:
@@ -82,7 +90,7 @@ class TestEachOutcomeIsRecordedOnce:
     )
     @pytest.mark.asyncio
     async def test_a_skipped_pr_is_recorded_once(self, kwargs, expected) -> None:
-        mgr = _mgr()
+        mgr, console = _mgr()
 
         result = await mgr._close_single_pr(_pr(**kwargs))
 
@@ -94,7 +102,7 @@ class TestEachOutcomeIsRecordedOnce:
     @pytest.mark.asyncio
     async def test_a_closed_pr_is_recorded_once(self) -> None:
         """The path that already appended exactly once must be unchanged."""
-        mgr = _mgr()
+        mgr, console = _mgr()
         client = AsyncMock()
         client.close_pull_request = AsyncMock(return_value=None)
         mgr._github_client = client
@@ -106,7 +114,7 @@ class TestEachOutcomeIsRecordedOnce:
 
     @pytest.mark.asyncio
     async def test_a_preview_is_recorded_once(self) -> None:
-        mgr = _mgr(preview_mode=True)
+        mgr, console = _mgr(preview_mode=True)
 
         result = await mgr._close_single_pr(_pr())
 
@@ -120,7 +128,7 @@ class TestPermissionErrorsReachTheirHandler:
     @pytest.mark.asyncio
     async def test_a_denial_is_not_retried(self) -> None:
         """Retrying cannot help: the token gains no scopes between attempts."""
-        mgr = _mgr(max_retries=3)
+        mgr, console = _mgr(max_retries=3)
         client = AsyncMock()
         client.close_pull_request = AsyncMock(
             side_effect=GitHubPermissionError(
@@ -138,7 +146,7 @@ class TestPermissionErrorsReachTheirHandler:
     @pytest.mark.asyncio
     async def test_a_denial_keeps_its_guidance(self) -> None:
         """The dedicated handler runs, so the operation is named for the user."""
-        mgr = _mgr()
+        mgr, console = _mgr()
         client = AsyncMock()
         client.close_pull_request = AsyncMock(
             side_effect=GitHubPermissionError(
@@ -151,7 +159,7 @@ class TestPermissionErrorsReachTheirHandler:
         result = await mgr._close_single_pr(_pr())
 
         printed = " ".join(
-            str(call.args[0]) for call in mgr._console.print.call_args_list if call.args
+            str(call.args[0]) for call in console.print.call_args_list if call.args
         )
         assert "Token Permission Issue" in printed
         assert result.error and "scope" in result.error.lower()
@@ -159,7 +167,7 @@ class TestPermissionErrorsReachTheirHandler:
     @pytest.mark.asyncio
     async def test_an_ordinary_error_is_still_retried(self) -> None:
         """Narrowing must not disturb the retry behaviour it sits beside."""
-        mgr = _mgr(max_retries=2)
+        mgr, console = _mgr(max_retries=2)
         client = AsyncMock()
         client.close_pull_request = AsyncMock(side_effect=RuntimeError("flaky"))
         mgr._github_client = client
