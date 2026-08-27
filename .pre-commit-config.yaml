@@ -65,6 +65,14 @@ repos:
     rev: 7ff8d35ae36a7d2b968f2f90b4c723e292e594ee  # frozen: v2.3.1
     hooks:
       - id: mypy
+        # Check the tree, not just the staged files.  ``files`` only
+        # filters which names pre-commit *passes*; on a normal run that
+        # is the changed files alone, so a typing change in ``src``
+        # could break an unchanged caller or test without failing here.
+        # Passing explicit directories and disabling filename passing
+        # makes this a genuine tree-wide gate.
+        pass_filenames: false
+        args: [src, tests, scripts]
         additional_dependencies:
           - types-requests>=2.32.0
 
@@ -112,6 +120,21 @@ repos:
     rev: 3c94d276aa3005fa1f5a977946c9dc106135c083  # frozen: 1.39.10
     hooks:
       - id: basedpyright
+        # Fail on warnings as well as errors.  Without this basedpyright
+        # exits 0 for anything classified as a warning, so a diagnostic
+        # an editor's language server shows in the gutter would pass
+        # every hook and every CI run --- which is exactly how the tree
+        # accumulated 59 unreported findings.  Severities stay meaningful
+        # in pyproject.toml; this makes both classes blocking.
+        #
+        # Explicit directories with filename passing disabled, for the
+        # same reason as the mypy hook above: with file arguments
+        # present ``include`` is not the analysis scope, so a change in
+        # one file could introduce a diagnostic in an unchanged one and
+        # still pass.  Verified --- a defect in an unstaged test is
+        # caught when only a source file is staged.
+        pass_filenames: false
+        args: [--warnings, src, tests, scripts]
 
   - repo: https://github.com/lfreleng-actions/gha-workflow-linter
     rev: 42aa4db931ab4c9da0930ae5ca2259ab08da79cb  # frozen: v1.5.2

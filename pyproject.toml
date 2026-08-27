@@ -148,21 +148,40 @@ show_missing = true
 pythonVersion = "3.10"
 pythonPlatform = "All"
 typeCheckingMode = "standard"
+# Scope a bare ``basedpyright`` invocation to our own code.  Without
+# this it walks the whole tree including ``.venv``, reporting thousands
+# of findings from third-party packages --- which is both useless and
+# actively misleading, since it buries our own.  Pre-commit passes
+# explicit filenames, so this exists to make a local or editor run
+# analyse the same set CI does.
+include = ["src", "tests", "scripts"]
 # Auto-generated version file uses deprecated typing imports for backwards compat
 exclude = ["src/dependamerge/_version.py"]
 
 # --- Errors we want to catch and fix ---
-reportMissingTypeArgument = "warning"
-reportOptionalMemberAccess = "warning"
-reportCallIssue = "warning"
-reportAssignmentType = "warning"
-reportReturnType = "warning"
-reportGeneralTypeIssues = "warning"
-reportUninitializedInstanceVariable = "warning"
+# These are genuine type defects, so they fail the build.  They were
+# previously set to "warning", which meant basedpyright exited 0 and
+# only an editor's language server surfaced them --- so the tree
+# accumulated 59 of them while every hook reported success.  The
+# ``--warnings`` flag on the pre-commit hook additionally fails on any
+# rule still classified as a warning, so a newly introduced diagnostic
+# cannot slip through by virtue of its default severity.
+reportMissingTypeArgument = "error"
+reportOptionalMemberAccess = "error"
+reportCallIssue = "error"
+reportAssignmentType = "error"
+reportReturnType = "error"
+reportGeneralTypeIssues = "error"
+reportUninitializedInstanceVariable = "error"
 
 # --- Intentional patterns we suppress ---
 # Third-party imports cannot be resolved in pre-commit.ci sandbox
 reportMissingImports = false
+# Same cause, different symptom: the sandbox installs typed stubs
+# for some third-party packages (``types-requests``) without the
+# package source, so the import resolves but its implementation
+# does not.  An artefact of where the check runs, not of the code.
+reportMissingModuleSource = false
 # Typer uses Option() calls in parameter defaults by design
 reportCallInDefaultInitializer = false
 # Typer parameters are consumed by the framework, not the function body
@@ -218,6 +237,18 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
 ignore_missing_imports = true
+
+# ``tests`` reaches through module objects on purpose --- the suite
+# patches ``dependamerge.merge_manager.asyncio.sleep`` and friends so
+# every importer observes the substitution, which is the seam the mixin
+# split documents and relies on.  ``reportPrivateImportUsage`` exists to
+# stop *external consumers* depending on a library's incidental imports;
+# a first-party test patching its own package is not that.  Scoped to
+# ``tests`` so the rule stays active for ``src``, where it caught a
+# genuine missing ``__all__`` export.
+[[tool.basedpyright.executionEnvironments]]
+root = "tests"
+reportPrivateImportUsage = false
 
 [tool.ruff]
 target-version = "py310"
