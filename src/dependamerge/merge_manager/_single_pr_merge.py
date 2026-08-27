@@ -61,6 +61,16 @@ class _SinglePrMergeMixin(_SinglePrOutcomeMixin):
             if early is not None:
                 return early
             merged = await self._retry_after_review_or_workflows(flow, merged)
+            # Both recovery paths above dispatch under the repo lock and
+            # decline to merge a PR a sibling turned ``dirty`` while they
+            # waited for it.  ``_is_pr_dirty_now`` updated the snapshot
+            # when it confirmed that, so route on it here --- outside the
+            # lock, so the rebase wait never blocks sibling merges, and
+            # without a further request.
+            if merged is False and pr_info.mergeable_state == "dirty":
+                return await self._handle_merge_conflict(
+                    pr_info, flow.repo_owner, flow.repo_name, flow.result
+                )
 
         if merged is None:
             self._record_auto_merge_pending(flow)

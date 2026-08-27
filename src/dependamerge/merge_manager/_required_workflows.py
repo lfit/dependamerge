@@ -134,6 +134,17 @@ class _RequiredWorkflowWaitMixin(_MergeManagerBase):
                     # head-of-line blocking the lock design avoids.
                     dispatch_lock = await self._get_merge_dispatch_lock(owner, repo)
                     async with dispatch_lock:
+                        # The wait can finish ``clean`` and a sibling can
+                        # then merge while we acquire the lock, so
+                        # re-read live state before dispatching --- a
+                        # single GET, matching the main dispatch path.
+                        # ``_is_pr_dirty_now`` updates ``pr_info``, so
+                        # the caller routes to conflict recovery on the
+                        # snapshot rather than issuing a doomed merge.
+                        if self._repo_scoped and await self._is_pr_dirty_now(
+                            pr_info, owner, repo
+                        ):
+                            return False
                         merged = await self._github_client.merge_pull_request(
                             owner, repo, pr_info.number, merge_method
                         )

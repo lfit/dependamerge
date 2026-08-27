@@ -186,9 +186,25 @@ class _ApprovalMixin(_MergeManagerBase):
         branch protection, which surfaces as an intermittent and
         hard-to-attribute failure rather than as anything pointing at
         the lock.
+
+        Also re-reads live state inside the lock, as the main dispatch
+        path does (:meth:`_merge_under_dispatch_lock`).  This recovery
+        runs after a rejected attempt and then *waits* for the lock, so
+        a sibling merge can turn this PR ``dirty`` in that window;
+        dispatching anyway sends a doomed merge that 405s and is then
+        reported as a failure rather than routed to conflict recovery.
+        ``_is_pr_dirty_now`` updates ``pr_info`` when it confirms a
+        concrete ``dirty``, so the caller can route on the snapshot
+        without a second request.
         """
         dispatch_lock = await self._get_merge_dispatch_lock(owner, repo)
         async with dispatch_lock:
+            # A single GET, not the polling refresh: the dispatch lock
+            # is the one point serialised *and* ordered after a sibling
+            # merge, so polling GitHub's recompute window here would
+            # serialise the whole repository batch.
+            if self._repo_scoped and await self._is_pr_dirty_now(pr_info, owner, repo):
+                return False
             return await self._merge_pr_with_retry(pr_info, owner, repo)
 
     @staticmethod
