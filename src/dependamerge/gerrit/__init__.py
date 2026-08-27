@@ -43,6 +43,8 @@ from dependamerge.gerrit.models import (
     GerritSubmitResult,
 )
 from dependamerge.gerrit.service import (
+    CHANGE_ID_MATCH_LIMIT,
+    DEFAULT_CHANGE_ID_OPTIONS,
     DEFAULT_CHANGE_OPTIONS,
     DEFAULT_LIST_OPTIONS,
     GerritService,
@@ -84,6 +86,8 @@ __all__ = [
     "SubmitStatus",
     "create_submit_manager",
     # Service
+    "CHANGE_ID_MATCH_LIMIT",
+    "DEFAULT_CHANGE_ID_OPTIONS",
     "DEFAULT_CHANGE_OPTIONS",
     "DEFAULT_LIST_OPTIONS",
     "GerritService",

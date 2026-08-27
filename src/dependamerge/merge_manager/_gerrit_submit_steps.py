@@ -87,19 +87,9 @@ class _GerritSubmitStepsMixin(_MergeManagerBase):
         )
 
         # Query Gerrit for the change using the primary Change-ID
-        changes = service._query_changes(
-            query=f"change:{change_id} status:open",
-            limit=5,
-            offset=0,
-            options=[
-                "CURRENT_REVISION",
-                "LABELS",
-                "DETAILED_LABELS",
-                "SUBMIT_REQUIREMENTS",
-            ],
-        )
+        gerrit_change = service.find_open_change_by_change_id(change_id)
 
-        if not changes:
+        if gerrit_change is None:
             self.log.warning(
                 "No open Gerrit change found for Change-Id %s on %s",
                 change_id,
@@ -107,8 +97,6 @@ class _GerritSubmitStepsMixin(_MergeManagerBase):
             )
             return None
 
-        # Use the first matching change
-        gerrit_change = changes[0]
         self.log.info(
             "Found Gerrit change %s #%d for Change-Id %s",
             gerrit_change.project,

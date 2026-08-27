@@ -40,11 +40,15 @@ from dependamerge.gerrit.models import (
 )
 from dependamerge.gerrit.urls import GerritUrlBuilder, create_url_builder
 
+from ._service_change_details import DEFAULT_CHANGE_OPTIONS as DEFAULT_CHANGE_OPTIONS
+from ._service_change_details import _GerritChangeDetailsMixin
+
 # The sibling modules below carry the parts of this module that never touch
 # create_url_builder / build_client.
 from ._service_compare import _GerritCompareMixin
 from ._service_errors import GerritServiceError as GerritServiceError
-from ._service_queries import DEFAULT_CHANGE_OPTIONS as DEFAULT_CHANGE_OPTIONS
+from ._service_queries import CHANGE_ID_MATCH_LIMIT as CHANGE_ID_MATCH_LIMIT
+from ._service_queries import DEFAULT_CHANGE_ID_OPTIONS as DEFAULT_CHANGE_ID_OPTIONS
 from ._service_queries import DEFAULT_LIST_OPTIONS as DEFAULT_LIST_OPTIONS
 from ._service_queries import _GerritQueryMixin
 from ._service_rebase import _GerritRebaseMixin
@@ -56,7 +60,12 @@ if TYPE_CHECKING:
 log = logging.getLogger("dependamerge.gerrit.service")
 
 
-class GerritService(_GerritQueryMixin, _GerritRebaseMixin, _GerritCompareMixin):
+class GerritService(
+    _GerritQueryMixin,
+    _GerritChangeDetailsMixin,
+    _GerritRebaseMixin,
+    _GerritCompareMixin,
+):
     """
     High-level service for Gerrit operations.
 
@@ -247,6 +256,8 @@ def create_gerrit_service(
 
 
 __all__ = [
+    "CHANGE_ID_MATCH_LIMIT",
+    "DEFAULT_CHANGE_ID_OPTIONS",
     "DEFAULT_CHANGE_OPTIONS",
     "DEFAULT_LIST_OPTIONS",
     "GerritService",

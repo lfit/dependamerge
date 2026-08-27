@@ -3,11 +3,17 @@
 """
 The Gerrit change queries behind ``GerritService``.
 
-:class:`_GerritQueryMixin` carries the read-only REST calls: fetching a
-single change, listing open changes (optionally scoped by project,
-branch, owner or topic), listing projects, and the paginated query loop
-that backs them.  The default option sets those queries send to Gerrit
-live here too.
+:class:`_GerritQueryMixin` carries the read-only REST calls that
+*search* for changes: listing open changes (optionally scoped by
+project, branch, owner or topic), resolving a Change-Id to the change
+it names, listing projects, and the paginated query loop that backs
+them.  The default option sets those queries send to Gerrit live here
+too.
+
+Reads that address a single change by number live in
+``_service_change_details`` instead, so neither module outgrows a
+reviewable size.  The split is by question asked: "find me changes
+matching this" here, "tell me about this change" there.
 
 It lives here rather than in ``dependamerge.gerrit.service`` purely to
 keep that module reviewable.  Nothing in here references
@@ -23,34 +29,40 @@ keep reporting as ``dependamerge.gerrit.service``.
 from __future__ import annotations
 
 import logging
-from typing import Any
+import re
 
 from dependamerge.gerrit.client import (
-    GerritNotFoundError,
     GerritRestClient,
     GerritRestError,
 )
 from dependamerge.gerrit.models import GerritChangeInfo
 
-from ._service_errors import GerritServiceError
-
 log = logging.getLogger("dependamerge.gerrit.service")
 
 
-# Default query options for fetching change details
-DEFAULT_CHANGE_OPTIONS: list[str] = [
+# A Gerrit Change-Id: ``I`` followed by 40 hexadecimal characters.
+# Validated before interpolation because the value lands in Gerrit's
+# query language, where an unchecked string such as
+# ``I... OR status:open`` would parse as extra query terms and quietly
+# broaden a lookup that advertises an exact-key match.
+_CHANGE_ID_RE = re.compile(r"\AI[0-9a-fA-F]{40}\Z")
+
+# How many matches a Change-Id lookup fetches before settling on the
+# first.  Above 1 so an ambiguous Change-Id --- the same one appears on
+# every cherry-pick of a change --- stays visible to the diagnostic
+# rather than being silently truncated by the server.
+CHANGE_ID_MATCH_LIMIT = 5
+
+# Default query options for a Change-Id lookup.  Narrower than
+# DEFAULT_CHANGE_OPTIONS: a caller resolving a Change-Id is deciding
+# whether the change can be submitted, so the label and
+# submit-requirement detail is worth the round trip while the file and
+# account detail is not.
+DEFAULT_CHANGE_ID_OPTIONS: list[str] = [
     "CURRENT_REVISION",
-    "CURRENT_FILES",
-    "CURRENT_COMMIT",
+    "LABELS",
     "DETAILED_LABELS",
-    "DETAILED_ACCOUNTS",
-    "SUBMITTABLE",
-    # Both action options are needed for permission checks: CHANGE_ACTIONS
-    # returns change-level actions, while CURRENT_ACTIONS returns
-    # revision-level actions (including 'submit') under
-    # revisions[<rev>].actions.
-    "CURRENT_ACTIONS",
-    "CHANGE_ACTIONS",
+    "SUBMIT_REQUIREMENTS",
 ]
 
 # Default query options for listing changes
@@ -70,99 +82,6 @@ class _GerritQueryMixin:
     _client: GerritRestClient
     host: str
     base_path: str | None
-
-    def get_mergeable_status(
-        self,
-        change_number: int,
-    ) -> dict[str, Any]:
-        """
-        Fetch the mergeable status for a change.
-
-        This makes an explicit API call to compute merge status,
-        which is not included in the standard change info query.
-
-        Args:
-            change_number: The Gerrit change number.
-
-        Returns:
-            A dict with mergeable info including:
-            - mergeable: bool - whether the change can be merged
-            - submit_type: str - the submit type (e.g., MERGE_IF_NECESSARY)
-            - commit_merged: bool - whether commit is already merged
-            - content_merged: bool - whether content is already merged
-
-        Raises:
-            GerritServiceError: If the status cannot be fetched.
-        """
-        endpoint = f"/changes/{change_number}/revisions/current/mergeable"
-        log.debug("Fetching mergeable status: %s", endpoint)
-
-        try:
-            result: dict[str, Any] = self._client.get(endpoint)
-            return result
-        except GerritNotFoundError:
-            # Change doesn't exist or has no current revision
-            return {"mergeable": None}
-        except GerritRestError as exc:
-            log.warning(
-                "Failed to fetch mergeable status for %d: %s", change_number, exc
-            )
-            return {"mergeable": None}
-
-    def get_change_info(
-        self,
-        change_number: int,
-        options: list[str] | None = None,
-        check_mergeable: bool = True,
-    ) -> GerritChangeInfo:
-        """
-        Fetch detailed information about a specific change.
-
-        Args:
-            change_number: The Gerrit change number.
-            options: Optional list of query options. Defaults to
-                    DEFAULT_CHANGE_OPTIONS.
-            check_mergeable: If True, make an additional API call to
-                           fetch the actual mergeable status.
-
-        Returns:
-            A GerritChangeInfo instance with full change details.
-
-        Raises:
-            GerritServiceError: If the change cannot be fetched.
-            GerritNotFoundError: If the change does not exist.
-        """
-        if options is None:
-            options = DEFAULT_CHANGE_OPTIONS
-
-        endpoint = f"/changes/{change_number}"
-        if options:
-            params = "&".join(f"o={opt}" for opt in options)
-            endpoint += "?" + params
-
-        log.debug("Fetching change info: %s", endpoint)
-
-        try:
-            data = self._client.get(endpoint)
-            change_info = GerritChangeInfo.from_api_response(
-                data, host=self.host, base_path=self.base_path
-            )
-
-            # Fetch actual mergeable status if requested and change is open
-            if check_mergeable and change_info.status == "NEW":
-                mergeable_data = self.get_mergeable_status(change_number)
-                if mergeable_data.get("mergeable") is not None:
-                    change_info = change_info.model_copy(
-                        update={"mergeable": mergeable_data.get("mergeable")}
-                    )
-
-            return change_info
-        except GerritNotFoundError:
-            raise
-        except GerritRestError as exc:
-            msg = f"Failed to fetch change {change_number}: {exc}"
-            log.error(msg)
-            raise GerritServiceError(msg) from exc
 
     def get_open_changes(
         self,
@@ -258,6 +177,83 @@ class _GerritQueryMixin:
             query = f"{topic_term} status:open"
 
         return self._query_changes(query, limit, 0, options)
+
+    def find_open_change_by_change_id(
+        self,
+        change_id: str,
+        options: list[str] | None = None,
+    ) -> GerritChangeInfo | None:
+        """
+        Find the open change carrying ``change_id``.
+
+        Distinct from :meth:`get_change_info`, which takes a change
+        *number* and raises when it does not exist.  A Change-Id is not
+        unique on its own --- the same one appears on every cherry-pick
+        of a change across branches and projects --- so this is a search
+        that may legitimately match nothing, and returns None rather
+        than raising.
+
+        Where several open changes share the Change-Id, the first Gerrit
+        returns is used.  Callers needing to disambiguate should query by
+        project or branch instead.
+
+        Args:
+            change_id: The Gerrit Change-Id (the ``I``-prefixed key from
+                the commit message), not a change number.
+            options: Optional list of query options. Defaults to
+                    DEFAULT_CHANGE_ID_OPTIONS.
+
+        Returns:
+            The first matching open change, or None when none match.
+
+            None also covers a failed query: ``_query_changes`` logs and
+            swallows REST errors, so an unreachable Gerrit is
+            indistinguishable from a genuine miss here.  Pre-existing,
+            and tracked separately rather than changed under an
+            encapsulation fix.
+
+        Raises:
+            ValueError: If ``change_id`` is not a well-formed Change-Id.
+        """
+        if not _CHANGE_ID_RE.match(change_id):
+            raise ValueError(
+                f"Not a well-formed Gerrit Change-Id: {change_id!r} "
+                "(expected 'I' followed by 40 hexadecimal characters)"
+            )
+
+        if options is None:
+            options = DEFAULT_CHANGE_ID_OPTIONS
+
+        # A small limit rather than 1: fetching a few matches keeps the
+        # ambiguous case visible to the debug log below, at no extra cost
+        # in the overwhelmingly common single-match case.
+        changes = self._query_changes(
+            query=f"change:{change_id} status:open",
+            limit=CHANGE_ID_MATCH_LIMIT,
+            offset=0,
+            options=options,
+        )
+
+        if not changes:
+            return None
+
+        if len(changes) > 1:
+            # The count is what was fetched and parsed, not what Gerrit
+            # matched: _query_changes caps the page and skips malformed
+            # items.  So it may understate, never overstate --- fine for
+            # a diagnostic, and the reason this hedges rather than
+            # reporting a total.
+            qualifier = "at least " if len(changes) >= CHANGE_ID_MATCH_LIMIT else ""
+            log.debug(
+                "Change-Id %s matches %s%d open changes; using %s #%d",
+                change_id,
+                qualifier,
+                len(changes),
+                changes[0].project,
+                changes[0].number,
+            )
+
+        return changes[0]
 
     def get_projects(self, limit: int = 500) -> list[str]:
         """
