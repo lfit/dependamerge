@@ -318,7 +318,7 @@ class TestFailureHandling:
         )
         poller = PullRequestStatePoller(client, window=0.01)
 
-        results: list[Any] = await asyncio.gather(
+        results = await asyncio.gather(
             poller.fetch("o", "r", 1),
             poller.fetch("o", "r", 2),
             return_exceptions=True,
