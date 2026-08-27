@@ -151,9 +151,14 @@ typeCheckingMode = "standard"
 # Scope a bare ``basedpyright`` invocation to our own code.  Without
 # this it walks the whole tree including ``.venv``, reporting thousands
 # of findings from third-party packages --- which is both useless and
-# actively misleading, since it buries our own.  Pre-commit passes
-# explicit filenames, so this exists to make a local or editor run
-# analyse the same set CI does.
+# actively misleading, since it buries our own.
+#
+# The hooks do not rely on this: they pass ``src tests scripts`` as
+# explicit targets with ``pass_filenames: false``, and explicit
+# arguments override ``include``.  This governs the runs that supply no
+# targets --- a bare ``basedpyright`` on the command line, and an
+# editor's language server --- so those analyse the same set the hooks
+# do rather than the whole project tree.
 include = ["src", "tests", "scripts"]
 # Auto-generated version file uses deprecated typing imports for backwards compat
 exclude = ["src/dependamerge/_version.py"]
