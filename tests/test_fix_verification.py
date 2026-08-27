@@ -34,20 +34,13 @@ def test_final_verification():
         # Setup GitHubAsync mock for AsyncMergeManager
         from unittest.mock import AsyncMock
 
-        mock_async = AsyncMock()
+        from tests.conftest import make_github_async_mock
+
+        mock_async = make_github_async_mock()
         mock_async.approve_pull_request = AsyncMock()
         mock_async.merge_pull_request = AsyncMock(return_value=True)
         mock_async.update_branch = AsyncMock()
-        # Synchronous on the real client: a blanket AsyncMock would make
-        # this an unawaited coroutine (see tests/conftest.py).
-        mock_async.clear_block_reasons = Mock()
-
-        # Mock the GitHubAsync class to return our mock instance
-        mock_async_instance = AsyncMock()
-        mock_async_instance.__aenter__ = AsyncMock(return_value=mock_async)
-        mock_async_instance.__aexit__ = AsyncMock(return_value=None)
-        mock_async_instance.clear_block_reasons = Mock()
-        mock_async_class.return_value = mock_async_instance
+        mock_async_class.return_value = mock_async
 
         mock_client.parse_pr_url.return_value = ("owner", "repo", 22)
         mock_client.is_automation_author.return_value = True

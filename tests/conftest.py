@@ -62,6 +62,12 @@ Guidelines for New Tests
    client inside the block because basedpyright already narrowed the type.
    You do **not** need this helper in that case.
 
+5. If instead you patch ``dependamerge.merge_manager.GitHubAsync`` and
+   drive the CLI end to end, use ``make_github_async_mock`` rather than
+   hand-rolling the ``__aenter__`` plumbing.  It mirrors the real
+   client's synchronous methods *and* its dict-returning coroutines,
+   both of which a blanket ``AsyncMock`` gets wrong.
+
 See Also
 --------
 - ``tests/test_dependabot_recreate.py`` — ``_make_manager()`` wraps this
@@ -168,3 +174,59 @@ def make_merge_manager(**overrides: Any) -> tuple[AsyncMergeManager, AsyncMock]:
     client.clear_block_reasons = MagicMock()
     mgr._github_client = client
     return mgr, client
+
+
+def make_github_async_mock() -> AsyncMock:
+    """Build a faithful stand-in for the ``GitHubAsync`` class's instance.
+
+    For tests that patch ``dependamerge.merge_manager.GitHubAsync`` and
+    drive the CLI end to end, rather than injecting a client directly as
+    :func:`make_merge_manager` does.  Assign the result to the patched
+    class's ``return_value``.
+
+    A *single* mock is returned, and its ``__aenter__`` yields that same
+    object, because the real ``GitHubAsync.__aenter__`` returns ``self``.
+    Splitting it into a separate "instance" and "client" pair --- the
+    shape this replaced --- is the trap: ``AsyncMergeManager`` keeps the
+    object it constructed and calls ``__aenter__`` only for its side
+    effect, then shares that object with ``GitHubService``.  Configuring
+    the ``__aenter__`` result therefore left the object actually in use
+    bare, and the divergence was invisible because both are mocks.
+
+    Two further details keep the double honest where a blanket
+    ``AsyncMock`` silently diverges:
+
+    *Synchronous methods.*  ``invalidate_block_reason`` and
+    ``clear_block_reasons`` do not return awaitables, and production
+    code calls them without ``await``.  Mocked as coroutine functions
+    they leak "never awaited" warnings.
+
+    *Dict-returning coroutines.*  ``graphql`` is declared to return
+    ``dict[str, Any]``, but awaiting a bare ``AsyncMock`` yields another
+    ``AsyncMock``.  Production code then calls ``.get(...)`` on it,
+    which manufactures a coroutine nobody awaits.  That warning is
+    reported against whichever line happens to be running when the
+    garbage collector reclaims the object, so it points nowhere near the
+    cause --- see #420 for how long that misdirection held.  Returning a
+    real empty dict keeps the "no repository data" branch honest;
+    override it when a test cares about the payload.
+
+    Usage::
+
+        with patch("dependamerge.merge_manager.GitHubAsync") as cls:
+            client = make_github_async_mock()
+            cls.return_value = client
+            client.merge_pull_request = AsyncMock(return_value=True)
+
+    Returns
+    -------
+    AsyncMock
+        The client, which is also its own async-context-manager result.
+    """
+    client = AsyncMock()
+    client.invalidate_block_reason = MagicMock()
+    client.clear_block_reasons = MagicMock()
+    client.graphql = AsyncMock(return_value={})
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    return client
