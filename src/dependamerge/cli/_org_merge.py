@@ -313,15 +313,6 @@ def _handle_org_merge(
     # Both the grouped listing and the merge list derive from this order.
     owner_prs = _owner_merge_order(owner_prs)
 
-    # Deferred from before enumeration: the helper needs a concrete repo
-    # to probe, so point it at the first in-scope PR's repository as a
-    # representative sample.  The common failure modes (expired/invalid
-    # token, no write access) fail identically on any repo; genuine
-    # per-repo permission variance with fine-grained tokens is caught at
-    # merge time by the scheduler's per-repository error isolation.
-    ctx.repo_name = owner_prs[0].repository_full_name.split("/", 1)[-1]
-    _maybe_check_merge_permissions(ctx)
-
     automation_prs, human_prs = _partition_owner_prs(parsed_org, owner_prs)
 
     selected = _confirm_owner_human_prs(
@@ -330,6 +321,25 @@ def _handle_org_merge(
     if selected is None:
         return
     owner_prs = selected
+
+    # Deferred until the final set is known: the helper needs a concrete
+    # repo to probe, so point it at the first PR the run will actually
+    # merge as a representative sample.  Probing before the prompt would
+    # sample the unfiltered set, and under --include-human-prs the first
+    # PR there can belong to a repository holding only human-authored
+    # PRs --- which the operator then drops by pressing Enter.  A token
+    # scoped to exactly the automation repositories would be rejected on
+    # the strength of a repository the run never touches.
+    #
+    # Sampling one repo remains sufficient: the common failure modes
+    # (expired/invalid token, no write access) fail identically on any
+    # repo, and genuine per-repo permission variance with fine-grained
+    # tokens is caught at merge time by the scheduler's per-repository
+    # error isolation.  ``owner_prs`` is non-empty here --- it was
+    # checked above, and _confirm_owner_human_prs returns None rather
+    # than an empty selection.
+    ctx.repo_name = owner_prs[0].repository_full_name.split("/", 1)[-1]
+    _maybe_check_merge_permissions(ctx)
 
     all_prs_to_merge: list[tuple[PullRequestInfo, ComparisonResult | None]] = [
         (pr, None) for pr in owner_prs

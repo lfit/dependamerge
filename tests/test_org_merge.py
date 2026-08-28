@@ -414,6 +414,99 @@ class TestMergeOrgUrl:
         assert result.exit_code == 0, f"CLI failed: {result.stdout}"
         mock_check_perms.assert_not_called()
 
+    @patch("dependamerge.cli._check_merge_permissions")
+    @patch("dependamerge.cli.GitHubClient")
+    @patch("dependamerge.cli.asyncio.run")
+    def test_permission_check_samples_repo_that_survives_the_prompt(
+        self, mock_asyncio_run, mock_client_class, mock_check_perms
+    ):
+        # Regression (#427): with --include-human-prs the probe must
+        # sample a repository the run will actually touch.  Probing
+        # before the prompt sampled the *unfiltered* set, so a
+        # repository holding only human PRs could gate the run and then
+        # be dropped -- rejecting a fine-grained token scoped to exactly
+        # the automation repositories the operator meant to merge.
+        #
+        # _owner_merge_order puts the repository with the most PRs
+        # first, so two human PRs in "chatter" outrank the single
+        # automation PR in "widget" and become owner_prs[0].
+        human_prs = [
+            _make_pr(1, author="a-person", repo="acme/chatter"),
+            _make_pr(2, author="a-person", repo="acme/chatter"),
+        ]
+        auto_pr = _make_pr(3, repo="acme/widget")
+
+        mock_client = Mock()
+        mock_client.token = "test_token"
+        mock_client_class.return_value = mock_client
+
+        mock_asyncio_run.side_effect = _mock_asyncio_run(
+            [([*human_prs, auto_pr], []), []]
+        )
+
+        captured: dict[str, str] = {}
+
+        def _capture(ctx):
+            captured["repo_name"] = ctx.repo_name
+
+        mock_check_perms.side_effect = _capture
+
+        result = self.runner.invoke(
+            app,
+            [
+                "merge",
+                "https://github.com/acme",
+                "--token",
+                "test_token",
+                "--include-human-prs",
+            ],
+            # Enter at the prompt: skip the human PRs, leaving only
+            # acme/widget in scope.
+            input="\n",
+        )
+
+        assert result.exit_code == 0, f"CLI failed: {result.stdout}"
+        assert "Excluding human PRs" in _strip_ansi(result.stdout)
+        mock_check_perms.assert_called_once()
+        assert captured["repo_name"] == "widget"
+
+    @patch("dependamerge.cli._check_merge_permissions")
+    @patch("dependamerge.cli.GitHubClient")
+    @patch("dependamerge.cli.asyncio.run")
+    def test_permission_check_skipped_when_prompt_empties_the_run(
+        self, mock_asyncio_run, mock_client_class, mock_check_perms
+    ):
+        # The complement of the case above: when every in-scope PR is
+        # human-authored and the operator skips them, nothing is left to
+        # merge.  There is no repository the run will touch, so probing
+        # permissions at all would be gating on a phantom.
+        human_prs = [
+            _make_pr(1, author="a-person", repo="acme/chatter"),
+            _make_pr(2, author="a-person", repo="acme/chatter"),
+        ]
+
+        mock_client = Mock()
+        mock_client.token = "test_token"
+        mock_client_class.return_value = mock_client
+
+        mock_asyncio_run.side_effect = _mock_asyncio_run([(human_prs, [])])
+
+        result = self.runner.invoke(
+            app,
+            [
+                "merge",
+                "https://github.com/acme",
+                "--token",
+                "test_token",
+                "--include-human-prs",
+            ],
+            input="\n",
+        )
+
+        assert result.exit_code == 0, f"CLI failed: {result.stdout}"
+        assert "No automation PRs remain" in _strip_ansi(result.stdout)
+        mock_check_perms.assert_not_called()
+
     def test_ghe_owner_url_surfaces_owner_wide_message(self):
         # Regression: an owner-shaped URL on a non-github host (e.g. GHE)
         # must surface parse_org_url's actionable "only supported for
