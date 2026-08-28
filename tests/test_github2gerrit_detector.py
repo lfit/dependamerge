@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from typer.testing import CliRunner
 
+from dependamerge.gerrit.service import GerritService
 from dependamerge.github2gerrit_detector import (
     _END_MARKER,
     _START_MARKER,
@@ -1389,8 +1391,8 @@ class TestMergeManagerSubmitGerritChange:
         mock_result.submitted = True
         mock_result.success = True
 
-        mock_service = MagicMock()
-        mock_service._query_changes.return_value = [mock_change]
+        mock_service = MagicMock(spec=GerritService)
+        mock_service.find_open_change_by_change_id.return_value = mock_change
 
         mock_submit_mgr = MagicMock()
         mock_submit_mgr.submit_changes.return_value = [mock_result]
@@ -1437,7 +1439,7 @@ class TestMergeManagerSubmitGerritChange:
 
         assert result is False
 
-    def test_submit_no_matching_gerrit_change(self):
+    def test_submit_no_matching_gerrit_change(self, caplog):
         mgr = self._make_mgr_with_no_gitreview()
 
         mapping = GitHub2GerritMapping(
@@ -1453,8 +1455,8 @@ class TestMergeManagerSubmitGerritChange:
         mock_creds.username = "user"
         mock_creds.password = "pass"
 
-        mock_service = MagicMock()
-        mock_service._query_changes.return_value = []  # No matching change
+        mock_service = MagicMock(spec=GerritService)
+        mock_service.find_open_change_by_change_id.return_value = None
 
         with (
             patch(
@@ -1465,12 +1467,30 @@ class TestMergeManagerSubmitGerritChange:
                 "dependamerge.merge_manager.create_gerrit_service",
                 return_value=mock_service,
             ),
+            patch(
+                "dependamerge.merge_manager.create_submit_manager",
+            ) as mock_submit_mgr_factory,
         ):
-            result = asyncio.run(
-                mgr._submit_gerrit_change(mapping, pr, "lfit", "releng-test")
-            )
+            with caplog.at_level(logging.WARNING, logger="dependamerge.merge_manager"):
+                result = asyncio.run(
+                    mgr._submit_gerrit_change(mapping, pr, "lfit", "releng-test")
+                )
 
         assert result is False
+        # ``result is False`` alone is satisfied by several unrelated
+        # failure paths, so pin the reason.  The lookup ran and was asked
+        # for this Change-Id...
+        mock_service.find_open_change_by_change_id.assert_called_once_with(
+            "I6a9987bd1b1cf1e4975dd5da2fb26b6b35ee0048"
+        )
+        # ...it reported the miss and returned cleanly, rather than
+        # crashing on the way past...
+        assert "No open Gerrit change found for Change-Id" in caplog.text
+        # ...and nothing downstream was attempted.  Without these two,
+        # dropping the None guard lets execution run on and still reach
+        # False by way of a later exception --- precisely how this test
+        # used to pass against a reverted fix.
+        mock_submit_mgr_factory.assert_not_called()
 
     def test_submit_gerrit_rest_error(self):
         from dependamerge.gerrit import GerritRestError
@@ -1744,8 +1764,8 @@ class TestSubmitModeFullPRFlow:
         mock_submit_result.submitted = True
         mock_submit_result.success = True
 
-        mock_service = MagicMock()
-        mock_service._query_changes.return_value = [mock_change]
+        mock_service = MagicMock(spec=GerritService)
+        mock_service.find_open_change_by_change_id.return_value = mock_change
 
         mock_submit_mgr = MagicMock()
         mock_submit_mgr.submit_changes.return_value = [mock_submit_result]
@@ -1799,8 +1819,8 @@ class TestSubmitModeFullPRFlow:
         mock_creds.username = "user"
         mock_creds.password = "pass"
 
-        mock_service = MagicMock()
-        mock_service._query_changes.return_value = []
+        mock_service = MagicMock(spec=GerritService)
+        mock_service.find_open_change_by_change_id.return_value = None
 
         with (
             patch(

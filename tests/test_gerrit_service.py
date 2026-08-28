@@ -7,6 +7,7 @@ This module tests the GerritService class for querying changes,
 finding similar changes, and handling pagination.
 """
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,6 +19,8 @@ from dependamerge.gerrit.models import (
     GerritFileChange,
 )
 from dependamerge.gerrit.service import (
+    CHANGE_ID_MATCH_LIMIT,
+    DEFAULT_CHANGE_ID_OPTIONS,
     DEFAULT_CHANGE_OPTIONS,
     DEFAULT_LIST_OPTIONS,
     GerritService,
@@ -521,6 +524,240 @@ class TestGerritServiceGetChangesByTopic:
         assert 'topic:"odd\\"topic"' in call_args
 
 
+class TestGerritServiceFindOpenChangeByChangeId:
+    """Tests for find_open_change_by_change_id method."""
+
+    CHANGE_ID = "I6a9987bd1b1cf1e4975dd5da2fb26b6b35ee0048"
+
+    @patch("dependamerge.gerrit.service.build_client")
+    @patch("dependamerge.gerrit.service.create_url_builder")
+    def test_queries_by_change_id_and_open_status(
+        self,
+        mock_url_builder,
+        mock_build_client,
+        mock_client,
+        sample_change_data,
+    ):
+        """Test the lookup scopes the query to the Change-Id and open changes."""
+        mock_build_client.return_value = mock_client
+        mock_client.get.return_value = [sample_change_data]
+
+        service = GerritService(host="gerrit.example.org")
+        service.find_open_change_by_change_id(self.CHANGE_ID)
+
+        call_args = mock_client.get.call_args[0][0]
+        assert f"change:{self.CHANGE_ID}" in call_args
+        assert "status:open" in call_args
+        # The limit is deliberately above 1 so an ambiguous Change-Id
+        # stays visible to the multi-match diagnostic rather than being
+        # silently truncated to the first hit by the server.
+        assert "n=5" in call_args
+
+    @patch("dependamerge.gerrit.service.build_client")
+    @patch("dependamerge.gerrit.service.create_url_builder")
+    def test_requests_label_and_submit_detail_by_default(
+        self,
+        mock_url_builder,
+        mock_build_client,
+        mock_client,
+        sample_change_data,
+    ):
+        """Test the default options carry what a submit decision needs.
+
+        A caller resolving a Change-Id is about to decide whether the
+        change can be submitted, so the label and submit-requirement
+        detail must arrive in this response rather than needing a
+        second round trip.
+        """
+        mock_build_client.return_value = mock_client
+        mock_client.get.return_value = [sample_change_data]
+
+        service = GerritService(host="gerrit.example.org")
+        service.find_open_change_by_change_id(self.CHANGE_ID)
+
+        call_args = mock_client.get.call_args[0][0]
+        for option in DEFAULT_CHANGE_ID_OPTIONS:
+            assert f"o={option}" in call_args
+
+    @patch("dependamerge.gerrit.service.build_client")
+    @patch("dependamerge.gerrit.service.create_url_builder")
+    def test_honours_explicit_options(
+        self,
+        mock_url_builder,
+        mock_build_client,
+        mock_client,
+        sample_change_data,
+    ):
+        """Test caller-supplied options replace the defaults."""
+        mock_build_client.return_value = mock_client
+        mock_client.get.return_value = [sample_change_data]
+
+        service = GerritService(host="gerrit.example.org")
+        service.find_open_change_by_change_id(
+            self.CHANGE_ID, options=["CURRENT_REVISION"]
+        )
+
+        call_args = mock_client.get.call_args[0][0]
+        assert "o=CURRENT_REVISION" in call_args
+        assert "o=SUBMIT_REQUIREMENTS" not in call_args
+
+    @patch("dependamerge.gerrit.service.build_client")
+    @patch("dependamerge.gerrit.service.create_url_builder")
+    def test_returns_none_when_nothing_matches(
+        self,
+        mock_url_builder,
+        mock_build_client,
+        mock_client,
+    ):
+        """Test a Change-Id matching no open change returns None.
+
+        A Change-Id is a search key, not an identifier, so matching
+        nothing is an ordinary outcome rather than an error.
+        """
+        mock_build_client.return_value = mock_client
+        mock_client.get.return_value = []
+
+        service = GerritService(host="gerrit.example.org")
+
+        assert service.find_open_change_by_change_id(self.CHANGE_ID) is None
+
+    @patch("dependamerge.gerrit.service.build_client")
+    @patch("dependamerge.gerrit.service.create_url_builder")
+    def test_returns_first_of_several_matches(
+        self,
+        mock_url_builder,
+        mock_build_client,
+        mock_client,
+        sample_change_data,
+        caplog,
+    ):
+        """Test the first match wins when a Change-Id is ambiguous.
+
+        The same Change-Id appears on every cherry-pick of a change, so
+        more than one open match is possible.  Resolving that silently
+        would hide a genuinely ambiguous lookup, so the choice is
+        logged; assert the diagnostic as well as the return value.
+        """
+        mock_build_client.return_value = mock_client
+        second = dict(sample_change_data)
+        second["_number"] = sample_change_data["_number"] + 1
+        mock_client.get.return_value = [sample_change_data, second]
+
+        service = GerritService(host="gerrit.example.org")
+        with caplog.at_level(logging.DEBUG, logger="dependamerge.gerrit.service"):
+            change = service.find_open_change_by_change_id(self.CHANGE_ID)
+
+        assert change is not None
+        assert change.number == sample_change_data["_number"]
+        # Below the cap, so the count is exact and must not be hedged.
+        assert f"Change-Id {self.CHANGE_ID} matches 2 open changes" in caplog.text
+
+    @pytest.mark.parametrize(
+        "bad_change_id",
+        [
+            pytest.param(
+                "I6a9987bd1b1cf1e4975dd5da2fb26b6b35ee0048 OR status:open",
+                id="query-injection",
+            ),
+            pytest.param("I6a9987bd", id="too-short"),
+            pytest.param("6a9987bd" * 5, id="missing-i-prefix"),
+            pytest.param("I" + "z" * 40, id="non-hex"),
+            pytest.param("", id="empty"),
+        ],
+    )
+    @patch("dependamerge.gerrit.service.build_client")
+    @patch("dependamerge.gerrit.service.create_url_builder")
+    def test_rejects_malformed_change_id(
+        self,
+        mock_url_builder,
+        mock_build_client,
+        mock_client,
+        bad_change_id,
+    ):
+        """Test a malformed Change-Id is rejected before it reaches Gerrit.
+
+        The value is interpolated into Gerrit's query language, so a
+        string carrying its own query terms would silently broaden a
+        lookup that advertises an exact-key match --- returning an
+        unrelated open change rather than nothing.
+        """
+        mock_build_client.return_value = mock_client
+
+        service = GerritService(host="gerrit.example.org")
+        with pytest.raises(ValueError, match="well-formed Gerrit Change-Id"):
+            service.find_open_change_by_change_id(bad_change_id)
+
+        # Rejected before any request, so a crafted value cannot reach
+        # the server even in a broadened form.
+        mock_client.get.assert_not_called()
+
+    @patch("dependamerge.gerrit.service.build_client")
+    @patch("dependamerge.gerrit.service.create_url_builder")
+    def test_accepts_uppercase_hex_change_id(
+        self,
+        mock_url_builder,
+        mock_build_client,
+        mock_client,
+        sample_change_data,
+    ):
+        """Test validation does not reject a valid uppercase Change-Id."""
+        mock_build_client.return_value = mock_client
+        mock_client.get.return_value = [sample_change_data]
+
+        service = GerritService(host="gerrit.example.org")
+
+        assert service.find_open_change_by_change_id(self.CHANGE_ID.upper()) is not None
+
+    @patch("dependamerge.gerrit.service.build_client")
+    @patch("dependamerge.gerrit.service.create_url_builder")
+    def test_qualifies_the_count_when_it_hits_the_cap(
+        self,
+        mock_url_builder,
+        mock_build_client,
+        mock_client,
+        sample_change_data,
+        caplog,
+    ):
+        """Test a capped result set is not reported as an exact total.
+
+        The lookup fetches at most CHANGE_ID_MATCH_LIMIT matches, so a
+        full page means "this many or more".  Logging the cap as though
+        it were the total would understate a genuinely ambiguous
+        Change-Id.
+        """
+        mock_build_client.return_value = mock_client
+        mock_client.get.return_value = [
+            {**sample_change_data, "_number": sample_change_data["_number"] + i}
+            for i in range(CHANGE_ID_MATCH_LIMIT)
+        ]
+
+        service = GerritService(host="gerrit.example.org")
+        with caplog.at_level(logging.DEBUG, logger="dependamerge.gerrit.service"):
+            service.find_open_change_by_change_id(self.CHANGE_ID)
+
+        assert f"at least {CHANGE_ID_MATCH_LIMIT} open changes" in caplog.text
+
+    @patch("dependamerge.gerrit.service.build_client")
+    @patch("dependamerge.gerrit.service.create_url_builder")
+    def test_single_match_logs_no_ambiguity(
+        self,
+        mock_url_builder,
+        mock_build_client,
+        mock_client,
+        sample_change_data,
+        caplog,
+    ):
+        """Test the ambiguity diagnostic stays quiet in the normal case."""
+        mock_build_client.return_value = mock_client
+        mock_client.get.return_value = [sample_change_data]
+
+        service = GerritService(host="gerrit.example.org")
+        with caplog.at_level(logging.DEBUG, logger="dependamerge.gerrit.service"):
+            service.find_open_change_by_change_id(self.CHANGE_ID)
+
+        assert "open changes; using" not in caplog.text
+
+
 class TestGerritServiceGetProjects:
     """Tests for get_projects method."""
 
@@ -954,8 +1191,6 @@ path/to/file2.txt"""
 
     def test_parse_conflict_files_empty_response(self, mock_client, caplog):
         """Test parsing with empty response body."""
-        import logging
-
         service = GerritService(host="gerrit.example.org")
         service._client = mock_client
 
@@ -972,8 +1207,6 @@ path/to/file2.txt"""
 
     def test_parse_conflict_files_no_marker(self, mock_client, caplog):
         """Test parsing when merge conflict marker is missing."""
-        import logging
-
         service = GerritService(host="gerrit.example.org")
         service._client = mock_client
 
@@ -987,8 +1220,6 @@ path/to/file2.txt"""
 
     def test_parse_conflict_files_marker_but_no_files(self, mock_client, caplog):
         """Test parsing when marker exists but no files follow."""
-        import logging
-
         service = GerritService(host="gerrit.example.org")
         service._client = mock_client
 
