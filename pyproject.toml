@@ -118,6 +118,26 @@ addopts = [
   "--cov-report=html",
 ]
 asyncio_mode = "auto"
+# Fail the suite on an unawaited coroutine rather than accumulating
+# warnings.  These arise when a *synchronous* method is mocked with a
+# blanket ``AsyncMock``, or when an awaited mock returns another mock
+# that production code then treats as a dict.  Both silently diverge
+# from the real client, so a test can pass while exercising nothing.
+#
+# Two filters are needed.  The warning is raised by the garbage
+# collector, so promoting it to an exception does not fail a test on its
+# own --- CPython reports the exception through ``sys.unraisablehook``,
+# which pytest surfaces as PytestUnraisableExceptionWarning.  Only the
+# second filter turns that into a failure.  Verified: with either filter
+# alone a regression still passes.
+#
+# Note the message is a genuine regex here.  The equivalent ``-W`` flag
+# would not work: command-line filters ``re.escape`` the message, so the
+# pattern would only match literally.
+filterwarnings = [
+  "error:coroutine .* was never awaited:RuntimeWarning",
+  "error::pytest.PytestUnraisableExceptionWarning",
+]
 markers = [
   "slow: marks tests as slow (deselected by prek/pre-commit hooks)",
   "integration: marks live GitHub/Gerrit CLI tests; deselected by default and run only with --run-integration or DEPENDAMERGE_RUN_INTEGRATION=1 (and self-skip without credentials)",

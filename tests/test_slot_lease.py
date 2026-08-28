@@ -222,10 +222,15 @@ class TestMergeManagerParksWaits:
     """The auto-merge wait releases the worker's concurrency slot."""
 
     async def test_wait_for_auto_merge_parks_the_slot(self, mocker):
-        from dependamerge.merge_manager import AsyncMergeManager
         from dependamerge.models import PullRequestInfo
+        from tests.conftest import make_merge_manager
 
-        mgr = AsyncMergeManager(
+        # The helper stubs the client's *synchronous* methods as
+        # MagicMock.  A hand-rolled blanket AsyncMock would turn
+        # invalidate_block_reason --- which _wait_for_auto_merge calls
+        # without await in its finally block --- into an unawaited
+        # coroutine.
+        mgr, client = make_merge_manager(
             token="t",
             concurrency=1,
             merge_timeout=30.0,
@@ -265,9 +270,7 @@ class TestMergeManagerParksWaits:
                 "head": {"sha": "abc"},
             }
 
-        client = mocker.AsyncMock()
         client.get = mocker.AsyncMock(side_effect=fake_get)
-        mgr._github_client = client
 
         async with holding_slot(mgr._merge_semaphore):
             assert mgr._merge_semaphore.locked()

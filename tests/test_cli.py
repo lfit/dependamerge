@@ -23,6 +23,7 @@ from dependamerge.error_codes import ExitCode
 from dependamerge.gerrit.models import GerritChangeInfo, GerritComparisonResult
 from dependamerge.models import PullRequestInfo
 from dependamerge.url_parser import ChangeSource, ParsedUrl
+from tests.conftest import make_github_async_mock
 
 
 class TestCLI:
@@ -261,20 +262,11 @@ class TestCLI:
         mock_service_class.return_value = mock_service
 
         # Setup GitHubAsync mock for AsyncMergeManager
-        mock_async = AsyncMock()
+        mock_async = make_github_async_mock()
         mock_async.approve_pull_request = AsyncMock()
         mock_async.merge_pull_request = AsyncMock(return_value=True)
         mock_async.update_branch = AsyncMock()
-        # Synchronous on the real client: a blanket AsyncMock would make
-        # this an unawaited coroutine (see tests/conftest.py).
-        mock_async.clear_block_reasons = Mock()
-
-        # Mock the GitHubAsync class to return our mock instance
-        mock_async_instance = AsyncMock()
-        mock_async_instance.__aenter__ = AsyncMock(return_value=mock_async)
-        mock_async_instance.__aexit__ = AsyncMock(return_value=None)
-        mock_async_instance.clear_block_reasons = Mock()
-        mock_async_class.return_value = mock_async_instance
+        mock_async_class.return_value = mock_async
 
         mock_client.parse_pr_url.return_value = ("owner", "repo", 22)
         mock_client.is_automation_author.return_value = True
@@ -442,19 +434,11 @@ class TestCLI:
         mock_service = Mock()
         mock_service_class.return_value = mock_service
 
-        mock_async = AsyncMock()
+        mock_async = make_github_async_mock()
         mock_async.approve_pull_request = AsyncMock()
         mock_async.merge_pull_request = AsyncMock(return_value=True)
         mock_async.update_branch = AsyncMock()
-        # Synchronous on the real client: a blanket AsyncMock would make
-        # this an unawaited coroutine (see tests/conftest.py).
-        mock_async.clear_block_reasons = Mock()
-
-        mock_async_instance = AsyncMock()
-        mock_async_instance.__aenter__ = AsyncMock(return_value=mock_async)
-        mock_async_instance.__aexit__ = AsyncMock(return_value=None)
-        mock_async_instance.clear_block_reasons = Mock()
-        mock_async_class.return_value = mock_async_instance
+        mock_async_class.return_value = mock_async
 
         mock_client.parse_pr_url.return_value = ("owner", "repo", 22)
         # The point of the test: a human author, not automation.
