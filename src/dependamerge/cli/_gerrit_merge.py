@@ -25,6 +25,7 @@ from ..gerrit import (
     GerritComparisonResult,
     GerritRestError,
     GerritService,
+    GerritServiceError,
 )
 from ..netrc import (
     GerritCredentials,
@@ -272,6 +273,13 @@ def _handle_gerrit_merge(
         raise typer.Exit(1) from None
     except GerritRestError as e:
         console.print(f"❌ Gerrit API error: {e}")
+        raise typer.Exit(1) from None
+    except GerritServiceError as e:
+        # Not a transport failure: the request succeeded but the
+        # response could not be used.  Distinct from the generic
+        # handler below, which would label a diagnosis we made
+        # deliberately as unexpected.
+        console.print(f"❌ Gerrit service error: {e}")
         raise typer.Exit(1) from None
     except Exception as e:
         console.print(f"❌ Error during Gerrit merge operation: {e}")

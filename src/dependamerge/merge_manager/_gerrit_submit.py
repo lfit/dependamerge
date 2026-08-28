@@ -15,7 +15,7 @@ import os
 import re
 from typing import TYPE_CHECKING
 
-from ..gerrit import GerritAuthError, GerritRestError
+from ..gerrit import GerritAuthError, GerritRestError, GerritServiceError
 from ..github2gerrit_detector import (
     GitHub2GerritDetectionResult,
     GitHub2GerritMapping,
@@ -126,7 +126,7 @@ class _GerritSubmitMixin(_GerritSubmitStepsMixin):
                 mapping, pr_info, gerrit_target, credentials
             )
 
-        except (GerritAuthError, GerritRestError) as exc:
+        except (GerritAuthError, GerritRestError, GerritServiceError) as exc:
             self.log.warning(
                 "Gerrit error submitting change for topic %s: %s",
                 mapping.topic,
