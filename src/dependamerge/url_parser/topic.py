@@ -15,6 +15,7 @@ import re
 from urllib.parse import unquote, urlparse
 
 from .models import ChangeSource, ParsedGerritTopicUrl, UrlParseError
+from .shorthand import normalize_target
 
 # aislop-ignore-file ai-slop/hardcoded-url -- This module parses and builds
 # GitHub/Gerrit URLs, so URL literals here are the subject matter, not
@@ -50,9 +51,10 @@ def parse_gerrit_topic_url(url: str) -> ParsedGerritTopicUrl:
     if not original_url:
         raise UrlParseError("URL cannot be empty")
 
-    normalized = original_url
-    if not normalized.startswith(("http://", "https://")):
-        normalized = "https://" + normalized
+    # Expand shorthand, git remote forms, and a missing scheme into an
+    # absolute URL.  Centralised so every parser understands the same
+    # set of abbreviations.
+    normalized = normalize_target(original_url)
 
     try:
         parsed = urlparse(normalized)

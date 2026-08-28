@@ -521,13 +521,33 @@ class TestMergeRepoUrl:
         assert "repository url" in plain.lower() or "Repository URL" in plain
 
     def test_invalid_url_still_rejected(self):
-        """A completely invalid URL should still be rejected."""
+        """A completely invalid URL should still be rejected.
+
+        The input changed with shorthand support: ``not-a-url`` is a
+        well-formed GitHub login and is now understood as an owner, so
+        it no longer demonstrates rejection.  A string that cannot be a
+        login — spaces are not permitted in one — does.
+        """
         result = self.runner.invoke(
             app,
-            ["merge", "not-a-url", "--token", "test_token"],
+            ["merge", "not a url", "--token", "test_token"],
         )
         assert result.exit_code == 1
         assert "❌ Invalid URL:" in result.stdout
+
+    def test_owner_shaped_token_is_treated_as_shorthand(self):
+        """A bare login is an owner-wide shorthand, not an error.
+
+        The counterpart to the test above, pinning the boundary between
+        the two: anything matching the GitHub login grammar is expanded
+        rather than rejected, so this must get past URL parsing and
+        reach the owner-wide path.
+        """
+        result = self.runner.invoke(
+            app,
+            ["merge", "not-a-url", "--token", "test_token", "--dry-run"],
+        )
+        assert "❌ Invalid URL:" not in result.stdout
 
     @patch("dependamerge.cli.GitHubClient")
     @patch("dependamerge.cli.asyncio.run")

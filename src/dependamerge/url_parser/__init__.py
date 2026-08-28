@@ -20,6 +20,12 @@ Gerrit:
 Gerrit topic search (see parse_gerrit_topic_url):
     https://gerrit.example.org/q/topic:some-topic
     https://gerrit.onap.org/r/q/topic:some-topic
+
+Shorthand (see normalize_target):
+    lfreleng-actions                    -> owner-wide
+    acme/widget                         -> repository-wide
+    acme/widget/pull/7                  -> a single pull request
+    git@github.com:acme/widget.git      -> repository-wide
 """
 
 from __future__ import annotations
@@ -42,9 +48,18 @@ from .models import (
     UrlParseError,
 )
 from .repos import parse_org_url, parse_owner_arg, parse_repo_url
+from .shorthand import (
+    DEFAULT_GITHUB_HOST,
+    default_github_host,
+    looks_like_host,
+    looks_like_owner,
+    normalize_target,
+    strip_git_suffix,
+)
 from .topic import parse_gerrit_topic_url
 
 __all__ = [
+    "DEFAULT_GITHUB_HOST",
     "ChangeSource",
     "ParsedGerritTopicUrl",
     "ParsedOrgUrl",
@@ -52,11 +67,16 @@ __all__ = [
     "ParsedUrl",
     "UrlParseError",
     "_host_matches",
+    "default_github_host",
     "derive_api_urls",
     "detect_source",
+    "looks_like_host",
+    "looks_like_owner",
+    "normalize_target",
     "parse_change_url",
     "parse_gerrit_topic_url",
     "parse_org_url",
     "parse_owner_arg",
     "parse_repo_url",
+    "strip_git_suffix",
 ]

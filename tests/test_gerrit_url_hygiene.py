@@ -41,6 +41,20 @@ _DETECTION_ONLY_FILES: set[str] = {
     str(_SRC_ROOT / "url_parser" / "topic.py"),
 }
 
+# Files that *rewrite* a URL the caller supplied — adding a missing
+# scheme, expanding a shorthand, converting a git remote — rather than
+# synthesising a Gerrit endpoint from parts.
+#
+# The distinction that matters to this guard is base-path handling.  A
+# violation is dangerous because it invents a path and so can omit a
+# deployment's ``/infra`` prefix.  Normalisation carries the caller's
+# path through untouched, so there is no path for it to get wrong; the
+# only component it supplies is the scheme.  Anything here that starts
+# composing Gerrit endpoints belongs in GerritUrlBuilder instead.
+_NORMALISATION_FILES: set[str] = {
+    str(_SRC_ROOT / "url_parser" / "shorthand.py"),
+}
+
 # ---------------------------------------------------------------------------
 # Patterns that indicate direct Gerrit URL construction
 # ---------------------------------------------------------------------------
@@ -254,6 +268,8 @@ class TestNoDirectGerritUrlConstruction:
                 continue
             if file_str in _DETECTION_ONLY_FILES:
                 continue
+            if file_str in _NORMALISATION_FILES:
+                continue
 
             violations = _scan_file(
                 py_file, [(_BASE_URL_PATTERN, "Direct Gerrit base URL construction")]
@@ -340,7 +356,12 @@ class TestNoDirectGerritUrlConstruction:
 
         Prevents stale entries hiding violations after file renames.
         """
-        for allowed in _ALLOWED_FILES | _BASE_URL_ALLOWED_FILES | _DETECTION_ONLY_FILES:
+        for allowed in (
+            _ALLOWED_FILES
+            | _BASE_URL_ALLOWED_FILES
+            | _DETECTION_ONLY_FILES
+            | _NORMALISATION_FILES
+        ):
             assert Path(allowed).exists(), (
                 f"Allow-listed file does not exist: {allowed}\n"
                 "Update the allow-list in test_gerrit_url_hygiene.py"

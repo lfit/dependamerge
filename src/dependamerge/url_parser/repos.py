@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from .hosts import _host_matches
 from .models import ChangeSource, ParsedOrgUrl, ParsedRepoUrl, UrlParseError
+from .shorthand import normalize_target
 
 # aislop-ignore-file ai-slop/hardcoded-url -- This module parses and builds
 # GitHub/Gerrit URLs, so URL literals here are the subject matter, not
@@ -44,9 +45,10 @@ def parse_repo_url(url: str) -> ParsedRepoUrl:
     if not url:
         raise UrlParseError("URL cannot be empty")
 
-    # Ensure URL has a scheme
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
+    # Expand shorthand ("owner", "owner/repo"), git remote forms, and a
+    # missing scheme into an absolute URL.  Centralised so every parser
+    # understands the same set of abbreviations.
+    url = normalize_target(url)
 
     try:
         parsed = urlparse(url)
@@ -149,9 +151,10 @@ def parse_org_url(url: str) -> ParsedOrgUrl:
     if not url:
         raise UrlParseError("URL cannot be empty")
 
-    # Ensure URL has a scheme
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
+    # Expand shorthand ("owner", "owner/repo"), git remote forms, and a
+    # missing scheme into an absolute URL.  Centralised so every parser
+    # understands the same set of abbreviations.
+    url = normalize_target(url)
 
     try:
         parsed = urlparse(url)
