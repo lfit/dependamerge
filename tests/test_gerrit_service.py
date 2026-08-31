@@ -8,10 +8,12 @@ finding similar changes, and handling pagination.
 """
 
 import logging
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from dependamerge.gerrit.client import GerritAuthError, GerritRestError
 from dependamerge.gerrit.comparator import GerritChangeComparator
 from dependamerge.gerrit.models import (
     GerritChangeInfo,
@@ -436,6 +438,198 @@ class TestGerritServicePagination:
         assert len(changes) == 50
 
 
+class TestGerritQueryFailureVisibility:
+    """Query failures are distinguishable from empty result sets."""
+
+    def _change(self, number: int) -> dict[str, Any]:
+        return {
+            "_number": number,
+            "change_id": f"I{number:040d}",
+            "project": "proj",
+            "subject": "Test",
+            "branch": "main",
+            "status": "NEW",
+            "owner": {"username": "user"},
+        }
+
+    @patch("dependamerge.gerrit.service.build_client")
+    @patch("dependamerge.gerrit.service.create_url_builder")
+    def test_first_page_failure_raises_rather_than_returning_empty(
+        self, mock_url_builder, mock_build_client, mock_client
+    ):
+        """Test an unreachable Gerrit is not reported as "nothing matched".
+
+        The whole point of the issue: an operator seeing an empty result
+        cannot tell a genuine miss from a server that never answered.
+        """
+        mock_build_client.return_value = mock_client
+        mock_client.get.side_effect = GerritRestError("Server error", 500)
+
+        service = GerritService(host="gerrit.example.org")
+
+        with pytest.raises(GerritRestError):
+            service.get_open_changes()
+
+    @patch("dependamerge.gerrit.service.build_client")
+    @patch("dependamerge.gerrit.service.create_url_builder")
+    def test_auth_failure_keeps_its_specific_type(
+        self, mock_url_builder, mock_build_client, mock_client
+    ):
+        """Test GerritAuthError survives, rather than being flattened.
+
+        Callers branch on it to tell the operator to check their
+        credentials, which a wrapped error would lose.
+        """
+        mock_build_client.return_value = mock_client
+        mock_client.get.side_effect = GerritAuthError("Unauthorized", 401)
+
+        service = GerritService(host="gerrit.example.org")
+
+        with pytest.raises(GerritAuthError):
+            service.get_changes_by_topic("my-topic")
+
+    @patch("dependamerge.gerrit.service.build_client")
+    @patch("dependamerge.gerrit.service.create_url_builder")
+    def test_partial_page_failure_does_not_pass_off_a_subset(
+        self, mock_url_builder, mock_build_client, mock_client
+    ):
+        """Test a mid-pagination failure raises instead of truncating.
+
+        Returning page one silently would let a topic merge run against
+        a subset while reporting success --- worse than stopping.
+        """
+        mock_build_client.return_value = mock_client
+        mock_client.get.side_effect = [
+            [self._change(i) for i in range(100)],
+            GerritRestError("Server error", 500),
+        ]
+
+        service = GerritService(host="gerrit.example.org")
+
+        with pytest.raises(GerritRestError):
+            service.get_open_changes(limit=200)
+
+        assert mock_client.get.call_count == 2
+
+    @patch("dependamerge.gerrit.service.build_client")
+    @patch("dependamerge.gerrit.service.create_url_builder")
+    def test_non_list_payload_raises_rather_than_ending_the_scan(
+        self, mock_url_builder, mock_build_client, mock_client
+    ):
+        """Test an unexpected response shape is not read as end-of-results.
+
+        A changes query answers with a JSON array.  A dict or a bare
+        null used to break the loop, so a successful request with an
+        unusable body surfaced as "nothing matched".
+        """
+        mock_build_client.return_value = mock_client
+        mock_client.get.return_value = {"unexpected": "object"}
+
+        service = GerritService(host="gerrit.example.org")
+
+        with pytest.raises(GerritServiceError, match="rather than a list"):
+            service.get_open_changes()
+
+    @patch("dependamerge.gerrit.service.build_client")
+    @patch("dependamerge.gerrit.service.create_url_builder")
+    def test_empty_list_is_still_a_legitimate_empty_result(
+        self, mock_url_builder, mock_build_client, mock_client
+    ):
+        """Test a genuinely empty page still means "nothing matched".
+
+        The payload check must reject the wrong *type*, not an empty
+        list of the right one.
+        """
+        mock_build_client.return_value = mock_client
+        mock_client.get.return_value = []
+
+        service = GerritService(host="gerrit.example.org")
+
+        assert service.get_open_changes() == []
+
+    @patch("dependamerge.gerrit.service.build_client")
+    @patch("dependamerge.gerrit.service.create_url_builder")
+    def test_wholly_unparsable_page_raises(
+        self, mock_url_builder, mock_build_client, mock_client
+    ):
+        """Test a schema mismatch is not disguised as an empty result.
+
+        Gerrit returning changes none of which parse used to produce a
+        short page, break the loop and surface as "no matches".
+        """
+        mock_build_client.return_value = mock_client
+        mock_client.get.return_value = [{"_number": "not-an-int"}]
+
+        service = GerritService(host="gerrit.example.org")
+
+        with pytest.raises(GerritServiceError, match="none could be parsed"):
+            service.get_open_changes()
+
+    @patch("dependamerge.gerrit.service.build_client")
+    @patch("dependamerge.gerrit.service.create_url_builder")
+    def test_partially_unparsable_page_warns_and_keeps_the_rest(
+        self, mock_url_builder, mock_build_client, mock_client, caplog
+    ):
+        """Test skipped items are reported, not silently dropped.
+
+        One odd change is survivable, so the good ones are returned ---
+        but at warning level, since dropping response data at debug is
+        how a systematic mismatch would go unnoticed.
+        """
+        mock_build_client.return_value = mock_client
+        mock_client.get.return_value = [
+            self._change(1),
+            {"_number": "not-an-int"},
+            self._change(2),
+        ]
+
+        service = GerritService(host="gerrit.example.org")
+        with caplog.at_level(logging.WARNING, logger="dependamerge.gerrit.service"):
+            changes = service.get_open_changes()
+
+        assert [c.number for c in changes] == [1, 2]
+        assert "Skipped 1 unparsable change(s) of 3 returned" in caplog.text
+
+    @patch("dependamerge.gerrit.service.build_client")
+    @patch("dependamerge.gerrit.service.create_url_builder")
+    def test_clean_query_logs_no_skip_warning(
+        self, mock_url_builder, mock_build_client, mock_client, caplog
+    ):
+        """Test the skip warning stays quiet when nothing was skipped."""
+        mock_build_client.return_value = mock_client
+        mock_client.get.return_value = [self._change(1)]
+
+        service = GerritService(host="gerrit.example.org")
+        with caplog.at_level(logging.WARNING, logger="dependamerge.gerrit.service"):
+            service.get_open_changes()
+
+        assert "unparsable" not in caplog.text
+
+    @patch("dependamerge.gerrit.service.build_client")
+    @patch("dependamerge.gerrit.service.create_url_builder")
+    def test_skipped_items_do_not_stall_pagination(
+        self, mock_url_builder, mock_build_client, mock_client
+    ):
+        """Test the offset advances by what the server returned.
+
+        Skipped items still occupy server-side offsets.  Advancing by
+        the *parsed* count re-requested them, and a page shortened by
+        skipping looked like the end of the results.
+        """
+        mock_build_client.return_value = mock_client
+        page1 = [self._change(i) for i in range(99)] + [{"_number": "not-an-int"}]
+        page2 = [self._change(i) for i in range(100, 150)]
+        mock_client.get.side_effect = [page1, page2]
+
+        service = GerritService(host="gerrit.example.org")
+        changes = service.get_open_changes(limit=200)
+
+        # Second page fetched despite the skip, and from the right offset.
+        assert mock_client.get.call_count == 2
+        assert "S=100" in mock_client.get.call_args_list[1][0][0]
+        assert len(changes) == 149
+
+
 class TestGerritServiceGetChangesByTopic:
     """Tests for get_changes_by_topic method."""
 
@@ -780,16 +974,37 @@ class TestGerritServiceGetProjects:
     @patch("dependamerge.gerrit.service.build_client")
     @patch("dependamerge.gerrit.service.create_url_builder")
     def test_get_projects_error(self, mock_url_builder, mock_build_client, mock_client):
-        """Test project fetch with error returns empty list."""
-        from dependamerge.gerrit.client import GerritRestError
+        """Test a failed project fetch raises rather than reporting none.
 
+        Returning an empty list told the caller the server has no
+        projects, which is a different claim from "the server did not
+        answer".
+        """
         mock_build_client.return_value = mock_client
         mock_client.get.side_effect = GerritRestError("Error", 500)
 
         service = GerritService(host="gerrit.example.org")
-        projects = service.get_projects()
 
-        assert projects == []
+        with pytest.raises(GerritRestError):
+            service.get_projects()
+
+    @patch("dependamerge.gerrit.service.build_client")
+    @patch("dependamerge.gerrit.service.create_url_builder")
+    def test_get_projects_rejects_non_map_payload(
+        self, mock_url_builder, mock_build_client, mock_client
+    ):
+        """Test an unexpected projects payload raises.
+
+        A successful response of the wrong shape used to fall through
+        to an empty list --- a schema mismatch reported as an absence.
+        """
+        mock_build_client.return_value = mock_client
+        mock_client.get.return_value = ["not", "a", "map"]
+
+        service = GerritService(host="gerrit.example.org")
+
+        with pytest.raises(GerritServiceError, match="rather than a map"):
+            service.get_projects()
 
 
 class TestGerritServiceFindSimilarChanges:

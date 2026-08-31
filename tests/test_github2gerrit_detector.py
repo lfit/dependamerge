@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from typer.testing import CliRunner
 
+from dependamerge.gerrit import GerritRestError
 from dependamerge.gerrit.service import GerritService
 from dependamerge.github2gerrit_detector import (
     _END_MARKER,
@@ -1491,6 +1492,61 @@ class TestMergeManagerSubmitGerritChange:
         # False by way of a later exception --- precisely how this test
         # used to pass against a reverted fix.
         mock_submit_mgr_factory.assert_not_called()
+
+    def test_submit_query_failure_is_not_reported_as_no_match(self, caplog):
+        # Regression (#466): a Gerrit that never answered must not be
+        # reported as "no open change found".  The lookup used to
+        # swallow REST errors and return an empty result, so an outage,
+        # a 500 or a rejected credential all produced a message
+        # asserting something about the change that was never
+        # established.
+        mgr = self._make_mgr_with_no_gitreview()
+
+        mapping = GitHub2GerritMapping(
+            pr_url="https://github.com/lfit/releng-test/pull/1",
+            mode="squash",
+            topic="GH-releng-test-1",
+            change_ids=("I6a9987bd1b1cf1e4975dd5da2fb26b6b35ee0048",),
+        )
+        pr = _make_pr_info()
+
+        mock_creds = MagicMock()
+        mock_creds.is_valid = True
+        mock_creds.username = "user"
+        mock_creds.password = "pass"
+
+        # A real GerritService over a failing REST client, so the error
+        # travels the actual path --- _query_changes, then the public
+        # lookup, then the submit handler.  Mocking the lookup directly
+        # would only re-test the handler and would pass even with the
+        # swallow restored.
+        rest_client = MagicMock()
+        rest_client.get.side_effect = GerritRestError("Service Unavailable", 503)
+        with (
+            patch("dependamerge.gerrit.service.build_client", return_value=rest_client),
+            patch("dependamerge.gerrit.service.create_url_builder"),
+        ):
+            real_service = GerritService(host="gerrit.example.org")
+
+        with (
+            patch(
+                "dependamerge.merge_manager.resolve_gerrit_credentials",
+                return_value=mock_creds,
+            ),
+            patch(
+                "dependamerge.merge_manager.create_gerrit_service",
+                return_value=real_service,
+            ),
+        ):
+            with caplog.at_level(logging.WARNING, logger="dependamerge.merge_manager"):
+                result = asyncio.run(
+                    mgr._submit_gerrit_change(mapping, pr, "lfit", "releng-test")
+                )
+
+        assert result is False
+        assert "No open Gerrit change found" not in caplog.text
+        assert "Gerrit error submitting change" in caplog.text
+        assert "Service Unavailable" in caplog.text
 
     def test_submit_gerrit_rest_error(self):
         from dependamerge.gerrit import GerritRestError

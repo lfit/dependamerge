@@ -33,9 +33,10 @@ import re
 
 from dependamerge.gerrit.client import (
     GerritRestClient,
-    GerritRestError,
 )
 from dependamerge.gerrit.models import GerritChangeInfo
+
+from ._service_errors import GerritServiceError
 
 log = logging.getLogger("dependamerge.gerrit.service")
 
@@ -104,7 +105,14 @@ class _GerritQueryMixin:
             options: Optional list of query options.
 
         Returns:
-            List of GerritChangeInfo for matching open changes.
+            List of GerritChangeInfo for matching open changes.  An
+            empty list means nothing matched; a query that failed
+            raises instead.
+
+        Raises:
+            GerritRestError: If the query cannot be run --- including
+                ``GerritAuthError`` when the credentials are rejected.
+            GerritServiceError: If Gerrit's response cannot be parsed.
         """
         if options is None:
             options = DEFAULT_LIST_OPTIONS
@@ -136,7 +144,14 @@ class _GerritQueryMixin:
             options: Optional list of query options.
 
         Returns:
-            List of GerritChangeInfo for all open changes.
+            List of GerritChangeInfo for all open changes.  An empty
+            list means nothing matched; a query that failed raises
+            instead.
+
+        Raises:
+            GerritRestError: If the query cannot be run --- including
+                ``GerritAuthError`` when the credentials are rejected.
+            GerritServiceError: If Gerrit's response cannot be parsed.
         """
         return self.get_open_changes(limit=limit, options=options)
 
@@ -157,7 +172,14 @@ class _GerritQueryMixin:
             options: Optional list of query options.
 
         Returns:
-            List of GerritChangeInfo for matching changes.
+            List of GerritChangeInfo for matching changes.  An empty
+            list means nothing matched; a query that failed raises
+            instead.
+
+        Raises:
+            GerritRestError: If the query cannot be run --- including
+                ``GerritAuthError`` when the credentials are rejected.
+            GerritServiceError: If Gerrit's response cannot be parsed.
         """
         if options is None:
             options = DEFAULT_LIST_OPTIONS
@@ -205,15 +227,14 @@ class _GerritQueryMixin:
 
         Returns:
             The first matching open change, or None when none match.
-
-            None also covers a failed query: ``_query_changes`` logs and
-            swallows REST errors, so an unreachable Gerrit is
-            indistinguishable from a genuine miss here.  Pre-existing,
-            and tracked separately rather than changed under an
-            encapsulation fix.
+            None means exactly that: a query that failed raises rather
+            than reporting an absence it never established.
 
         Raises:
             ValueError: If ``change_id`` is not a well-formed Change-Id.
+            GerritRestError: If the query cannot be run --- including
+                ``GerritAuthError`` when the credentials are rejected.
+            GerritServiceError: If Gerrit's response cannot be parsed.
         """
         if not _CHANGE_ID_RE.match(change_id):
             raise ValueError(
@@ -263,22 +284,27 @@ class _GerritQueryMixin:
             limit: Maximum number of projects to return.
 
         Returns:
-            List of project names.
+            List of project names.  An empty list means the server has
+            none; a request that failed raises instead.
+
+        Raises:
+            GerritRestError: If the request cannot be run --- including
+                ``GerritAuthError`` when the credentials are rejected.
+            GerritServiceError: If Gerrit's response cannot be parsed.
         """
         log.debug("Fetching project list (limit=%d)", limit)
 
-        try:
-            endpoint = f"/projects/?n={limit}"
-            data = self._client.get(endpoint)
+        endpoint = f"/projects/?n={limit}"
+        data = self._client.get(endpoint)
 
-            # Gerrit returns a dict with project names as keys
-            if isinstance(data, dict):
-                return sorted(data.keys())
-            return []
+        # Gerrit answers with a map of project name to detail.
+        if not isinstance(data, dict):
+            raise GerritServiceError(
+                f"Gerrit returned {type(data).__name__} rather than a map "
+                "of projects; the response schema may have changed"
+            )
 
-        except GerritRestError as exc:
-            log.warning("Failed to fetch projects: %s", exc)
-            return []
+        return sorted(data.keys())
 
     def _query_changes(
         self,
@@ -287,8 +313,25 @@ class _GerritQueryMixin:
         offset: int,
         options: list[str],
     ) -> list[GerritChangeInfo]:
-        """Execute a change query with pagination."""
+        """Execute a change query with pagination.
+
+        Raises rather than degrading to a short or empty list.  A merge
+        tool that treats "the query failed" as "nothing matched" will
+        cheerfully report success having done nothing, or merge a subset
+        of a topic believing it merged the whole; both are worse than
+        stopping.
+
+        Raises:
+            GerritRestError: If a page cannot be fetched.  Propagated
+                rather than wrapped, because the callers already
+                distinguish it --- and its ``GerritAuthError`` subclass
+                --- from other failures.
+            GerritServiceError: If a page contains changes but none of
+                them parse, which indicates a schema mismatch rather
+                than an absence of results.
+        """
         all_changes: list[GerritChangeInfo] = []
+        skipped = 0
         page_size = min(limit, 100)
         current_offset = offset
 
@@ -307,20 +350,26 @@ class _GerritQueryMixin:
             endpoint = "/changes/?" + "&".join(params)
             log.debug("Querying changes: %s", endpoint)
 
-            try:
-                data = self._client.get(endpoint)
-            except GerritRestError as exc:
-                log.warning(
-                    "Failed to query changes (offset=%d): %s",
-                    current_offset,
-                    exc,
-                )
-                break
+            data = self._client.get(endpoint)
 
-            if not data or not isinstance(data, list):
+            if not isinstance(data, list):
+                # A changes query answers with a JSON array.  Anything
+                # else --- a dict, a bare null --- is the request
+                # succeeding and the response being unusable, which is
+                # the same schema mismatch handled below and must not
+                # masquerade as the end of the results.
+                raise GerritServiceError(
+                    f"Gerrit returned {type(data).__name__} rather than a "
+                    f"list of changes for query {query!r}; the response "
+                    "schema may have changed"
+                )
+
+            if not data:
+                # A genuinely empty page: no more results.
                 break
 
             page_changes = []
+            page_skipped = 0
             for item in data:
                 try:
                     change = GerritChangeInfo.from_api_response(
@@ -328,15 +377,40 @@ class _GerritQueryMixin:
                     )
                     page_changes.append(change)
                 except Exception as exc:
+                    page_skipped += 1
                     log.debug("Skipping malformed change: %s", exc)
                     continue
 
+            if page_skipped and not page_changes:
+                # Gerrit sent changes and not one of them parsed.  Left
+                # to fall through, this page would break the loop and
+                # surface as an empty result --- a schema mismatch
+                # wearing the costume of "no matches".
+                raise GerritServiceError(
+                    f"Gerrit returned {page_skipped} change(s) for query "
+                    f"{query!r} but none could be parsed; the response "
+                    "schema may have changed"
+                )
+
+            skipped += page_skipped
             all_changes.extend(page_changes)
 
-            # Check if we've reached the end
-            if len(page_changes) < current_limit:
+            # Paginate on what the *server* returned, not on what parsed.
+            # Skipped items still occupy offsets, so advancing by the
+            # parsed count would re-request them, and treating a
+            # short-after-skipping page as the end would stop early.
+            if len(data) < current_limit:
                 break
 
-            current_offset += len(page_changes)
+            current_offset += len(data)
+
+        if skipped:
+            log.warning(
+                "Skipped %d unparsable change(s) of %d returned for query "
+                "%r; results are incomplete",
+                skipped,
+                skipped + len(all_changes),
+                query,
+            )
 
         return all_changes[:limit]
