@@ -42,11 +42,14 @@ DEFAULT_GITHUB_HOST = "github.com"
 _HOST_ENV_VARS = ("DEPENDAMERGE_GITHUB_HOST", "GH_HOST")
 
 # scp-style remote: [user@]host:path, with no scheme and no leading
-# slash on the path.  Distinguished from a bare host:port by requiring
-# the part after the colon to not be purely numeric.
+# slash on the path.  Whether a bare ``host:something`` is scp or
+# ``host:port`` is decided in code --- see :func:`_is_scp_remote`.
 _SCP_REMOTE_RE = re.compile(
-    r"\A(?:(?P<user>[^@/]+)@)?(?P<host>[^@/:]+):(?P<path>(?!\d+(?:/|\Z))[^\s]+)\Z"
+    r"\A(?:(?P<user>[^@/]+)@)?(?P<host>[^@/:]+):(?P<path>[^\s]+)\Z"
 )
+
+# A path that is purely a number, i.e. indistinguishable from a port.
+_NUMERIC_PATH_RE = re.compile(r"\A\d+(?:/|\Z)")
 
 # A path segment that names a host rather than an owner.
 _PORT_SUFFIX_RE = re.compile(r":\d+\Z")
@@ -132,8 +135,31 @@ def enterprise_hosts() -> tuple[str, ...]:
 
 
 def _clean_host(value: str) -> str:
-    """Reduce a configured value to a bare lowercase hostname."""
-    return _strip_scheme(value.strip()).strip("/").split("/", 1)[0].lower()
+    """Reduce a configured value to a bare lowercase hostname.
+
+    Raises rather than trimming a port.  Ports are unsupported end to
+    end --- ``urlparse`` drops them before the API base URLs are built
+    --- so a configured ``host:8443`` would otherwise expand shorthand
+    into a URL its own parser then rejects, or quietly address port
+    443.
+
+    Raises:
+        UrlParseError: If the configured value names a port.
+    """
+    from .models import UrlParseError
+
+    host = _strip_scheme(value.strip()).strip("/").split("/", 1)[0].lower()
+    if not host:
+        return ""
+    name, _, port = host.rpartition(":")
+    if name and port:
+        raise UrlParseError(
+            f"Configured GitHub host {host!r} names a port, which is not "
+            "supported: the port cannot be carried through to the API "
+            f"base URL, so requests would go to {name} on the default "
+            "port instead. Configure the host without a port."
+        )
+    return host
 
 
 def default_github_host() -> str:
@@ -252,6 +278,20 @@ def strip_git_suffix(path: str) -> str:
     return path
 
 
+def _is_scp_remote(match: re.Match[str]) -> bool:
+    """Decide whether an ambiguous ``host:tail`` is an scp remote.
+
+    ``git@github.com:29418/widget.git`` is a clone URL for an owner
+    named ``29418``; ``ghe.example.com:8443/acme`` is a host and a
+    port.  Userinfo settles it --- a port never follows one --- and
+    without userinfo a purely numeric leading segment is read as a
+    port, which is the commoner intent.
+    """
+    if match.group("user"):
+        return True
+    return not _NUMERIC_PATH_RE.match(match.group("path"))
+
+
 def normalize_target(value: str, *, default_host: str | None = None) -> str:
     """Expand an abbreviated or git-remote target into an absolute URL.
 
@@ -300,7 +340,15 @@ def normalize_target(value: str, *, default_host: str | None = None) -> str:
     if scheme_match:
         scheme = scheme_match.group(1).lower()
         if scheme in ("http", "https"):
-            return _rebuild(value, strip_git=True)
+            # Credentials are stripped even here, where the scheme and
+            # port are kept.  A clone remote may embed a token, and the
+            # normalised URL is printed back to the operator when a
+            # target is inferred from a checkout --- which would put
+            # that token in the terminal and in any captured log.
+            return _rebuild(
+                f"{scheme}://"
+                + _strip_userinfo(scheme_match.group(2), strip_port=False)
+            )
         remainder = scheme_match.group(2)
         # A non-web scheme carries a transport port --- Gerrit's 29418,
         # for instance --- which has no bearing on the web URL, so it
@@ -309,7 +357,7 @@ def normalize_target(value: str, *, default_host: str | None = None) -> str:
 
     # scp-style remote, which has no scheme at all.
     scp = _SCP_REMOTE_RE.match(value)
-    if scp:
+    if scp and _is_scp_remote(scp):
         return _rebuild(f"https://{scp.group('host')}/{scp.group('path').lstrip('/')}")
 
     # Schemeless.  Whether the first segment is a host or an owner is

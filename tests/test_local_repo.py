@@ -187,6 +187,17 @@ class TestDetectLocalTarget:
         assert target.is_gerrit
         assert target.gitreview is None
 
+    def test_scp_path_beginning_with_the_gerrit_port_is_not_gerrit(self, repo):
+        # An scp remote puts the *path* after the colon, so an owner
+        # named 29418 looked like a Gerrit server to a substring test.
+        _git(repo, "remote", "add", "origin", "git@github.com:29418/widget.git")
+
+        target = detect_local_target(repo)
+
+        assert target is not None
+        assert target.source == ChangeSource.GITHUB
+        assert target.url == "https://github.com/29418/widget"
+
     def test_gerrit_hostname_is_detected_without_port(self, repo):
         _git(repo, "remote", "add", "origin", "https://gerrit.example.org/releng/tool")
 

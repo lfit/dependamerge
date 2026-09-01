@@ -23,6 +23,7 @@ credential somewhere.  Host *authorisation* stays in
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -155,11 +156,20 @@ def _read_gitreview(root: Path) -> GitReviewInfo | None:
 
 def _looks_like_gerrit_remote(url: str) -> bool:
     """Report whether a remote URL is a Gerrit one."""
-    lowered = url.strip().lower()
-    # The port is definitive: Gerrit's SSH daemon owns 29418.
-    if f":{_GERRIT_SSH_PORT}" in lowered:
-        return True
-    normalized = normalize_target(url)
+    raw = url.strip()
+    # The port is definitive: Gerrit's SSH daemon owns 29418.  It has to
+    # come from the *authority*, though.  An scp-style remote puts the
+    # path after the colon, so a substring test would read
+    # ``git@github.com:29418/widget.git`` --- an owner named 29418 ---
+    # as a Gerrit server.
+    scheme_match = re.match(r"\A[A-Za-z][A-Za-z0-9+.-]*://([^/]+)", raw)
+    if scheme_match:
+        authority = scheme_match.group(1).rsplit("@", 1)[-1]
+        _, _, port = authority.rpartition(":")
+        if port == _GERRIT_SSH_PORT:
+            return True
+
+    normalized = normalize_target(raw)
     host = normalized.split("://", 1)[-1].split("/", 1)[0]
     return host_suggests_gerrit(host)
 

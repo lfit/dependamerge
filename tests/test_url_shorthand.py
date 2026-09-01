@@ -23,6 +23,7 @@ from dependamerge.url_parser.models import UrlParseError
 from dependamerge.url_parser.shorthand import (
     DEFAULT_GITHUB_HOST,
     default_github_host,
+    enterprise_hosts,
     looks_like_host,
     looks_like_owner,
     normalize_target,
@@ -102,6 +103,84 @@ class TestStripGitSuffix:
 
     def test_bare_dot_git_is_not_a_suffix(self):
         assert strip_git_suffix("/.git") == "/.git"
+
+
+class TestCredentialsAreNotCarried:
+    """Embedded credentials never survive normalisation.
+
+    A clone remote may carry a token, and a target inferred from a
+    checkout is printed back to the operator --- so anything left in
+    the URL lands in the terminal and in any captured log.
+    """
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "https://someuser:ghp_SECRETTOKEN@github.com/acme/widget.git",
+            "http://someuser:ghp_SECRETTOKEN@github.com/acme/widget",
+            "ssh://someuser:ghp_SECRETTOKEN@github.com/acme/widget.git",
+            "git@github.com:acme/widget.git",
+        ],
+    )
+    def test_no_userinfo_survives(self, raw):
+        result = normalize_target(raw)
+        assert "@" not in result
+        assert "ghp_SECRETTOKEN" not in result
+
+    def test_the_rest_of_the_url_is_untouched(self):
+        assert (
+            normalize_target("https://u:p@github.com/acme/widget.git")
+            == "https://github.com/acme/widget"
+        )
+
+    def test_scheme_and_port_survive_credential_stripping(self):
+        # Only the credentials go: a web URL keeps its scheme and port.
+        assert (
+            normalize_target("http://u:p@ghe.example.com:8443/acme/widget")
+            == "http://ghe.example.com:8443/acme/widget"
+        )
+
+
+class TestConfiguredHostWithAPort:
+    """A configured host naming a port is a configuration error.
+
+    Ports are unsupported end to end, so silently trimming one would
+    address port 443 on a server the operator did not name, and keeping
+    it made shorthand expand into a URL its own parser rejects.
+    """
+
+    @pytest.mark.parametrize(
+        "variable",
+        ["DEPENDAMERGE_GITHUB_HOST", "GH_HOST"],
+    )
+    def test_ported_default_is_refused(self, monkeypatch, variable):
+        for name in (
+            "DEPENDAMERGE_GITHUB_HOST",
+            "GH_HOST",
+            "DEPENDAMERGE_GITHUB_HOSTS",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv(variable, "ghe.example.com:8443")
+        with pytest.raises(UrlParseError, match="names a port"):
+            default_github_host()
+
+    def test_ported_declaration_is_refused(self, monkeypatch):
+        # DEPENDAMERGE_GITHUB_HOSTS only declares; it never sets the
+        # default, so it is enterprise_hosts() that must reject it.
+        for name in (
+            "DEPENDAMERGE_GITHUB_HOST",
+            "GH_HOST",
+            "DEPENDAMERGE_GITHUB_HOSTS",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("DEPENDAMERGE_GITHUB_HOSTS", "ghe.example.com:8443")
+        with pytest.raises(UrlParseError, match="names a port"):
+            enterprise_hosts()
+
+    def test_portless_configuration_is_fine(self, monkeypatch):
+        monkeypatch.delenv("DEPENDAMERGE_GITHUB_HOST", raising=False)
+        monkeypatch.setenv("GH_HOST", "ghe.example.com")
+        assert default_github_host() == "ghe.example.com"
 
 
 class TestNormalizeTarget:
