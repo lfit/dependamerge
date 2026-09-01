@@ -12,6 +12,8 @@ and the OAuth scope lookup that backs the workflow-scope check.
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 from ._base import _GitHubAsyncBase
 from ._errors import PermissionError
 
@@ -60,21 +62,52 @@ OPERATION_PERMISSIONS = {
 }
 
 
-def _unauthorized_permission_error(operation: str) -> PermissionError:
+def web_host_for(api_url: str) -> str:
+    """Return the web host whose settings pages govern an API endpoint.
+
+    Token guidance points at settings pages and at ``gh auth refresh``.
+    Both are per-installation, so an Enterprise operator told to visit
+    github.com is being sent to a site that knows nothing about their
+    credentials.
+
+    Args:
+        api_url: The REST base URL the client addresses.
+
+    Returns:
+        The hostname to build settings URLs from.
+    """
+    netloc = urlparse(api_url or "").netloc.lower()
+    if not netloc:
+        return "github.com"
+    # Dotcom splits its API onto api.github.com; everywhere else the
+    # API and the web UI share a host.
+    if netloc == "api.github.com":
+        return "github.com"
+    return netloc
+
+
+def _unauthorized_permission_error(
+    operation: str, host: str = "github.com"
+) -> PermissionError:
     """Build the 401 (expired/invalid token) permission error."""
     return PermissionError(
         operation=operation,
         message="Token authentication failed - token may be expired or invalid",
         token_type_guidance={
-            "classic": "Regenerate your token at: https://github.com/settings/tokens",
-            "fine_grained": "Check token expiration at: https://github.com/settings/personal-access-tokens",
-            "fix": "Run: gh auth refresh -h github.com",
+            "classic": f"Regenerate your token at: https://{host}/settings/tokens",
+            "fine_grained": f"Check token expiration at: https://{host}/settings/personal-access-tokens",
+            "fix": f"Run: gh auth refresh -h {host}",
         },
     )
 
 
 def _forbidden_permission_error(
-    error: Exception, error_str: str, operation: str, owner: str, repo: str
+    error: Exception,
+    error_str: str,
+    operation: str,
+    owner: str,
+    repo: str,
+    host: str = "github.com",
 ) -> PermissionError:
     """Classify a 403 (forbidden) failure into a permission error."""
     # Try to get more detailed error info from response
@@ -105,7 +138,7 @@ def _forbidden_permission_error(
             token_type_guidance={
                 "classic": f"Add scope: {perms.get('classic', 'workflow')}",
                 "fine_grained": f"Enable: {perms.get('fine_grained', 'Workflows: Read and write')}",
-                "fix": "Run: gh auth refresh -h github.com -s workflow",
+                "fix": f"Run: gh auth refresh -h {host} -s workflow",
             },
         )
 
@@ -116,7 +149,7 @@ def _forbidden_permission_error(
             message=f"Repository {owner}/{repo} is not accessible with this token",
             token_type_guidance={
                 "classic": "Token should have 'repo' scope for private repositories, or 'public_repo' for public repositories",
-                "fine_grained": f"Add {owner}/{repo} to the token's repository access list at: https://github.com/settings/tokens",
+                "fine_grained": f"Add {owner}/{repo} to the token's repository access list at: https://{host}/settings/tokens",
                 "fix": f"Edit your fine-grained token and add '{owner}/{repo}' to repository access",
             },
         )
@@ -131,7 +164,7 @@ def _forbidden_permission_error(
             token_type_guidance={
                 "classic": f"Required scope: {perms.get('classic', 'repo')}",
                 "fine_grained": f"Required permission: {perms.get('fine_grained', 'unknown')}",
-                "fix": "Update your token permissions at: https://github.com/settings/tokens",
+                "fix": f"Update your token permissions at: https://{host}/settings/tokens",
             },
         )
 
@@ -142,7 +175,7 @@ def _forbidden_permission_error(
         token_type_guidance={
             "classic": "Ensure token has 'repo' scope for full repository access",
             "fine_grained": "Check that token has appropriate permissions and repository access",
-            "fix": "Review and update token permissions at: https://github.com/settings/tokens",
+            "fix": f"Review and update token permissions at: https://{host}/settings/tokens",
         },
     )
 
@@ -192,14 +225,20 @@ class _PermissionsMixin(_GitHubAsyncBase):
             PermissionError if this is a permission issue, None otherwise
         """
         error_str = str(error)
+        # Guidance points at settings pages and ``gh auth refresh``, both
+        # of which are per-installation.  Derive them from the endpoint
+        # this client actually addresses.
+        host = web_host_for(self.api_url)
 
         # Check for 401 (unauthorized/expired token)
         if "401" in error_str or "Unauthorized" in error_str:
-            return _unauthorized_permission_error(operation)
+            return _unauthorized_permission_error(operation, host)
 
         # Check for 403 (forbidden/permission denied)
         if "403" in error_str or "Forbidden" in error_str:
-            return _forbidden_permission_error(error, error_str, operation, owner, repo)
+            return _forbidden_permission_error(
+                error, error_str, operation, owner, repo, host
+            )
 
         # Check for 422 (unprocessable entity - often approval restrictions)
         if "422" in error_str and operation == "approve":

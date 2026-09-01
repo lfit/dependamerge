@@ -21,11 +21,13 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from ..url_parser import (
+    UrlParseError,
     _host_matches,
     default_github_host,
     derive_api_urls,
     is_supported_github_host,
     normalize_target,
+    reject_port_bearing_host,
 )
 from .actions import _GitHubActionMixin
 from .queries import _GitHubQueryMixin
@@ -96,6 +98,15 @@ class GitHubClient(_GitHubQueryMixin, _GitHubActionMixin, _GitHubStatusMixin):
         # SECURITY: Use urlparse for host extraction, not substring checks.
         # See CodeQL rule py/incomplete-url-substring-sanitization.
         parsed = urlparse(normalize_target(url, default_host=self.host))
+        # Same reasoning as the repository and owner parsers: a port
+        # cannot survive into the API base URL, so accepting one would
+        # send the token to the default port of a server the operator
+        # did not name.  A malformed port is refused for the same
+        # reason it is there --- it resolves to a bare hostname.
+        try:
+            reject_port_bearing_host(parsed.netloc.lower(), "Pull request")
+        except UrlParseError as exc:
+            raise ValueError(str(exc)) from exc
         host = (parsed.hostname or "").lower()
         if not is_supported_github_host(host):
             raise ValueError(f"Invalid GitHub PR URL: {url}")

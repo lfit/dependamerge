@@ -190,6 +190,23 @@ class TestNormalizeTarget:
         )
         assert parsed.topic == "release.git"
 
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "git@github.com:q/widget.git",
+            "https://github.com/q/widget.git",
+        ],
+    )
+    def test_owner_named_q_still_gets_clone_handling(self, raw):
+        # ``q`` is a legal GitHub login, so treating any ``q`` segment
+        # as a Gerrit search left the suffix on a perfectly ordinary
+        # clone URL.  The colon in the final segment is the real signal.
+        assert normalize_target(raw) == "https://github.com/q/widget"
+
+    def test_encoded_colon_also_marks_a_query_value(self):
+        url = "https://gerrit.example.org/q/topic%3Arelease.git"
+        assert normalize_target(url) == url
+
     @pytest.mark.parametrize("raw", ["", "   "])
     def test_empty_input_passes_through(self, raw):
         # Left empty so callers keep raising their own "URL cannot be

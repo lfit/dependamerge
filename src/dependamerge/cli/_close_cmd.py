@@ -32,7 +32,10 @@ from ..github_async import (
     SecondaryRateLimitError,
 )
 from ..progress_tracker import MergeProgressTracker
-from ..url_parser import normalize_target
+from ..url_parser import (
+    normalize_target,
+    set_github_host,  # noqa: F401
+)
 from ._app import app, console
 from ._close import (
     _CloseContext,
@@ -60,6 +63,15 @@ def close(
     ),
     token: str | None = typer.Option(
         None, "--token", help="GitHub token (or set GITHUB_TOKEN env var)"
+    ),
+    github_host: str | None = typer.Option(
+        None,
+        "--github-host",
+        help=(
+            "GitHub host to address, e.g. a GitHub Enterprise Server "
+            "install. Takes priority over DEPENDAMERGE_GITHUB_HOST and "
+            "GH_HOST, and declares the host as permitted."
+        ),
     ),
     override: str | None = typer.Option(
         None, "--override", help="SHA hash to override non-automation PR restriction"
@@ -101,6 +113,11 @@ def close(
 
     For user generated bulk PRs, use the --override flag with SHA hash.
     """
+    # Applied before anything parses a target: the flag sets both
+    # the host a shorthand resolves against and the set of hosts
+    # permitted at all.
+    set_github_host(github_host)
+
     progress_tracker = None
 
     try:

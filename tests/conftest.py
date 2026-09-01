@@ -86,6 +86,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from dependamerge.merge_manager import AsyncMergeManager
+from dependamerge.url_parser import set_github_host
 
 _RUN_INTEGRATION_ENV = "DEPENDAMERGE_RUN_INTEGRATION"
 
@@ -133,6 +134,20 @@ def pytest_collection_modifyitems(
     for item in items:
         if "integration" in item.keywords:
             item.add_marker(skip_integration)
+
+
+@pytest.fixture(autouse=True)
+def _reset_github_host_override():
+    """Clear the ``--github-host`` override around every test.
+
+    The override is process-wide, because it is process-wide
+    configuration.  That makes it exactly the kind of state that leaks
+    between tests and produces order-dependent failures, so it is reset
+    on both sides rather than trusting each test to tidy up.
+    """
+    set_github_host(None)
+    yield
+    set_github_host(None)
 
 
 def make_merge_manager(**overrides: Any) -> tuple[AsyncMergeManager, AsyncMock]:

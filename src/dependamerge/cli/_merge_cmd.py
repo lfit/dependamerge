@@ -19,6 +19,7 @@ import typer
 from ..merge_manager import (
     DEFAULT_MERGE_TIMEOUT,
 )
+from ..url_parser import set_github_host
 from ._app import DEFAULT_MAX_WAIT, app
 from ._context import _MergeContext
 from ._merge_dispatch import (
@@ -59,6 +60,15 @@ def merge(
     ),
     token: str | None = typer.Option(
         None, "--token", help="GitHub token (or set GITHUB_TOKEN env var)"
+    ),
+    github_host: str | None = typer.Option(
+        None,
+        "--github-host",
+        help=(
+            "GitHub host to address, e.g. a GitHub Enterprise Server "
+            "install. Takes priority over DEPENDAMERGE_GITHUB_HOST and "
+            "GH_HOST, and declares the host as permitted."
+        ),
     ),
     override: str | None = typer.Option(
         None,
@@ -293,6 +303,11 @@ def merge(
     .netrc search order: ./netrc, ~/.netrc, ~/_netrc (Windows)
     Use --netrc-file to specify an explicit path.
     """
+    # Applied before anything parses a target: the flag sets both
+    # the host a shorthand resolves against and the set of hosts
+    # permitted at all.
+    set_github_host(github_host)
+
     github2gerrit_mode = _validate_merge_inputs(
         submit_gerrit_changes,
         skip_gerrit_changes,

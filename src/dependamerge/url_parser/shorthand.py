@@ -58,6 +58,45 @@ _PORT_SUFFIX_RE = re.compile(r":\d+\Z")
 # expanded into a request for a repository that cannot exist.
 _OWNER_RE = re.compile(r"\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\Z")
 
+#: Host named by ``--github-host`` on the command line, if any.
+#:
+#: Process-wide because it is process-wide configuration: the flag is a
+#: higher-priority source of the same setting the environment variables
+#: provide, and the parsers that consult it are pure functions reached
+#: long before any per-run context object exists.  Set once at command
+#: entry via :func:`set_github_host`.
+_HOST_OVERRIDE: str | None = None
+
+
+def set_github_host(host: str | None) -> None:
+    """Record the host named by ``--github-host``.
+
+    Takes priority over ``DEPENDAMERGE_GITHUB_HOST`` and ``GH_HOST``
+    for both purposes those serve: the default a bare shorthand
+    resolves against, and the set of hosts permitted at all.  Naming a
+    host on the command line is at least as deliberate as exporting it.
+
+    Anything that is not a string is treated as absent.  This tolerates
+    direct Python calls to the commands (as the tests make), where
+    Typer's ``OptionInfo`` default object arrives unresolved --- the
+    same allowance ``_normalise_topic`` and ``_validate_max_wait``
+    make.
+
+    Args:
+        host: The hostname, or None to clear a previous value.
+    """
+    global _HOST_OVERRIDE
+    if not isinstance(host, str):
+        _HOST_OVERRIDE = None
+        return
+    cleaned = _clean_host(host)
+    _HOST_OVERRIDE = cleaned or None
+
+
+def github_host_override() -> str | None:
+    """Return the host named by ``--github-host``, if any."""
+    return _HOST_OVERRIDE
+
 
 def enterprise_hosts() -> tuple[str, ...]:
     """Return the GitHub Enterprise hosts the operator has declared.
@@ -68,8 +107,9 @@ def enterprise_hosts() -> tuple[str, ...]:
     mistyped link points, so a host has to be declared before it is
     used.
 
-    Declared by ``DEPENDAMERGE_GITHUB_HOSTS`` (comma-separated), and by
-    the single-host ``DEPENDAMERGE_GITHUB_HOST`` / ``GH_HOST`` variables
+    Declared by ``--github-host`` on the command line, by
+    ``DEPENDAMERGE_GITHUB_HOSTS`` (comma-separated), and by the
+    single-host ``DEPENDAMERGE_GITHUB_HOST`` / ``GH_HOST`` variables
     that also set the default for shorthand --- naming a host as your
     default is a clear enough statement that you trust it.
 
@@ -77,6 +117,8 @@ def enterprise_hosts() -> tuple[str, ...]:
         A tuple of lowercased hostnames, without duplicates.
     """
     seen: dict[str, None] = {}
+    if _HOST_OVERRIDE:
+        seen[_HOST_OVERRIDE] = None
     raw = os.environ.get("DEPENDAMERGE_GITHUB_HOSTS") or ""
     for candidate in raw.split(","):
         host = _clean_host(candidate)
@@ -97,10 +139,20 @@ def _clean_host(value: str) -> str:
 def default_github_host() -> str:
     """Return the host a bare shorthand should resolve against.
 
-    Honours ``DEPENDAMERGE_GITHUB_HOST`` and then ``GH_HOST`` so that
-    shorthand works against a GitHub Enterprise Server install, falling
-    back to github.com.
+    Resolution order, highest priority first:
+
+    1. ``--github-host`` on the command line
+    2. ``DEPENDAMERGE_GITHUB_HOST``
+    3. ``GH_HOST`` --- the GitHub CLI's own variable, so an operator
+       who has already pointed ``gh`` at an Enterprise instance does
+       not configure the same thing twice
+    4. github.com
+
+    Returns:
+        A bare lowercase hostname.
     """
+    if _HOST_OVERRIDE:
+        return _HOST_OVERRIDE
     for name in _HOST_ENV_VARS:
         value = _clean_host(os.environ.get(name) or "")
         if value:
@@ -161,6 +213,11 @@ def _strips_git_suffix(path: str) -> bool:
     a topic that genuinely ends in ``.git``, and trimming it silently
     searches for the wrong thing.
 
+    The test is the final segment carrying a query operator's colon,
+    encoded or otherwise --- not the presence of a ``q`` segment, which
+    an owner may legitimately be called.  ``github.com/q/widget.git`` is
+    a clone URL belonging to the owner ``q``.
+
     Args:
         path: The URL path, without query or fragment.
 
@@ -170,12 +227,8 @@ def _strips_git_suffix(path: str) -> bool:
     segments = [s for s in path.split("/") if s]
     if not segments:
         return False
-    # Gerrit search URLs put the query in the path after a /q/ segment,
-    # and its operators carry colons.  Either is enough to say the tail
-    # is a value rather than a repository name.
-    if "q" in segments:
-        return False
-    return ":" not in segments[-1]
+    last = segments[-1].lower()
+    return ":" not in last and "%3a" not in last
 
 
 def strip_git_suffix(path: str) -> str:

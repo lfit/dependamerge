@@ -85,32 +85,59 @@ def is_supported_github_host(host: str) -> bool:
 
 
 def reject_port_bearing_host(netloc: str, scope: str) -> None:
-    """Refuse a target that names a non-default port.
+    """Refuse a target that names a port, valid or otherwise.
 
     ``urlparse`` reports ``hostname`` without the port, and ``host`` is
-    what every parsed model carries and what
-    :func:`derive_api_urls` builds from.  A port therefore survives
-    normalisation and is then dropped, so ``ghe.example.com:8443``
-    would quietly be addressed on 443.
+    what every parsed model carries and what :func:`derive_api_urls`
+    builds from.  A port therefore survives normalisation and is then
+    dropped, so ``ghe.example.com:8443`` would quietly be addressed on
+    443.
 
     Refusing is the honest answer while the port has nowhere to live.
     Silently discarding it would send requests to a server the operator
     did not name.
+
+    A *malformed* port is refused too.  ``https://github.com:notaport/o/r``
+    yields a hostname of ``github.com``, so treating it as portless
+    would route a plainly broken URL to dotcom as though nothing were
+    wrong.
 
     Args:
         netloc: The authority as parsed, possibly ``host:port``.
         scope: What was being parsed, e.g. ``"Repository"``.
 
     Raises:
-        UrlParseError: When ``netloc`` carries a port.
+        UrlParseError: When ``netloc`` carries a port of any kind.
     """
     from .models import UrlParseError
 
-    if ":" not in netloc:
+    # An IPv6 literal is bracketed and full of colons; only what follows
+    # the closing bracket can be a port.
+    remainder = netloc
+    prefix = ""
+    if netloc.startswith("["):
+        closing = netloc.find("]")
+        if closing == -1:
+            return
+        prefix = netloc[: closing + 1]
+        remainder = netloc[closing + 1 :]
+
+    if ":" not in remainder:
         return
-    host, _, port = netloc.rpartition(":")
+
+    host, _, port = remainder.rpartition(":")
+    host = f"{prefix}{host}" if prefix else host
+
+    if not port:
+        # A bare trailing colon names no port; harmless, and urlparse
+        # already ignores it.
+        return
+
     if not port.isdigit():
-        return
+        raise UrlParseError(
+            f"{scope} URL has a malformed port ({netloc}). Ports must be numeric."
+        )
+
     raise UrlParseError(
         f"{scope} URL parsing does not support a port ({netloc}). "
         f"The port cannot be carried through to the API base URL, so "

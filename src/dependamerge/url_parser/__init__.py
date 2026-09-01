@@ -42,6 +42,7 @@ from .hosts import (
     _host_matches,
     derive_api_urls,
     is_supported_github_host,
+    reject_port_bearing_host,
     unsupported_host_message,
 )
 from .models import (
@@ -62,9 +63,11 @@ from .shorthand import (
     DEFAULT_GITHUB_HOST,
     default_github_host,
     enterprise_hosts,
+    github_host_override,
     looks_like_host,
     looks_like_owner,
     normalize_target,
+    set_github_host,
     strip_git_suffix,
 )
 from .topic import parse_gerrit_topic_url
@@ -82,6 +85,7 @@ __all__ = [
     "derive_api_urls",
     "detect_source",
     "enterprise_hosts",
+    "github_host_override",
     "is_supported_github_host",
     "looks_like_host",
     "looks_like_owner",
@@ -92,6 +96,8 @@ __all__ = [
     "parse_owner_arg",
     "parse_owner_target",
     "parse_repo_url",
+    "reject_port_bearing_host",
+    "set_github_host",
     "strip_git_suffix",
     "unsupported_host_message",
 ]

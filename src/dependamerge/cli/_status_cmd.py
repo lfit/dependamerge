@@ -13,6 +13,7 @@ from ..progress_tracker import ProgressTracker
 from ..url_parser import (
     UrlParseError,
     parse_owner_target,
+    set_github_host,
 )
 from ._app import app, console
 from ._reports import _display_status_results
@@ -26,6 +27,15 @@ def status(
     ),
     token: str | None = typer.Option(
         None, "--token", help="GitHub token (or set GITHUB_TOKEN env var)"
+    ),
+    github_host: str | None = typer.Option(
+        None,
+        "--github-host",
+        help=(
+            "GitHub host to address, e.g. a GitHub Enterprise Server "
+            "install. Takes priority over DEPENDAMERGE_GITHUB_HOST and "
+            "GH_HOST, and declares the host as permitted."
+        ),
     ),
     output_format: str = typer.Option(
         "table", "--format", help="Output format: table, json"
@@ -46,6 +56,11 @@ def status(
     Automation tools supported: Dependabot, Renovate, pre-commit.ci,
     GitHub Actions, GitHub Copilot, and any other [bot] account.
     """
+    # Applied before anything parses a target: the flag sets both
+    # the host a shorthand resolves against and the set of hosts
+    # permitted at all.
+    set_github_host(github_host)
+
     # Parse owner login from input (handles a bare login plus every
     # GitHub owner URL form, including /orgs/owner/repositories).
     try:

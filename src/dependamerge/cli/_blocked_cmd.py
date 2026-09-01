@@ -37,6 +37,7 @@ from ..system_utils import get_default_workers
 from ..url_parser import (
     UrlParseError,
     parse_owner_target,
+    set_github_host,
 )
 from ._app import app, console
 from ._reports import _display_blocked_results
@@ -233,6 +234,15 @@ def blocked(
     token: str | None = typer.Option(
         None, "--token", help="GitHub token (or set GITHUB_TOKEN env var)"
     ),
+    github_host: str | None = typer.Option(
+        None,
+        "--github-host",
+        help=(
+            "GitHub host to address, e.g. a GitHub Enterprise Server "
+            "install. Takes priority over DEPENDAMERGE_GITHUB_HOST and "
+            "GH_HOST, and declares the host as permitted."
+        ),
+    ),
     output_format: str = typer.Option(
         "table", "--format", help="Output format: table, json"
     ),
@@ -299,6 +309,11 @@ def blocked(
 
     Standard code review requirements are not considered blocking.
     """
+    # Applied before anything parses a target: the flag sets both
+    # the host a shorthand resolves against and the set of hosts
+    # permitted at all.
+    set_github_host(github_host)
+
     organization, owner_host = _resolve_blocked_owner(org_input)
 
     progress_tracker = None

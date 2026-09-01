@@ -555,18 +555,28 @@ checkout determines neither, so Gerrit still needs an explicit target.
 
 Enterprise hosts work once you declare them. Their hostnames are
 arbitrary, so accepting whichever host a URL happens to name would send
-your token wherever a mistyped or pasted link points:
+your token wherever a mistyped or pasted link points.
+
+Declare one for a single run with `--github-host`, which every
+target-taking command accepts:
 
 ```bash
-# Declare one or more Enterprise hosts
+dependamerge merge acme/widget --github-host ghe.corp.example.com
+dependamerge status acme --github-host ghe.corp.example.com
+```
+
+Or declare one for the shell session:
+
+```bash
+# One or more hosts, comma-separated
 export DEPENDAMERGE_GITHUB_HOSTS=ghe.corp.example.com
 
 dependamerge merge https://ghe.corp.example.com/acme/widget
 ```
 
-To make an Enterprise host the default that shorthand resolves against,
-set `DEPENDAMERGE_GITHUB_HOST` — or reuse `GH_HOST`, the GitHub CLI's
-own variable, if you have already pointed `gh` at your instance:
+To set the host that shorthand resolves against, use
+`DEPENDAMERGE_GITHUB_HOST` — or reuse `GH_HOST`, the GitHub CLI's own
+variable, if you have already pointed `gh` at your instance:
 
 ```bash
 export GH_HOST=ghe.corp.example.com
@@ -575,8 +585,17 @@ export GH_HOST=ghe.corp.example.com
 dependamerge merge acme/widget
 ```
 
-Naming a host in either single-host variable also declares it, so there
-is no need to set both. `github.com` needs no configuration.
+The four settle in this order, highest priority first:
+
+| Source                      | Sets the default | Declares the host |
+| --------------------------- | ---------------- | ----------------- |
+| `--github-host`             | yes              | yes               |
+| `DEPENDAMERGE_GITHUB_HOST`  | yes              | yes               |
+| `GH_HOST`                   | yes              | yes               |
+| `DEPENDAMERGE_GITHUB_HOSTS` | no               | one or more       |
+
+Naming a host as your default also declares it, so there is no need to
+set both. `github.com` needs no configuration.
 
 The parsers accept a direct pull request URL on any host without
 configuration, because `/pull/` identifies one structurally. Acting on

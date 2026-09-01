@@ -12,17 +12,23 @@ one is refused before any request carries a token to it.
 from __future__ import annotations
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from dependamerge.cli import app
 from dependamerge.cli._merge_permissions import _check_merge_permissions
 from dependamerge.close_manager import AsyncCloseManager
+from dependamerge.github_async._permissions import (
+    _unauthorized_permission_error,
+    web_host_for,
+)
 from dependamerge.github_client import GitHubClient
 from dependamerge.github_service import GitHubService
 from dependamerge.merge_manager import AsyncMergeManager
 from dependamerge.resolve_conflicts import FixOrchestrator
 from dependamerge.url_parser import (
     UrlParseError,
+    default_github_host,
     derive_api_urls,
     enterprise_hosts,
     is_supported_github_host,
@@ -30,6 +36,7 @@ from dependamerge.url_parser import (
     parse_org_url,
     parse_owner_target,
     parse_repo_url,
+    set_github_host,
 )
 
 GHE = "ghe.corp.example.com"
@@ -201,6 +208,55 @@ class TestPortBearingTargets:
     def test_ordinary_hosts_are_unaffected(self):
         assert parse_repo_url("https://github.com/acme/widget").host == "github.com"
 
+    @pytest.mark.parametrize(
+        "parser",
+        [parse_repo_url, parse_org_url],
+    )
+    def test_malformed_port_is_refused(self, parser):
+        # urlparse reports a hostname of github.com for this, so
+        # treating a non-numeric port as "no port" routed a plainly
+        # broken URL to dotcom as though nothing were wrong.
+        with pytest.raises(UrlParseError, match="malformed port"):
+            parser("https://github.com:notaport/acme/widget")
+
+    def test_pull_request_url_refuses_a_port(self, no_declared_hosts):
+        client = GitHubClient("t")
+        with pytest.raises(ValueError, match="does not support a port"):
+            client.parse_pr_url("https://github.com:8443/acme/widget/pull/7")
+
+    def test_pull_request_url_refuses_a_malformed_port(self, no_declared_hosts):
+        client = GitHubClient("t")
+        with pytest.raises(ValueError, match="malformed port"):
+            client.parse_pr_url("https://github.com:notaport/acme/widget/pull/7")
+
+
+class TestPermissionGuidanceFollowsTheHost:
+    """Token guidance must name the server the token belongs to.
+
+    Settings pages and ``gh auth refresh`` are per-installation, so an
+    Enterprise operator sent to github.com is being pointed at a site
+    that knows nothing about their credentials.
+    """
+
+    def test_dotcom_api_maps_to_the_web_host(self):
+        assert web_host_for("https://api.github.com") == "github.com"
+
+    def test_enterprise_api_maps_to_its_own_host(self):
+        assert web_host_for(f"https://{GHE}/api/v3") == GHE
+
+    def test_missing_api_url_falls_back_to_dotcom(self):
+        assert web_host_for("") == "github.com"
+
+    def test_unauthorised_guidance_names_the_enterprise_host(self):
+        error = _unauthorized_permission_error("merge", GHE)
+        guidance = " ".join(error.token_type_guidance.values())
+        assert GHE in guidance
+        assert "github.com" not in guidance
+
+    def test_unauthorised_guidance_still_defaults_to_dotcom(self):
+        error = _unauthorized_permission_error("merge")
+        assert "github.com" in " ".join(error.token_type_guidance.values())
+
 
 class TestEveryClientReachesTheDeclaredHost:
     """Regression: the host has to reach *all* the transports.
@@ -348,6 +404,114 @@ class TestEnterpriseRepositoryMergeRuns:
             ["merge", f"https://{GHE}/acme/widget", "--token", "t", "--dry-run"],
         )
         assert result.exit_code == 1
+        assert "Repository mode" not in result.stdout
+
+
+class TestGithubHostFlag:
+    """``--github-host`` and its precedence over the environment.
+
+    The flag is a higher-priority source of the same setting the
+    environment variables provide, and serves both their purposes: the
+    host a shorthand resolves against, and the set of hosts permitted
+    at all.  Naming a host on the command line is at least as
+    deliberate as exporting it.
+    """
+
+    runner = CliRunner()
+
+    def test_flag_sets_the_default_host(self, no_declared_hosts):
+        set_github_host(GHE)
+        assert default_github_host() == GHE
+
+    def test_flag_declares_the_host(self, no_declared_hosts):
+        assert is_supported_github_host(GHE) is False
+        set_github_host(GHE)
+        assert is_supported_github_host(GHE) is True
+
+    def test_flag_resolves_shorthand(self, no_declared_hosts):
+        set_github_host(GHE)
+        assert parse_repo_url("acme/widget").host == GHE
+
+    def test_flag_beats_dependamerge_variable(self, monkeypatch):
+        monkeypatch.setenv("DEPENDAMERGE_GITHUB_HOST", "env.example.com")
+        set_github_host(GHE)
+        assert default_github_host() == GHE
+
+    def test_flag_beats_gh_host(self, monkeypatch):
+        monkeypatch.delenv("DEPENDAMERGE_GITHUB_HOST", raising=False)
+        monkeypatch.setenv("GH_HOST", "env.example.com")
+        set_github_host(GHE)
+        assert default_github_host() == GHE
+
+    def test_environment_order_without_the_flag(self, monkeypatch):
+        # DEPENDAMERGE_GITHUB_HOST outranks GH_HOST, so a project
+        # setting is not overridden by whatever ``gh`` happens to use.
+        monkeypatch.setenv("DEPENDAMERGE_GITHUB_HOST", "first.example.com")
+        monkeypatch.setenv("GH_HOST", "second.example.com")
+        assert default_github_host() == "first.example.com"
+
+    def test_clearing_the_flag_falls_back_to_the_environment(self, monkeypatch):
+        monkeypatch.delenv("DEPENDAMERGE_GITHUB_HOST", raising=False)
+        monkeypatch.setenv("GH_HOST", "env.example.com")
+        set_github_host(GHE)
+        set_github_host(None)
+        assert default_github_host() == "env.example.com"
+
+    def test_scheme_and_path_are_stripped_from_the_flag(self, no_declared_hosts):
+        set_github_host(f"https://{GHE}/")
+        assert default_github_host() == GHE
+        assert is_supported_github_host(GHE) is True
+
+    def test_empty_flag_is_treated_as_absent(self, no_declared_hosts):
+        # Typer passes None when the flag is omitted; an empty string
+        # from a shell expansion must not become a hostname.
+        set_github_host("")
+        assert default_github_host() == "github.com"
+
+    def test_unresolved_typer_default_is_treated_as_absent(self, no_declared_hosts):
+        # Calling a command directly as a Python function --- which the
+        # tests do --- passes Typer's OptionInfo through unresolved.
+        # The same allowance _normalise_topic and _validate_max_wait
+        # make, and without it every such call raises AttributeError.
+        set_github_host(typer.Option(None, "--github-host"))  # type: ignore[arg-type]
+        assert default_github_host() == "github.com"
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            pytest.param(["merge", "--help"], id="merge"),
+            pytest.param(["close", "--help"], id="close"),
+            pytest.param(["status", "--help"], id="status"),
+            pytest.param(["blocked", "--help"], id="blocked"),
+        ],
+    )
+    def test_flag_is_offered_by_every_target_taking_command(self, argv):
+        result = self.runner.invoke(app, argv)
+        assert "--github-host" in result.stdout
+
+    def test_flag_reaches_the_merge_path(self, no_declared_hosts):
+        # End to end: without the flag this host is undeclared and the
+        # run is refused, so reaching repository mode proves the flag
+        # travelled all the way through parsing.
+        result = self.runner.invoke(
+            app,
+            [
+                "merge",
+                "acme/widget",
+                "--github-host",
+                GHE,
+                "--token",
+                "t",
+                "--dry-run",
+            ],
+        )
+        assert "Repository mode" in result.stdout
+
+    def test_without_the_flag_the_same_run_is_refused(self, no_declared_hosts):
+        result = self.runner.invoke(
+            app,
+            ["merge", f"https://{GHE}/acme/widget", "--token", "t", "--dry-run"],
+        )
         assert "Repository mode" not in result.stdout
 
 
