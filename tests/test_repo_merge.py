@@ -535,7 +535,7 @@ class TestMergeRepoUrl:
         assert result.exit_code == 1
         assert "❌ Invalid URL:" in result.stdout
 
-    def test_owner_shaped_token_is_treated_as_shorthand(self):
+    def test_owner_shaped_token_is_treated_as_shorthand(self, mocker):
         """A bare login is an owner-wide shorthand, not an error.
 
         The counterpart to the test above, pinning the boundary between
@@ -543,11 +543,18 @@ class TestMergeRepoUrl:
         rather than rejected, so this must get past URL parsing and
         reach the owner-wide path.
         """
+        handler = mocker.patch("dependamerge.cli._merge_cmd._handle_org_merge")
+
         result = self.runner.invoke(
             app,
             ["merge", "not-a-url", "--token", "test_token", "--dry-run"],
         )
+
         assert "❌ Invalid URL:" not in result.stdout
+        # Asserting the owner handler ran, rather than only that no
+        # error was printed: the negative alone passes when the command
+        # fails later for network or auth reasons.
+        handler.assert_called_once()
 
     @patch("dependamerge.cli.GitHubClient")
     @patch("dependamerge.cli.asyncio.run")

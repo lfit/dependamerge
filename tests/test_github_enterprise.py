@@ -445,7 +445,15 @@ class TestEnterpriseRepositoryMergeRuns:
 
     runner = CliRunner()
 
-    def test_declared_host_reaches_repository_mode(self, declared_ghe):
+    def test_declared_host_reaches_repository_mode(self, declared_ghe, mocker):
+        # ``_init_repo_merge_client`` is left real --- it is the code
+        # the removed guard lived in --- while the fetch beyond it is
+        # stubbed, so this stays offline and cannot pass merely because
+        # a network failure printed different words.
+        fetch = mocker.patch(
+            "dependamerge.cli._repo_merge._fetch_repo_prs", return_value=[]
+        )
+
         result = self.runner.invoke(
             app,
             [
@@ -457,8 +465,10 @@ class TestEnterpriseRepositoryMergeRuns:
             ],
         )
         out = result.stdout
+        assert result.exit_code == 0, out
         assert "Repository mode" in out
         assert "only supported" not in out
+        fetch.assert_called_once()
 
     def test_undeclared_host_is_still_refused(self, no_declared_hosts):
         result = self.runner.invoke(
@@ -551,10 +561,15 @@ class TestGithubHostFlag:
         result = self.runner.invoke(app, argv)
         assert "--github-host" in result.stdout
 
-    def test_flag_reaches_the_merge_path(self, no_declared_hosts):
+    def test_flag_reaches_the_merge_path(self, no_declared_hosts, mocker):
         # End to end: without the flag this host is undeclared and the
         # run is refused, so reaching repository mode proves the flag
-        # travelled all the way through parsing.
+        # travelled all the way through parsing.  The fetch is stubbed
+        # so the assertion cannot ride on a network error.
+        fetch = mocker.patch(
+            "dependamerge.cli._repo_merge._fetch_repo_prs", return_value=[]
+        )
+
         result = self.runner.invoke(
             app,
             [
@@ -567,7 +582,9 @@ class TestGithubHostFlag:
                 "--dry-run",
             ],
         )
+        assert result.exit_code == 0, result.stdout
         assert "Repository mode" in result.stdout
+        fetch.assert_called_once()
 
     def test_without_the_flag_the_same_run_is_refused(self, no_declared_hosts):
         result = self.runner.invoke(

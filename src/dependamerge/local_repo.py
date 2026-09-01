@@ -50,6 +50,12 @@ _REMOTE_PREFERENCE = ("upstream", "origin")
 #: Credentials in a URL, for any scheme.
 _USERINFO_RE = re.compile(r"\A([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]+@")
 
+#: Any ``scheme://`` prefix.
+_SCHEME_RE = re.compile(r"\A[A-Za-z][A-Za-z0-9+.-]*://")
+
+#: scp-style remote: ``[user@]host:path``.
+_SCP_REMOTE_RE = re.compile(r"\A(?:[^@/]+@)?(?P<host>[^@/:]+):(?!//)[^\s]+\Z")
+
 
 @dataclass(frozen=True)
 class LocalTarget:
@@ -194,6 +200,34 @@ def _looks_like_gerrit_remote(url: str) -> bool:
     return host_suggests_gerrit(host)
 
 
+def _names_a_server(url: str) -> bool:
+    """Report whether a git remote addresses a server at all.
+
+    A remote is a URL, an scp-style address, or a filesystem path.  It
+    is never *shorthand*: that is a convenience for what a human types,
+    and applying it here is actively dangerous --- a relative remote
+    like ``mirror/widget.git`` would expand to a real, unrelated GitHub
+    repository and an omitted-target merge would act on it.
+
+    Args:
+        url: The remote URL as git reports it.
+
+    Returns:
+        True when the remote names a host rather than a local path.
+    """
+    raw = url.strip()
+    if _SCHEME_RE.match(raw):
+        return True
+    scp = _SCP_REMOTE_RE.match(raw)
+    if scp is None:
+        return False
+    # ``C:/repos/widget.git`` is a Windows drive, not a host, and the
+    # scp pattern cannot tell them apart on its own.  A real remote
+    # host is dotted, or is localhost.
+    authority = scp.group("host").lower()
+    return "." in authority or authority == "localhost"
+
+
 def _safe_for_log(url: str) -> str:
     """Redact any credentials from a remote before it reaches a log.
 
@@ -231,17 +265,21 @@ def _remote_web_url(url: str) -> str | None:
         server to merge against, so it is an ordinary "cannot infer"
         answer rather than an error.
     """
+    raw = url.strip()
+    if not _names_a_server(raw):
+        # A filesystem path, relative or absolute.  Nothing to target,
+        # and emphatically not something to run through shorthand
+        # expansion.
+        log.debug("remote %s is a local path, not a server", _safe_for_log(raw))
+        return None
     try:
-        normalized = normalize_target(url)
+        normalized = normalize_target(raw)
     except UrlParseError as exc:
-        log.debug("remote %s is not a usable target: %s", _safe_for_log(url), exc)
+        log.debug("remote %s is not a usable target: %s", _safe_for_log(raw), exc)
         return None
     stripped = normalized.split("?", 1)[0].split("#", 1)[0]
     if not stripped.startswith(("http://", "https://")):
-        # A bare filesystem path names no server either, and
-        # normalisation leaves it alone rather than inventing a host
-        # for it.
-        log.debug("remote %s does not name a server", _safe_for_log(url))
+        log.debug("remote %s does not name a server", _safe_for_log(raw))
         return None
     return stripped
 

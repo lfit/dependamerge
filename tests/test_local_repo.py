@@ -259,7 +259,19 @@ class TestDetectLocalTarget:
 
     @pytest.mark.parametrize(
         "remote",
-        ["file:///srv/widget.git", "/srv/widget.git"],
+        [
+            "file:///srv/widget.git",
+            "/srv/widget.git",
+            # Relative paths are the dangerous ones: run through
+            # shorthand expansion, ``mirror/widget.git`` becomes a real
+            # and unrelated GitHub repository, and an omitted-target
+            # merge would act on it.
+            "mirror/widget.git",
+            "../sibling/widget.git",
+            # A Windows drive letter is not a host, though it looks
+            # like one to an scp-style pattern.
+            "C:/repos/widget.git",
+        ],
     )
     def test_local_mirror_remote_is_not_a_target(self, repo, remote):
         # A perfectly valid remote that names no server to merge
@@ -269,6 +281,30 @@ class TestDetectLocalTarget:
         _git(repo, "remote", "add", "origin", remote)
 
         assert detect_local_target(repo) is None
+
+    @pytest.mark.parametrize(
+        ("remote", "expected"),
+        [
+            ("git@github.com:acme/widget.git", "https://github.com/acme/widget"),
+            (
+                "https://github.com/acme/widget.git",
+                "https://github.com/acme/widget",
+            ),
+            (
+                "ssh://git@github.com/acme/widget.git",
+                "https://github.com/acme/widget",
+            ),
+        ],
+    )
+    def test_remotes_that_do_name_a_server_still_work(self, repo, remote, expected):
+        # The complement: tightening the check must not reject the
+        # forms git actually prints for a hosted remote.
+        _git(repo, "remote", "add", "origin", remote)
+
+        target = detect_local_target(repo)
+
+        assert target is not None
+        assert target.url == expected
 
     def test_malformed_gitreview_falls_back_to_the_remote(self, repo):
         # A .gitreview without a host tells us nothing, so the remote
@@ -319,14 +355,23 @@ class TestNoUrlUsesTheLocalCheckout:
         mocker.patch(
             "dependamerge.cli._merge_target.detect_local_target", return_value=target
         )
+        # Stop at dispatch.  Without this the command runs the real
+        # repository merge, so the unit suite makes network requests
+        # with a fake token and these assertions pass on whatever was
+        # printed before the failure.
+        handler = mocker.patch("dependamerge.cli._merge_cmd._handle_repo_merge")
 
         result = self.runner.invoke(app, ["merge", "--token", "test_token"])
 
         # Acting on a repository the operator did not name has to be
         # visible, and it has to say *which* remote it chose.
+        assert result.exit_code == 0, result.stdout
         assert "No URL given" in result.stdout
         assert "upstream" in result.stdout
         assert "https://github.com/acme/widget" in result.stdout
+        # And it must actually have dispatched, rather than printing
+        # the message and failing on the way.
+        handler.assert_called_once()
 
     def test_gerrit_checkout_stops_with_guidance(self, mocker):
         info = GitReviewInfo(
@@ -387,6 +432,9 @@ class TestNoUrlUsesTheLocalCheckout:
 
     def test_an_explicit_url_skips_inference_entirely(self, mocker):
         detect = mocker.patch("dependamerge.cli._merge_target.detect_local_target")
+        # Stubbed so the assertion does not depend on a live request
+        # succeeding or failing.
+        mocker.patch("dependamerge.cli._merge_cmd._handle_repo_merge")
 
         self.runner.invoke(
             app, ["merge", "https://github.com/acme/widget", "--token", "t"]
