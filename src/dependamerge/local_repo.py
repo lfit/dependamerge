@@ -47,6 +47,9 @@ _GIT_TIMEOUT = 10.0
 #: the operator's own fork and not what they mean to merge.
 _REMOTE_PREFERENCE = ("upstream", "origin")
 
+#: Credentials in a URL, for any scheme.
+_USERINFO_RE = re.compile(r"\A([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]+@")
+
 
 @dataclass(frozen=True)
 class LocalTarget:
@@ -191,6 +194,24 @@ def _looks_like_gerrit_remote(url: str) -> bool:
     return host_suggests_gerrit(host)
 
 
+def _safe_for_log(url: str) -> str:
+    """Redact any credentials from a remote before it reaches a log.
+
+    The module contract is that no credential survives into output, and
+    a log is output.  ``git_ops.redact_text`` only recognises http(s)
+    URLs, but a remote this module *declines* may use any scheme ---
+    ``ftp://user:password@host/repo.git`` among them --- so the
+    userinfo is removed regardless of scheme.
+
+    Args:
+        url: The remote URL as git reports it.
+
+    Returns:
+        The URL with any ``user:password@`` replaced.
+    """
+    return _USERINFO_RE.sub(r"\1***@", url)
+
+
 def _remote_web_url(url: str) -> str | None:
     """Normalise a git remote into a URL safe to show and to parse.
 
@@ -213,14 +234,14 @@ def _remote_web_url(url: str) -> str | None:
     try:
         normalized = normalize_target(url)
     except UrlParseError as exc:
-        log.debug("remote %r is not a usable target: %s", url, exc)
+        log.debug("remote %s is not a usable target: %s", _safe_for_log(url), exc)
         return None
     stripped = normalized.split("?", 1)[0].split("#", 1)[0]
     if not stripped.startswith(("http://", "https://")):
         # A bare filesystem path names no server either, and
         # normalisation leaves it alone rather than inventing a host
         # for it.
-        log.debug("remote %r does not name a server", url)
+        log.debug("remote %s does not name a server", _safe_for_log(url))
         return None
     return stripped
 

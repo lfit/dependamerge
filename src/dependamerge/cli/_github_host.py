@@ -7,46 +7,40 @@ Every target-taking command accepts the flag, and every one of them
 needs the same three things: record it, validate it, and report a bad
 value as a message rather than a traceback.
 
-Validation has to happen here rather than deep in the parsers.  A host
-naming a port is refused --- ports cannot reach the API base URLs --- and
-that refusal is raised by the configuration readers themselves, which
-run before any command's error handling.  Left alone it surfaces as an
-uncaught exception on an ordinary mistake.
+Validation of the *flag* happens here because the configuration
+readers run before any command's error handling, so a host naming a
+port --- ports cannot reach the API base URLs --- would otherwise
+surface as an uncaught exception on an ordinary mistake.  The
+environment variables are deliberately not probed here: see
+:func:`apply_github_host`.
 """
 
 from __future__ import annotations
 
 import typer
 
-from ..url_parser import (
-    UrlParseError,
-    default_github_host,
-    enterprise_hosts,
-    set_github_host,
-)
+from ..url_parser import UrlParseError, set_github_host
 from ._app import console
 
 
 def apply_github_host(value: str | None) -> None:
-    """Record ``--github-host`` and validate the resolved configuration.
+    """Record ``--github-host`` and validate what the operator typed.
 
-    Also probes the environment variables, so a bad ``GH_HOST`` is
-    reported here with the same wording rather than escaping from
-    whichever parser happens to read it first.
+    Only the flag is validated here.  The environment variables are
+    left to the point of use, because a target that never consults a
+    GitHub default --- an explicit Gerrit URL, say --- should not be
+    blocked by an unrelated ``GH_HOST`` it does not read.  When a
+    shorthand *does* need the default, the failure surfaces through the
+    parsers and reaches the operator by way of the usual reporting.
 
     Args:
         value: The raw flag value, or None when it was omitted.
 
     Raises:
-        typer.Exit: When the flag or the environment names an
-            unusable host.
+        typer.Exit: When the flag names an unusable host.
     """
     try:
         set_github_host(value)
-        # Force the readers to run now, while there is somewhere
-        # sensible to report a failure.
-        default_github_host()
-        enterprise_hosts()
     except UrlParseError as exc:
         console.print(f"❌ {exc}")
         raise typer.Exit(1) from None

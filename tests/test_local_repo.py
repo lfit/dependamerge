@@ -12,6 +12,7 @@ we do.
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from dependamerge.cli import app
 from dependamerge.gitreview import GitReviewInfo
 from dependamerge.local_repo import (
     LocalTarget,
+    _safe_for_log,
     detect_local_target,
     host_suggests_gerrit,
     remote_url,
@@ -391,6 +393,35 @@ class TestNoUrlUsesTheLocalCheckout:
         )
 
         detect.assert_not_called()
+
+
+class TestCredentialsNeverReachTheLog:
+    """A declined remote is logged without its credentials.
+
+    The module contract is that no credential survives into output, and
+    a debug log is output.  A remote this module *declines* may use any
+    scheme, so redaction cannot assume http(s).
+    """
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("ftp://user:password@host/repo.git", "ftp://***@host/repo.git"),
+            ("https://tok@github.com/a/b.git", "https://***@github.com/a/b.git"),
+            ("https://github.com/a/b.git", "https://github.com/a/b.git"),
+        ],
+    )
+    def test_userinfo_is_redacted(self, raw, expected):
+        assert _safe_for_log(raw) == expected
+
+    def test_declined_remote_does_not_log_its_password(self, repo, caplog):
+        _git(repo, "remote", "add", "origin", "ftp://user:hunter2@host/repo.git")
+
+        with caplog.at_level(logging.DEBUG, logger="dependamerge.local_repo"):
+            assert detect_local_target(repo) is None
+
+        assert "hunter2" not in caplog.text
+        assert "***" in caplog.text
 
 
 class TestLocalTargetModel:

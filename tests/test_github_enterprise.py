@@ -814,6 +814,26 @@ class TestConfigurationErrorsAreReported:
         assert "names a port" in result.stdout
         assert not isinstance(result.exception, UrlParseError)
 
+    def test_broken_environment_does_not_block_an_explicit_gerrit_url(
+        self, monkeypatch
+    ):
+        # A Gerrit target never consults a GitHub default, so validating
+        # the environment up front blocked a run for a reason that has
+        # nothing to do with it.  Only the flag is validated eagerly.
+        monkeypatch.delenv("DEPENDAMERGE_GITHUB_HOST", raising=False)
+        monkeypatch.setenv("GH_HOST", "broken:8443")
+        result = self.runner.invoke(
+            app,
+            [
+                "merge",
+                "https://gerrit.example.org/c/proj/+/123",
+                "--token",
+                "t",
+                "--dry-run",
+            ],
+        )
+        assert "names a port" not in result.stdout
+
 
 class TestOwnerCommandsExplainAnUndeclaredHost:
     """``status`` and ``blocked`` surface the parser's remedy.
