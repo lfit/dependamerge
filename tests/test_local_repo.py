@@ -255,6 +255,19 @@ class TestDetectLocalTarget:
     def test_none_without_a_remote(self, repo):
         assert detect_local_target(repo) is None
 
+    @pytest.mark.parametrize(
+        "remote",
+        ["file:///srv/widget.git", "/srv/widget.git"],
+    )
+    def test_local_mirror_remote_is_not_a_target(self, repo, remote):
+        # A perfectly valid remote that names no server to merge
+        # against.  "Cannot infer" rather than an error --- and
+        # certainly not a traceback, since this runs before the merge
+        # command's error handling.
+        _git(repo, "remote", "add", "origin", remote)
+
+        assert detect_local_target(repo) is None
+
     def test_malformed_gitreview_falls_back_to_the_remote(self, repo):
         # A .gitreview without a host tells us nothing, so the remote
         # still gets its say rather than the checkout being declared

@@ -87,16 +87,26 @@ class GitHubService(
         """
         self._owns_api = client is None
         self._callbacks_attached = False
-        self.host = (host or default_github_host()).strip().lower()
-        api_url, graphql_url = derive_api_urls(self.host)
-        self._api = client or GitHubAsync(
-            token=token,
-            api_url=api_url,
-            graphql_url=graphql_url,
-            on_rate_limited=self._on_rate_limited,
-            on_rate_limit_cleared=self._on_rate_limit_cleared,
-            on_metrics=self._on_metrics,
-        )
+        if client is None:
+            # Resolved only when this service builds its own transport.
+            # Doing it unconditionally makes a shared-client caller ---
+            # whose endpoints are already fixed --- fail on an
+            # unrelated GitHub host misconfiguration it never uses.
+            self.host = (host or default_github_host()).strip().lower()
+            api_url, graphql_url = derive_api_urls(self.host)
+            self._api = GitHubAsync(
+                token=token,
+                api_url=api_url,
+                graphql_url=graphql_url,
+                on_rate_limited=self._on_rate_limited,
+                on_rate_limit_cleared=self._on_rate_limit_cleared,
+                on_metrics=self._on_metrics,
+            )
+        else:
+            # The shared client already carries its base URLs, so the
+            # ``host`` argument is documented as ignored here.
+            self.host = (host or "").strip().lower()
+            self._api = client
         if client is not None:
             # A shared client arrives with whatever callbacks its owner
             # registered, and this service's own must still fire: without

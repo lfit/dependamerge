@@ -29,7 +29,7 @@ from pathlib import Path
 
 from .git_ops import GitError, run_git
 from .gitreview import GitReviewInfo, parse_gitreview
-from .url_parser import ChangeSource, normalize_target
+from .url_parser import ChangeSource, UrlParseError, normalize_target
 
 log = logging.getLogger("dependamerge.local_repo")
 
@@ -184,12 +184,14 @@ def _looks_like_gerrit_remote(url: str) -> bool:
         if port == _GERRIT_SSH_PORT:
             return True
 
-    normalized = normalize_target(raw)
+    normalized = _remote_web_url(raw)
+    if normalized is None:
+        return False
     host = normalized.split("://", 1)[-1].split("/", 1)[0]
     return host_suggests_gerrit(host)
 
 
-def _remote_web_url(url: str) -> str:
+def _remote_web_url(url: str) -> str | None:
     """Normalise a git remote into a URL safe to show and to parse.
 
     Credentials reach a remote in two ways.  ``normalize_target``
@@ -202,10 +204,25 @@ def _remote_web_url(url: str) -> str:
         url: The remote URL as git reports it.
 
     Returns:
-        A web URL with no credentials in any position.
+        A web URL with no credentials in any position, or None when
+        the remote is not one a target can be derived from.  A local
+        ``file://`` mirror is a perfectly valid remote that names no
+        server to merge against, so it is an ordinary "cannot infer"
+        answer rather than an error.
     """
-    normalized = normalize_target(url)
-    return normalized.split("?", 1)[0].split("#", 1)[0]
+    try:
+        normalized = normalize_target(url)
+    except UrlParseError as exc:
+        log.debug("remote %r is not a usable target: %s", url, exc)
+        return None
+    stripped = normalized.split("?", 1)[0].split("#", 1)[0]
+    if not stripped.startswith(("http://", "https://")):
+        # A bare filesystem path names no server either, and
+        # normalisation leaves it alone rather than inventing a host
+        # for it.
+        log.debug("remote %r does not name a server", url)
+        return None
+    return stripped
 
 
 def _gerrit_identity_from_remote(url: str) -> tuple[str, str]:
@@ -221,6 +238,8 @@ def _gerrit_identity_from_remote(url: str) -> tuple[str, str]:
         The host and project, either of which may be empty.
     """
     normalized = _remote_web_url(url)
+    if normalized is None:
+        return ("", "")
     remainder = normalized.split("://", 1)[-1]
     host, _, path = remainder.partition("/")
     return (host, path.strip("/"))
@@ -281,6 +300,11 @@ def detect_local_target(cwd: Path | None = None) -> LocalTarget | None:
         )
 
     normalized = _remote_web_url(url)
+    if normalized is None:
+        # A remote git can use but this tool cannot target, such as a
+        # local mirror.  Nothing to infer, and the caller can still ask
+        # the operator for a URL.
+        return None
     return LocalTarget(
         source=ChangeSource.GITHUB,
         url=normalized,

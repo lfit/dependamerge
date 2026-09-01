@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 from dependamerge.cli import app
 from dependamerge.cli._merge_permissions import _check_merge_permissions
 from dependamerge.close_manager import AsyncCloseManager
+from dependamerge.github_async import GitHubAsync
 from dependamerge.github_async._permissions import (
     _unauthorized_permission_error,
     web_host_for,
@@ -356,6 +357,18 @@ class TestEveryClientReachesTheDeclaredHost:
     def test_service_defaults_to_dotcom(self, no_declared_hosts):
         service = GitHubService(token="t")
         assert service._api.api_url == "https://api.github.com"
+
+    def test_shared_client_ignores_a_broken_default(self, monkeypatch):
+        # A caller passing its own client has fixed endpoints already,
+        # so resolving the default host for it made an unrelated
+        # misconfiguration fail a construction that never uses it.
+        monkeypatch.delenv("DEPENDAMERGE_GITHUB_HOST", raising=False)
+        monkeypatch.setenv("GH_HOST", "broken:8443")
+
+        shared = GitHubAsync(token="t")
+        service = GitHubService(token="t", client=shared)
+
+        assert service._api is shared
 
 
 class TestOwnerArgumentKeepsItsHost:
