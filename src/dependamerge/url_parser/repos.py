@@ -18,7 +18,7 @@ from .hosts import (
     unsupported_host_message,
 )
 from .models import ChangeSource, ParsedOrgUrl, ParsedRepoUrl, UrlParseError
-from .shorthand import default_github_host, normalize_target
+from .shorthand import default_github_host, looks_like_owner, normalize_target
 
 # aislop-ignore-file ai-slop/hardcoded-url -- This module parses and builds
 # GitHub/Gerrit URLs, so URL literals here are the subject matter, not
@@ -240,6 +240,14 @@ def parse_owner_target(value: str) -> tuple[str, str]:
     if not bare:
         raise UrlParseError("Owner name or URL cannot be empty")
     if "/" not in bare and "://" not in bare:
+        if not looks_like_owner(bare):
+            # The same boundary the shorthand expansion enforces: text
+            # that cannot be a login is rejected rather than sent to
+            # the API as an owner that cannot exist.
+            raise UrlParseError(
+                f"Not a valid GitHub owner name: {bare!r}. Logins are "
+                "alphanumerics and hyphens, at most 39 characters."
+            )
         return (bare, default_github_host())
 
     parsed = parse_org_url(value)
@@ -299,6 +307,11 @@ def parse_owner_arg(value: str) -> str:
         # extract, so treat it the same as an empty value.
         raise UrlParseError("Owner name or URL cannot be empty")
     if "/" not in bare and "://" not in bare:
+        if not looks_like_owner(bare):
+            raise UrlParseError(
+                f"Not a valid GitHub owner name: {bare!r}. Logins are "
+                "alphanumerics and hyphens, at most 39 characters."
+            )
         return bare
 
     return parse_org_url(value).owner

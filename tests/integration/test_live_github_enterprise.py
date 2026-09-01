@@ -103,10 +103,13 @@ class TestLiveEnterpriseAuthentication:
             ],
         )
         output = combined_output(result)
+        # Exit code first.  Asserting only the *absence* of messages
+        # would pass on a 403, a 404 or a GraphQL schema mismatch ---
+        # every failure this test exists to catch.
+        assert result.exit_code == 0, output
         assert "api.github.com" not in output, (
             "the run addressed dotcom despite an Enterprise target"
         )
-        assert "401" not in output and "Unauthorized" not in output, output
 
     def test_shorthand_resolves_against_the_instance(
         self, runner, monkeypatch, ghe_host, ghe_token, ghe_org
@@ -119,6 +122,7 @@ class TestLiveEnterpriseAuthentication:
             app, ["status", ghe_org, "--token", ghe_token, "--no-progress"]
         )
         output = combined_output(result)
+        assert result.exit_code == 0, output
         assert "api.github.com" not in output, output
 
 
@@ -138,6 +142,9 @@ class TestLiveEnterpriseMergePreview:
             ],
         )
         output = combined_output(result)
+        # Exit code first: the guard messages being absent does not
+        # establish that the dry run completed.
+        assert result.exit_code == 0, output
         # The pre-existing github.com-only guard produced exactly this,
         # and its removal is what makes Enterprise merges reachable.
         assert "only supported" not in output, output
@@ -159,6 +166,7 @@ class TestLiveEnterpriseMergePreview:
             ],
         )
         output = combined_output(result)
+        assert result.exit_code == 0, output
         assert "only supported" not in output, output
 
 
