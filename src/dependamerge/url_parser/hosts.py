@@ -142,7 +142,7 @@ def reject_port_bearing_host(netloc: str, scope: str) -> None:
         f"{scope} URL parsing does not support a port ({netloc}). "
         f"The port cannot be carried through to the API base URL, so "
         f"requests would go to {host} on the default port instead. "
-        "Use a host without a port, or a direct pull request URL."
+        "Use a host without a port."
     )
 
 
@@ -166,6 +166,28 @@ def unsupported_host_message(host: str, scope: str) -> str:
     )
 
 
+def canonical_web_host(host: str) -> str:
+    """Reduce a host to the web host that serves its user interface.
+
+    The parsers accept github.com *and its subdomains* as the same
+    service, so ``api.github.com`` can reach URL construction.  Building
+    a clone or web URL under that name produces an address that does
+    not serve one.  Everywhere else the host is its own web host.
+
+    Args:
+        host: The hostname to canonicalise.
+
+    Returns:
+        The web host, defaulting to github.com when nothing is given.
+    """
+    resolved = (host or "").strip().lower()
+    if not resolved:
+        return "github.com"
+    if _host_matches(resolved, "github.com"):
+        return "github.com"
+    return resolved
+
+
 def clone_url_for(host: str, full_name: str) -> str:
     """Build the HTTPS clone URL for ``owner/repo`` on ``host``.
 
@@ -181,8 +203,7 @@ def clone_url_for(host: str, full_name: str) -> str:
     Returns:
         An HTTPS clone URL.
     """
-    resolved = (host or "").strip().lower() or "github.com"
-    return f"https://{resolved}/{full_name}.git"
+    return f"https://{canonical_web_host(host)}/{full_name}.git"
 
 
 def pull_request_url_for(host: str, full_name: str, number: int) -> str:
@@ -200,8 +221,7 @@ def pull_request_url_for(host: str, full_name: str, number: int) -> str:
     Returns:
         A web URL for the pull request.
     """
-    resolved = (host or "").strip().lower() or "github.com"
-    return f"https://{resolved}/{full_name}/pull/{number}"
+    return f"https://{canonical_web_host(host)}/{full_name}/pull/{number}"
 
 
 def derive_api_urls(host: str) -> tuple[str, str]:

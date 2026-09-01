@@ -65,6 +65,7 @@ class _SinglePrRebaseMixin(_MergeManagerBase):
         rebase_ctx = rebase.RebaseContext(
             github_client=self._github_client,
             token=self.token,
+            host=self.host,
             rebase_local=self.rebase_local,
             preview_mode=self.preview_mode,
             merge_recheck_interval=self._merge_recheck_interval,

@@ -515,6 +515,7 @@ class TestRebaseModuleRecordsRebases:
         return rebase_module.RebaseContext(
             github_client=client,
             token="t",
+            host="github.com",
             rebase_local=False,
             preview_mode=False,
             merge_recheck_interval=0.0,

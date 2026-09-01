@@ -47,16 +47,13 @@ def _init_org_merge_client(
         parsed_org: Parsed owner URL with the org/user login.
         ctx: Shared merge context populated with CLI parameters.
     """
-    # The host here is guaranteed to *match* github.com: ``parse_org_url``
-    # is the single github.com-only choke point (it rejects every other
-    # host, including GHE, before a ``ParsedOrgUrl`` can reach this
-    # handler).  "Matches" is deliberate — ``parse_org_url`` accepts
-    # github.com and its subdomains (e.g. ``api.github.com``) via
-    # ``_host_matches``, so this is not an exact ``== "github.com"``
-    # guarantee.  Enabling GHE (#343) means relaxing that one parser
-    # guard and threading ``derive_api_urls(host)`` through the service
-    # stack — deliberately not re-checked here so there is no second
-    # guard to drift out of sync.
+    # ``parse_org_url`` is the single choke point that decides which
+    # hosts are permitted: github.com and its subdomains always, and a
+    # GitHub Enterprise Server host once the operator has declared it.
+    # The host reaches the client from ``ctx`` so an Enterprise run
+    # addresses the right API base URLs.  Deliberately not re-checked
+    # here --- a second guard would only drift out of sync with the
+    # first, which is exactly what happened in the repository handler.
 
     ctx.github_client = _pkg.GitHubClient(ctx.token, host=ctx.host)
     assert ctx.github_client.token is not None

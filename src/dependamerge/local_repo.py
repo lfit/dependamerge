@@ -189,6 +189,25 @@ def _looks_like_gerrit_remote(url: str) -> bool:
     return host_suggests_gerrit(host)
 
 
+def _remote_web_url(url: str) -> str:
+    """Normalise a git remote into a URL safe to show and to parse.
+
+    Credentials reach a remote in two ways.  ``normalize_target``
+    removes URL userinfo, but a query string can carry one too ---
+    a remote ending ``/owner/repo.git?token=SECRET`` --- and this URL
+    is printed back to the operator when a target is inferred.  A git
+    remote never needs a query or a fragment, so both are dropped.
+
+    Args:
+        url: The remote URL as git reports it.
+
+    Returns:
+        A web URL with no credentials in any position.
+    """
+    normalized = normalize_target(url)
+    return normalized.split("?", 1)[0].split("#", 1)[0]
+
+
 def _gerrit_identity_from_remote(url: str) -> tuple[str, str]:
     """Extract ``(host, project)`` from a Gerrit remote URL.
 
@@ -201,7 +220,7 @@ def _gerrit_identity_from_remote(url: str) -> tuple[str, str]:
     Returns:
         The host and project, either of which may be empty.
     """
-    normalized = normalize_target(url)
+    normalized = _remote_web_url(url)
     remainder = normalized.split("://", 1)[-1]
     host, _, path = remainder.partition("/")
     return (host, path.strip("/"))
@@ -261,7 +280,7 @@ def detect_local_target(cwd: Path | None = None) -> LocalTarget | None:
             project=project,
         )
 
-    normalized = normalize_target(url)
+    normalized = _remote_web_url(url)
     return LocalTarget(
         source=ChangeSource.GITHUB,
         url=normalized,

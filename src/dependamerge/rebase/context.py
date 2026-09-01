@@ -38,6 +38,10 @@ class RebaseContext:
 
     github_client: GitHubAsync | None
     token: str
+    # The GitHub host this run addresses.  Required rather than
+    # defaulted: the local rebase clones and force-pushes, so silently
+    # falling back to github.com sends an Enterprise token to dotcom.
+    host: str
     rebase_local: bool
     preview_mode: bool
     merge_recheck_interval: float

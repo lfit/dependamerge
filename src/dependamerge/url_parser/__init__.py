@@ -40,6 +40,7 @@ from .change import (
 )
 from .hosts import (
     _host_matches,
+    canonical_web_host,
     clone_url_for,
     derive_api_urls,
     is_supported_github_host,
@@ -83,6 +84,7 @@ __all__ = [
     "ParsedUrl",
     "UrlParseError",
     "_host_matches",
+    "canonical_web_host",
     "clone_url_for",
     "default_github_host",
     "derive_api_urls",

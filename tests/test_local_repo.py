@@ -163,6 +163,26 @@ class TestDetectLocalTarget:
         assert target is not None
         assert target.url == "https://github.com/acme/widget"
 
+    @pytest.mark.parametrize(
+        "remote",
+        [
+            "https://someuser:ghp_SECRET@github.com/acme/widget.git",
+            "https://github.com/acme/widget.git?token=ghp_SECRET",
+            "https://github.com/acme/widget.git#ghp_SECRET",
+        ],
+    )
+    def test_no_credential_survives_into_the_inferred_url(self, repo, remote):
+        # The inferred URL is printed back to the operator, so anything
+        # left in it lands in the terminal and in any captured log.
+        # Userinfo is only one of the places a token can hide.
+        _git(repo, "remote", "add", "origin", remote)
+
+        target = detect_local_target(repo)
+
+        assert target is not None
+        assert "ghp_SECRET" not in target.url
+        assert target.url == "https://github.com/acme/widget"
+
     def test_gitreview_marks_the_checkout_as_gerrit(self, repo):
         # Even with a GitHub-looking remote: .gitreview is Gerrit's own
         # declaration, and github2gerrit repositories genuinely have

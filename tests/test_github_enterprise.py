@@ -41,6 +41,7 @@ from dependamerge.url_parser import (
     parse_org_url,
     parse_owner_target,
     parse_repo_url,
+    pull_request_url_for,
     set_github_host,
 )
 
@@ -641,6 +642,24 @@ class TestCloneUrlFallbacksFollowTheHost:
 
     def test_empty_host_falls_back_to_dotcom(self):
         assert clone_url_for("", "acme/widget") == "https://github.com/acme/widget.git"
+
+    @pytest.mark.parametrize("host", ["api.github.com", "foo.github.com"])
+    def test_dotcom_subdomains_canonicalise(self, host):
+        # The parsers accept github.com *and its subdomains* as one
+        # service, so api.github.com reaches URL construction --- and
+        # building a clone URL under it names an address that serves
+        # no repositories.
+        assert clone_url_for(host, "acme/widget") == (
+            "https://github.com/acme/widget.git"
+        )
+        assert pull_request_url_for(host, "acme/widget", 7) == (
+            "https://github.com/acme/widget/pull/7"
+        )
+
+    def test_enterprise_host_is_not_canonicalised(self, declared_ghe):
+        assert pull_request_url_for(GHE, "acme/widget", 7) == (
+            f"https://{GHE}/acme/widget/pull/7"
+        )
 
     def test_rebase_plan_uses_the_host_for_missing_urls(self, declared_ghe):
         # The local rebase path clones and force-pushes, so a wrong

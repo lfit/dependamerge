@@ -69,7 +69,7 @@ async def _run_local_path(
             repo=repo,
             token=ctx.token,
             log=ctx.log,
-            host=getattr(ctx, "host", ""),
+            host=ctx.host,
         )
     except Exception as exc:
         ctx.log.debug(
