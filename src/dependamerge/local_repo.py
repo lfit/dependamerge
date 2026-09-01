@@ -208,8 +208,17 @@ def _looks_like_gerrit_remote(url: str) -> bool:
     # Gerrit anyway would make that declaration unusable.  The stronger
     # Gerrit evidence still wins: the SSH port above, and ``.gitreview``
     # which the caller consults first.
-    if is_supported_github_host(host):
-        return False
+    try:
+        if is_supported_github_host(host):
+            return False
+    except UrlParseError as exc:
+        # A malformed *GitHub* host setting says nothing about whether
+        # this remote is Gerrit.  Raising here would abort inference
+        # for a Gerrit checkout over configuration it never consults,
+        # and this runs before the merge command's error guard, so it
+        # would surface as a traceback.  A GitHub target still reports
+        # the same setting through the parsers.
+        log.debug("ignoring unusable GitHub host configuration: %s", exc)
     return host_suggests_gerrit(host)
 
 
@@ -256,13 +265,19 @@ def _safe_for_log(url: str) -> str:
     ``ftp://user:password@host/repo.git`` among them --- so the
     userinfo is removed regardless of scheme.
 
+    A token hides in three places, not one.  The query and fragment go
+    too, because this runs on remotes that normalisation has *not*
+    accepted, so it cannot rely on ``_remote_web_url`` having dropped
+    them, and a git remote needs neither.
+
     Args:
         url: The remote URL as git reports it.
 
     Returns:
-        The URL with any ``user:password@`` replaced.
+        The URL with any credentials removed from every position.
     """
-    return _USERINFO_RE.sub(r"\1***@", url)
+    redacted = _USERINFO_RE.sub(r"\1***@", url)
+    return redacted.split("?", 1)[0].split("#", 1)[0]
 
 
 def _remote_web_url(url: str) -> str | None:

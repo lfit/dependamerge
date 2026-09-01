@@ -280,6 +280,22 @@ class TestDetectLocalTarget:
         assert target is not None
         assert target.is_gerrit
 
+    def test_unusable_github_configuration_does_not_block_gerrit(
+        self, repo, monkeypatch
+    ):
+        # Consulting the declaration made this heuristic able to raise.
+        # A malformed *GitHub* host says nothing about whether this
+        # remote is Gerrit, and inference runs before the merge
+        # command's error guard, so raising surfaced as a traceback
+        # rather than the Gerrit guidance.
+        monkeypatch.setenv("GH_HOST", "broken:8443")
+        _git(repo, "remote", "add", "origin", "https://gerrit.example.org/acme/widget")
+
+        target = detect_local_target(repo)
+
+        assert target is not None
+        assert target.is_gerrit
+
     def test_none_outside_a_repository(self, tmp_path):
         outside = tmp_path / "plain"
         outside.mkdir()
@@ -500,6 +516,15 @@ class TestCredentialsNeverReachTheLog:
             ("ftp://user:password@host/repo.git", "ftp://***@host/repo.git"),
             ("https://tok@github.com/a/b.git", "https://***@github.com/a/b.git"),
             ("https://github.com/a/b.git", "https://github.com/a/b.git"),
+            # A token hides in three positions, not one.  This helper
+            # runs on remotes normalisation has *not* accepted, so it
+            # cannot rely on ``_remote_web_url`` having dropped these.
+            ("ftp://host/repo.git?token=SECRET", "ftp://host/repo.git"),
+            ("ftp://host/repo.git#token=SECRET", "ftp://host/repo.git"),
+            (
+                "ftp://user:pw@host/repo.git?token=SECRET",
+                "ftp://***@host/repo.git",
+            ),
         ],
     )
     def test_userinfo_is_redacted(self, raw, expected):

@@ -39,7 +39,9 @@ logger = logging.getLogger("dependamerge.github_client")
 
 # The path shape a pull request URL must have before declaring its host
 # could possibly help.
-_PR_PATH_RE = re.compile(r"\A/[^/]+/[^/]+/pull/\d+(?:/.*)?\Z")
+_PR_PATH_RE = re.compile(
+    r"\A/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)(?:/.*)?\Z"
+)
 
 if TYPE_CHECKING:
     from ..github_async import GitHubAsync
@@ -137,22 +139,18 @@ class GitHubClient(_GitHubQueryMixin, _GitHubActionMixin, _GitHubStatusMixin):
                 "address the wrong server."
             )
 
-        # Use parsed.path to ignore query strings and fragments
-        # when splitting.
-        parts = parsed.path.strip("/").split("/")
-        if "pull" not in parts:
+        # The same strict shape gates every host.  Splitting the path
+        # and indexing backwards from ``pull`` let a short path wrap
+        # around: ``/pull/7`` put ``pull`` at index 0, so the negative
+        # indexes returned owner ``pull`` and repository ``7``, and
+        # ``/a/pull/7`` returned the pair transposed.  Reading the
+        # groups the pattern already captures removes the arithmetic
+        # that made that possible.
+        match = _PR_PATH_RE.match(parsed.path)
+        if match is None:
             raise ValueError(f"Invalid GitHub PR URL: {url}")
-
-        # Find the 'pull' segment and get the PR number
-        try:
-            pull_index = parts.index("pull")
-            if pull_index + 1 >= len(parts):
-                raise ValueError("PR number not found after 'pull'")
-
-            owner = parts[pull_index - 2]
-            repo = parts[pull_index - 1]
-            pr_number = int(parts[pull_index + 1])
-
-            return owner, repo, pr_number
-        except (ValueError, IndexError) as e:
-            raise ValueError(f"Invalid GitHub PR URL: {url}") from e
+        return (
+            match.group("owner"),
+            match.group("repo"),
+            int(match.group("number")),
+        )

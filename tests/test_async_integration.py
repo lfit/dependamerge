@@ -397,6 +397,13 @@ class TestAsyncIntegration:
             "https://github.com/owner/repo",  # No PR number
             "not-a-url",
             "",
+            # Too few segments for /owner/repo/pull/N.  Splitting the
+            # path and indexing backwards from "pull" wrapped around:
+            # these returned ("pull", "7", 7) and ("7", "a", 7), so
+            # close queried a repository nobody named.
+            "https://github.com/pull/7",
+            "https://github.com/a/pull/7",
+            "https://github.com/pull",
         ]
 
         for invalid_url in invalid_urls:
