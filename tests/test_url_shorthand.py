@@ -80,6 +80,23 @@ class TestLooksLikeOwner:
     def test_valid_logins(self, segment):
         assert looks_like_owner(segment) is True
 
+    @pytest.mark.parametrize("segment", ["a--b--t", "acme--tools"])
+    def test_consecutive_hyphens_are_accepted(self, segment):
+        # Deliberate, and checked against the API rather than against
+        # the signup form's wording.  GitHub's *user* signup rejects
+        # consecutive hyphens, but organisation names did not always,
+        # and ``a--b--t`` is a real organisation (id 7857740, created
+        # 2014).  Owner-wide merging is mostly an organisation
+        # operation, so excluding "--" here would make a resolvable
+        # target unreachable by shorthand.
+        #
+        # The gate exists to stop obvious rubbish, not to reimplement
+        # GitHub's account policy: too permissive costs a clear 404,
+        # too strict reports "Invalid URL" for an owner that exists.
+        # Enterprise adds a second reason --- accounts provisioned
+        # over LDAP or SAML need not follow the dotcom signup grammar.
+        assert looks_like_owner(segment) is True
+
     @pytest.mark.parametrize(
         ("segment", "why"),
         [

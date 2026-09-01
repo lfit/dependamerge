@@ -70,6 +70,16 @@ _PORT_SUFFIX_RE = re.compile(r":\d+\Z")
 # bare token is plausibly an owner before treating it as one, so that
 # genuine rubbish still fails fast with "Invalid URL" instead of being
 # expanded into a request for a repository that cannot exist.
+#
+# Consecutive hyphens are permitted on purpose.  GitHub's *user*
+# signup form rejects them, but organisation names did not always ---
+# ``a--b--t`` is a real organisation --- and owner-wide merging is
+# mostly an organisation operation.  This gate stops obvious rubbish
+# rather than reimplementing GitHub's account policy: being too
+# permissive costs a clear 404 from the API, whereas being too strict
+# reports "Invalid URL" for an owner that exists.  Enterprise adds a
+# second reason, since accounts provisioned over LDAP or SAML need not
+# follow the dotcom grammar at all.
 _OWNER_RE = re.compile(r"\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\Z")
 
 #: Host named by ``--github-host`` on the command line, if any.
