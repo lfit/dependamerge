@@ -114,12 +114,19 @@ def _names_a_change(segments: list[str], host: str) -> bool:
     **including where the marker sits**, so that this agrees with the
     parser it protects rather than being a second, divergent test.
 
-    Which shapes apply depends on the host, because the markers are
-    ordinary names on the other platform.  ``changes`` and ``c`` are
-    valid GitHub logins, so ``github.com/changes/123.git`` is a clone
-    URL for the repository ``123``, not Gerrit change 123.  The change
-    parser resolves this the same way, by asking about the host before
-    trying the Gerrit shapes.
+    Which shapes apply depends on the host, but only where the two
+    platforms genuinely collide.  ``changes`` and ``c`` are valid
+    GitHub logins, so ``github.com/changes/123.git`` is a clone URL for
+    the repository ``123`` rather than Gerrit change 123, and the root
+    ``/changes/N`` form is therefore read as Gerrit off GitHub only.
+    The change parser resolves the same ambiguity the same way, by
+    asking about the host before trying that shape.
+
+    The full ``/c/<project>/+/N`` shape stays protected everywhere.  A
+    ``+`` segment cannot appear in a GitHub owner or repository name,
+    so nothing is given up by honouring it, and dropping it let a
+    malformed ``/c/project/+/123.git`` be repaired into a live change
+    reference on a declared Enterprise host.
 
     A ``/pull/N`` path stays a GitHub shape on every host, matching
     ``_is_github_url``.  On an undeclared host that is also the safe
@@ -134,7 +141,7 @@ def _names_a_change(segments: list[str], host: str) -> bool:
         True when the path names an individual change.
     """
     if _is_github_host(host):
-        return _is_github_pull_request(segments)
+        return _is_github_pull_request(segments) or _is_gerrit_change(segments)
     return (
         _is_github_pull_request(segments)
         or _is_gerrit_change(segments)

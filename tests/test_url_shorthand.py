@@ -430,6 +430,23 @@ class TestNormalizeTarget:
             == f"https://gerrit.example.org/{path}"
         )
 
+    @pytest.mark.parametrize(
+        "host",
+        ["github.com", "ghe.example.com", "gerrit.example.org"],
+    )
+    def test_the_full_gerrit_change_shape_is_protected_everywhere(
+        self, host, monkeypatch
+    ):
+        # A ``+`` segment cannot appear in a GitHub owner or repository
+        # name, so this shape collides with nothing and costs nothing
+        # to honour.  Gating it on the host let a malformed
+        # ``/c/project/+/123.git`` be repaired into a live change
+        # reference on a declared Enterprise host.
+        monkeypatch.setenv("DEPENDAMERGE_GITHUB_HOSTS", "ghe.example.com")
+        url = f"https://{host}/c/project/+/123.git"
+
+        assert normalize_target(url) == url
+
     @pytest.mark.parametrize("owner", ["changes", "c"])
     def test_gerrit_markers_are_ordinary_logins_on_github(self, owner):
         # ``changes`` and ``c`` are valid GitHub logins, so these are
