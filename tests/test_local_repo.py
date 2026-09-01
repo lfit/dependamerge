@@ -242,6 +242,44 @@ class TestDetectLocalTarget:
         assert target is not None
         assert target.is_gerrit
 
+    def test_a_declared_host_outranks_the_hostname_guess(self, repo, monkeypatch):
+        # Enterprise hostnames are arbitrary, so an operator may declare
+        # one carrying a ``gerrit`` label.  Letting the name-shape guess
+        # win would classify it as Gerrit and make the declaration
+        # unusable: bare ``dependamerge merge`` would refuse the
+        # checkout it was configured for.
+        monkeypatch.setenv("DEPENDAMERGE_GITHUB_HOSTS", "gerrit.example.org")
+        _git(
+            repo,
+            "remote",
+            "add",
+            "origin",
+            "https://gerrit.example.org/acme/widget.git",
+        )
+
+        target = detect_local_target(repo)
+
+        assert target is not None
+        assert not target.is_gerrit
+        assert target.url == "https://gerrit.example.org/acme/widget"
+
+    def test_the_gerrit_ssh_port_outranks_a_declaration(self, repo, monkeypatch):
+        # The complement: a declaration must not switch off the stronger
+        # evidence.  Port 29418 belongs to Gerrit's SSH daemon.
+        monkeypatch.setenv("DEPENDAMERGE_GITHUB_HOSTS", "gerrit.example.org")
+        _git(
+            repo,
+            "remote",
+            "add",
+            "origin",
+            "ssh://git@gerrit.example.org:29418/acme/widget",
+        )
+
+        target = detect_local_target(repo)
+
+        assert target is not None
+        assert target.is_gerrit
+
     def test_none_outside_a_repository(self, tmp_path):
         outside = tmp_path / "plain"
         outside.mkdir()

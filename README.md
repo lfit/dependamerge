@@ -520,8 +520,25 @@ dependamerge merge lfreleng-actions/dependamerge/pull/7
 dependamerge merge git@github.com:lfreleng-actions/dependamerge.git
 ```
 
-Full URLs work as before, with or without the scheme, and a trailing
-`.git` makes no difference.
+Full URLs work as before, with or without the scheme. A trailing
+`.git` makes no difference on a **repository** URL, which is what a
+clone remote carries:
+
+<!-- markdownlint-disable MD013 -->
+
+| Target                                   | Trailing `.git`                                |
+| ---------------------------------------- | ---------------------------------------------- |
+| `github.com/acme/widget.git`             | removed — the same as `github.com/acme/widget` |
+| `github.com/acme/widget/pull/7.git`      | **kept**, so the URL stays invalid             |
+| `gerrit.example.org/q/topic:release.git` | **kept**, as part of the topic                 |
+
+<!-- markdownlint-enable MD013 -->
+
+The suffix comes off where it can be a clone-URL artefact, and stays
+put everywhere else. No clone URL names a pull request or a change, so
+removing it there would turn a malformed target into a valid reference
+to a change you did not name. In a Gerrit search the trailing text is a
+value, so `release.git` is the topic you asked for.
 
 Two segments are ambiguous — is `a/b` an owner and a repository, or a
 host and an owner? A GitHub login cannot contain a dot, so a dotted

@@ -379,7 +379,9 @@ class TestNormalizeTarget:
         "url",
         [
             "https://github.com/acme/widget/pull/7.git",
+            "https://github.com/acme/widget/pull/7/files.git",
             "https://gerrit.example.org/c/acme/widget/+/123.git",
+            "https://gerrit.example.org/r/c/acme/widget/+/123.git",
             "https://gerrit.example.org/changes/123.git",
         ],
     )
@@ -388,6 +390,28 @@ class TestNormalizeTarget:
         # malformed URL into a valid reference to a change the operator
         # never named.  It has to stay invalid.
         assert normalize_target(url) == url
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            # A marker in the wrong position is part of the project.
+            # Gerrit projects nest, so each of these is a clone URL.
+            "org/pull/123",
+            "org/changes/123",
+            "org/pull/widget",
+            "acme/pull",
+            "changes",
+        ],
+    )
+    def test_a_marker_off_position_is_part_of_the_project(self, path):
+        # Matching "a marker with a number after it" anywhere would
+        # classify these as changes and leave the suffix on, so
+        # checkout inference would report the wrong project name.
+        # Each shape is anchored where the change parser anchors it.
+        assert (
+            normalize_target(f"https://gerrit.example.org/{path}.git")
+            == f"https://gerrit.example.org/{path}"
+        )
 
     @pytest.mark.parametrize(
         "url, expected",
@@ -410,8 +434,7 @@ class TestNormalizeTarget:
 
     def test_a_project_named_pull_still_gets_clone_handling(self):
         # Gerrit projects nest, so ``pull`` can be a real path segment.
-        # A marker counts only when a *number* follows it, as the
-        # change parsers require.
+        # Only the third segment is a GitHub pull request marker.
         assert (
             normalize_target("https://gerrit.example.org/org/pull/widget.git")
             == "https://gerrit.example.org/org/pull/widget"

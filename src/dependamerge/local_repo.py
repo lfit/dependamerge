@@ -29,7 +29,12 @@ from pathlib import Path
 
 from .git_ops import GitError, run_git
 from .gitreview import GitReviewInfo, parse_gitreview
-from .url_parser import ChangeSource, UrlParseError, normalize_target
+from .url_parser import (
+    ChangeSource,
+    UrlParseError,
+    is_supported_github_host,
+    normalize_target,
+)
 
 log = logging.getLogger("dependamerge.local_repo")
 
@@ -197,6 +202,14 @@ def _looks_like_gerrit_remote(url: str) -> bool:
     if normalized is None:
         return False
     host = normalized.split("://", 1)[-1].split("/", 1)[0]
+    # An explicit declaration outranks a guess about the name.
+    # Enterprise hostnames are arbitrary, so an operator may well have
+    # declared one carrying a ``gerrit`` label, and treating it as
+    # Gerrit anyway would make that declaration unusable.  The stronger
+    # Gerrit evidence still wins: the SSH port above, and ``.gitreview``
+    # which the caller consults first.
+    if is_supported_github_host(host):
+        return False
     return host_suggests_gerrit(host)
 
 

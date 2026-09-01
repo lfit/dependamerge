@@ -16,11 +16,11 @@ it is about what a path *means*, not about expanding an abbreviation.
 
 from __future__ import annotations
 
-#: Path segments that introduce an individual change, taken from the
-#: change parser: ``/owner/repo/pull/N`` on GitHub, and ``/c/.../+/N``
-#: or ``/changes/N`` on Gerrit.  A path carrying one names a change
-#: rather than a project, so it is not a clone URL.
-_CHANGE_MARKERS = frozenset({"pull", "+", "changes"})
+#: The Gerrit path segment that separates a project from its change
+#: number, and the prefix its REST API uses.
+_GERRIT_CHANGE_SEP = "+"
+_GERRIT_CHANGE_VIEW = "c"
+_GERRIT_REST_PREFIX = "changes"
 
 
 def _is_change_number(segment: str) -> bool:
@@ -38,18 +38,59 @@ def _is_change_number(segment: str) -> bool:
     return segment.removesuffix(".git").isdigit()
 
 
+def _is_github_pull_request(segments: list[str]) -> bool:
+    """Match ``/owner/repo/pull/N``, the GitHub pull request shape.
+
+    Position matters.  A Gerrit project may nest a segment called
+    ``pull`` at any depth, so only the third segment counts.
+    """
+    return (
+        len(segments) >= 4
+        and segments[2].lower() == "pull"
+        and _is_change_number(segments[3])
+    )
+
+
+def _is_gerrit_change(segments: list[str]) -> bool:
+    """Match ``[/base]/c/<project>/+/N``, the Gerrit change shape.
+
+    The ``/c/`` view segment leads, optionally behind a single base
+    path segment, and the number follows the ``+`` separator.
+    """
+    lowered = [s.lower() for s in segments]
+    if _GERRIT_CHANGE_VIEW not in lowered[:2]:
+        return False
+    view = lowered.index(_GERRIT_CHANGE_VIEW)
+    if _GERRIT_CHANGE_SEP not in segments[view:]:
+        return False
+    sep = segments.index(_GERRIT_CHANGE_SEP, view)
+    return sep + 1 < len(segments) and _is_change_number(segments[sep + 1])
+
+
+def _is_gerrit_rest_change(segments: list[str]) -> bool:
+    """Match ``/changes/N``, the Gerrit REST shape.
+
+    Anchored at the root, so a project nesting a ``changes`` segment is
+    left alone.
+    """
+    return (
+        len(segments) >= 2
+        and segments[0].lower() == _GERRIT_REST_PREFIX
+        and _is_change_number(segments[1])
+    )
+
+
 def _names_a_change(segments: list[str]) -> bool:
     """Report whether a path addresses one change rather than a project.
 
-    The markers are the ones this package's own change parser uses ---
-    ``/pull/`` for GitHub, ``/+/`` and ``/changes/`` for Gerrit --- so
-    that this agrees with the parser it protects instead of being a
-    second, divergent shape test.
+    Each shape mirrors the corresponding regex in the change parser,
+    **including where the marker sits**, so that this agrees with the
+    parser it protects rather than being a second, divergent test.
 
-    A marker counts only when a number follows it, which is what the
-    change parsers require.  Gerrit projects nest, so a project may
-    genuinely contain a ``pull`` segment: ``/org/pull/widget.git`` is a
-    clone URL and must keep its stripping.
+    Position is what keeps the rule honest.  Gerrit projects nest, so a
+    project may legitimately contain a ``pull`` or ``changes`` segment
+    with a numeric component after it --- ``/org/pull/123.git`` is a
+    clone URL, not pull request 123.
 
     Args:
         segments: The non-empty path segments, in order.
@@ -57,9 +98,10 @@ def _names_a_change(segments: list[str]) -> bool:
     Returns:
         True when the path names an individual change.
     """
-    return any(
-        marker.lower() in _CHANGE_MARKERS and _is_change_number(following)
-        for marker, following in zip(segments, segments[1:], strict=False)
+    return (
+        _is_github_pull_request(segments)
+        or _is_gerrit_change(segments)
+        or _is_gerrit_rest_change(segments)
     )
 
 

@@ -262,8 +262,14 @@ def _is_scp_remote(match: re.Match[str]) -> bool:
 def normalize_target(value: str, *, default_host: str | None = None) -> str:
     """Expand an abbreviated or git-remote target into an absolute URL.
 
-    Understood forms, in addition to ordinary ``http(s)://`` URLs which
-    pass through with only a ``.git`` suffix removed:
+    An ordinary ``http(s)://`` URL is rewritten rather than passed
+    through: any credentials are removed, and a trailing ``.git`` comes
+    off *conditionally*.  The suffix survives on a change path and
+    inside a Gerrit query, where removing it would either repair a
+    malformed URL into a live reference or alter the value searched
+    for --- see :mod:`dependamerge.url_parser.git_suffix`.
+
+    Abbreviated and remote forms expand as follows:
 
     ==============================  =====================================
     Input                           Result
