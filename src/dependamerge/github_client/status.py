@@ -19,8 +19,10 @@ effective.  Every attribute this mixin reads is established by
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 
 from ..bot_identity import is_automation_author
+from ..github_async import GitHubAsync
 from ..models import PullRequestInfo
 
 
@@ -29,6 +31,12 @@ class _GitHubStatusMixin:
 
     # Established by GitHubClient.__init__.
     token: str
+    host: str
+    # Provided by GitHubClient: builds a transport client aimed at
+    # ``host``, so an Enterprise run does not silently fall back to
+    # github.com.  Annotated rather than defined, to avoid shadowing
+    # the real method through the MRO.
+    _new_async: Callable[..., GitHubAsync]
 
     def is_automation_author(self, author: str) -> bool:
         """Check if the author is a known automation tool.
@@ -84,8 +92,6 @@ class _GitHubStatusMixin:
     def _analyze_block_reason(self, pr_info: PullRequestInfo) -> str:
         """Analyze why a PR is blocked and return appropriate status using REST."""
         try:
-            from ..github_async import GitHubAsync
-
             repo_owner, repo_name = pr_info.repository_full_name.split("/")
 
             # Check if we're already in an event loop
@@ -100,7 +106,7 @@ class _GitHubStatusMixin:
                 pass
 
             async def _run():
-                async with GitHubAsync(token=self.token) as api:
+                async with self._new_async() as api:
                     return await api.analyze_block_reason(
                         repo_owner, repo_name, pr_info.number, pr_info.head_sha
                     )

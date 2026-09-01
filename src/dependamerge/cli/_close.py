@@ -35,6 +35,11 @@ class _CloseContext:
 
     token: str
     github_client: _pkg.GitHubClient
+    # The GitHub host this run addresses, taken from the pull request
+    # URL.  A GitHub Enterprise Server install serves its API from
+    # different base URLs, so a run that loses the host silently
+    # addresses github.com instead.
+    host: str
     owner: str
     repo_name: str
     pr_number: int
@@ -157,6 +162,7 @@ def _find_similar_prs_for_close(
     async def _find_similar():
         svc = GitHubService(
             token=ctx.token,
+            host=ctx.host,
             progress_tracker=ctx.progress_tracker,
             debug_matching=debug_matching,
         )

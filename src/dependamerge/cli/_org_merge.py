@@ -58,7 +58,7 @@ def _init_org_merge_client(
     # stack — deliberately not re-checked here so there is no second
     # guard to drift out of sync.
 
-    ctx.github_client = _pkg.GitHubClient(ctx.token)
+    ctx.github_client = _pkg.GitHubClient(ctx.token, host=ctx.host)
     assert ctx.github_client.token is not None
     ctx.token = ctx.github_client.token
     ctx.owner = parsed_org.owner
@@ -104,6 +104,7 @@ def _fetch_owner_prs(
     async def _fetch_prs() -> tuple[list[PullRequestInfo], list[str]]:
         svc = GitHubService(
             token=ctx.token,
+            host=ctx.host,
             progress_tracker=ctx.progress_tracker,
         )
         try:

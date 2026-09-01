@@ -102,7 +102,7 @@ def _init_github_merge(ctx: _MergeContext) -> None:
 
     Populates *ctx* in-place with the resolved objects.
     """
-    ctx.github_client = _pkg.GitHubClient(ctx.token)
+    ctx.github_client = _pkg.GitHubClient(ctx.token, host=ctx.host)
     assert ctx.github_client.token is not None
     ctx.token = ctx.github_client.token
     ctx.owner, ctx.repo_name, ctx.pr_number = ctx.github_client.parse_pr_url(ctx.pr_url)

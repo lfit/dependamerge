@@ -54,6 +54,7 @@ def _scan_and_find_similar(ctx: _MergeContext) -> None:
     async def _find_similar():
         svc = GitHubService(
             token=ctx.token,
+            host=ctx.host,
             progress_tracker=ctx.progress_tracker,
             debug_matching=ctx.debug_matching,
         )
@@ -156,6 +157,7 @@ def _run_parallel_merge(
     async def _do_merge():
         async with AsyncMergeManager(
             token=ctx.token,  # pyright: ignore[reportArgumentType]
+            host=ctx.host,
             merge_method=ctx.merge_method,
             max_retries=MAX_RETRIES,
             concurrency=concurrency,

@@ -63,6 +63,12 @@ class _MergeContext:
 
     # Derived / mutable state
     github_client: _pkg.GitHubClient | None = None
+    # The GitHub host this run addresses, taken from the parsed target.
+    # Empty until the target is parsed, at which point every client and
+    # service built from this context inherits it --- a GitHub
+    # Enterprise Server install serves its API from different base URLs,
+    # so a run that loses the host silently addresses github.com.
+    host: str = ""
     owner: str = ""
     repo_name: str = ""
     pr_number: int = 0

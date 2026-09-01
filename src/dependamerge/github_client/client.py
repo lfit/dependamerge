@@ -17,27 +17,68 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
-from ..url_parser import _host_matches
+from ..url_parser import (
+    default_github_host,
+    derive_api_urls,
+    is_supported_github_host,
+)
 from .actions import _GitHubActionMixin
 from .queries import _GitHubQueryMixin
 from .status import _GitHubStatusMixin
 
 logger = logging.getLogger("dependamerge.github_client")
 
+if TYPE_CHECKING:
+    from ..github_async import GitHubAsync
+
 
 class GitHubClient(_GitHubQueryMixin, _GitHubActionMixin, _GitHubStatusMixin):
     """GitHub API client for managing pull requests."""
 
-    def __init__(self, token: str | None = None):
-        """Initialize GitHub client with token."""
+    def __init__(self, token: str | None = None, *, host: str | None = None):
+        """Initialize GitHub client with token.
+
+        Args:
+            token: GitHub token; falls back to ``GITHUB_TOKEN``.
+            host: The GitHub host to address.  Defaults to github.com,
+                or to whatever ``DEPENDAMERGE_GITHUB_HOST``/``GH_HOST``
+                names.  A GitHub Enterprise Server host changes the API
+                base URLs, which is why it has to be carried here rather
+                than assumed at the transport layer.
+        """
         resolved = token or os.getenv("GITHUB_TOKEN")
         if not resolved:
             raise ValueError(
                 "GitHub token is required. Set GITHUB_TOKEN environment variable."
             )
         self.token: str = resolved
+        self.host: str = (host or default_github_host()).strip().lower()
+        self.api_url, self.graphql_url = derive_api_urls(self.host)
+
+    def _new_async(self, **kwargs: Any) -> GitHubAsync:
+        """Build a transport client aimed at this instance's host.
+
+        Every operation opens its own client, so without a single
+        factory each new call site is another chance to silently fall
+        back to github.com on an Enterprise run.
+
+        ``GitHubAsync`` is resolved here rather than bound at import
+        time, so that tests patching
+        ``dependamerge.github_async.GitHubAsync`` still intercept it ---
+        the same convention the query and action mixins have always
+        used, and the reason their imports are function-local.
+        """
+        from ..github_async import GitHubAsync as _GitHubAsync
+
+        return _GitHubAsync(
+            token=self.token,
+            api_url=self.api_url,
+            graphql_url=self.graphql_url,
+            **kwargs,
+        )
 
     def __repr__(self) -> str:
         """Safe repr that never exposes the token value."""
@@ -49,7 +90,7 @@ class GitHubClient(_GitHubQueryMixin, _GitHubActionMixin, _GitHubStatusMixin):
         # See CodeQL rule py/incomplete-url-substring-sanitization.
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
-        if not _host_matches(host, "github.com"):
+        if not is_supported_github_host(host):
             raise ValueError(f"Invalid GitHub PR URL: {url}")
 
         # Use parsed.path to ignore query strings and fragments

@@ -31,6 +31,7 @@ from ..copilot_handler import CopilotCommentHandler
 from ..github_service import GitHubService
 from ..pr_poller import PullRequestStatePoller
 from ..progress_tracker import MergeProgressTracker
+from ..url_parser import default_github_host, derive_api_urls
 from ._base import _MergeManagerBase
 from ._constants import DEFAULT_MERGE_TIMEOUT
 from ._types import MergeResult
@@ -58,6 +59,7 @@ class _LifecycleMixin(_MergeManagerBase):
         repo_scoped: bool = False,
         max_wait: float | None = None,
         fix_semantic_title: bool = True,
+        host: str | None = None,
     ):
         # Resolved through the package at call time rather than bound at
         # import time, so that a test rebinding the constant on
@@ -70,6 +72,10 @@ class _LifecycleMixin(_MergeManagerBase):
         self.concurrency = concurrency
         self.fix_out_of_date = fix_out_of_date
         self.fix_semantic_title = fix_semantic_title
+        # The GitHub host every request in this run is aimed at.  A
+        # GitHub Enterprise Server install changes the API base URLs, so
+        # the host has to reach __aenter__ rather than being assumed.
+        self.host = (host or default_github_host()).strip().lower()
         self.progress_tracker = progress_tracker
         self.preview_mode = preview_mode
         self.dismiss_copilot = dismiss_copilot
@@ -298,7 +304,10 @@ class _LifecycleMixin(_MergeManagerBase):
         # ``dependamerge.merge_manager`` is observed here.
         from dependamerge import merge_manager as _mm
 
-        self._github_client = _mm.GitHubAsync(token=self.token)
+        api_url, graphql_url = derive_api_urls(self.host)
+        self._github_client = _mm.GitHubAsync(
+            token=self.token, api_url=api_url, graphql_url=graphql_url
+        )
         await self._github_client.__aenter__()
 
         # Coalesces the wait loops' per-PR state reads into batched

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
-from .hosts import _host_matches
+from .hosts import is_supported_github_host, unsupported_host_message
 from .models import ChangeSource, ParsedOrgUrl, ParsedRepoUrl, UrlParseError
 from .shorthand import normalize_target
 
@@ -61,23 +61,14 @@ def parse_repo_url(url: str) -> ParsedRepoUrl:
     host = parsed.hostname.lower()
     path = parsed.path.rstrip("/")
 
-    # Only github.com and actual subdomains of github.com (e.g.
-    # foo.github.com) are accepted.  _host_matches() checks for an
-    # exact match or a *.github.com suffix, so hosts like
-    # github.enterprise.com (a subdomain of enterprise.com, NOT
-    # github.com) are correctly rejected.
-    #
-    # GitHub Enterprise Server installations use arbitrary hostnames
-    # (e.g. ghe.corp.example.com) that cannot be reliably distinguished
-    # from non-GitHub hosts without explicit configuration.  GHE support
-    # (both repo-merge and single-PR) requires host-aware API base URL
-    # configuration, which is not yet implemented.
-    if not _host_matches(host, "github.com"):
-        raise UrlParseError(
-            f"Repository URL parsing is only supported for "
-            f"github.com hosts (got host: {host}). "
-            f"Use a direct PR URL for non-GitHub hosts."
-        )
+    # github.com is always available; a GitHub Enterprise Server host is
+    # available once the operator has declared it.  Enterprise hostnames
+    # are arbitrary, so requiring a declaration is what stops a mistyped
+    # URL directing a token at an unintended host.  This is the single
+    # choke point for repository URLs --- do NOT scatter additional host
+    # checks elsewhere.
+    if not is_supported_github_host(host):
+        raise UrlParseError(unsupported_host_message(host, "Repository"))
 
     # Try to extract owner/repo from the path
     # Expected: /owner/repo or /owner/repo/pulls
@@ -167,19 +158,14 @@ def parse_org_url(url: str) -> ParsedOrgUrl:
     host = parsed.hostname.lower()
     path = parsed.path.rstrip("/")
 
-    # SECURITY: Only github.com and actual subdomains of github.com are
-    # accepted.  GitHub Enterprise Server (GHE) uses arbitrary hostnames
-    # that cannot be reliably distinguished from non-GitHub hosts without
-    # explicit configuration.  This github.com-only guard is the single
-    # choke point to relax when GHE owner-wide support is enabled (see
-    # derive_api_urls() and the GHE tracking issue) — do NOT scatter
-    # additional host checks elsewhere.
-    if not _host_matches(host, "github.com"):
-        raise UrlParseError(
-            f"Owner-wide URL parsing is only supported for github.com "
-            f"hosts (got host: {host}). GitHub Enterprise support is not "
-            f"yet enabled — use a direct PR URL for non-github.com hosts."
-        )
+    # SECURITY: github.com is always available; a GitHub Enterprise
+    # Server host is available once the operator has declared it.
+    # Enterprise hostnames are arbitrary, so requiring a declaration is
+    # what stops a mistyped URL directing a token at an unintended
+    # host.  This is the single choke point for owner-wide URLs --- do
+    # NOT scatter additional host checks elsewhere.
+    if not is_supported_github_host(host):
+        raise UrlParseError(unsupported_host_message(host, "Owner-wide"))
 
     parts = [p for p in path.split("/") if p]
 

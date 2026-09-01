@@ -5,6 +5,8 @@
 The ``close`` command and its options.
 """
 
+from urllib.parse import urlparse
+
 import typer
 
 # Names substituted at ``dependamerge.cli.<name>`` are read from
@@ -101,7 +103,14 @@ def close(
     progress_tracker = None
 
     try:
-        github_client = _pkg.GitHubClient(token)
+        # Derive the host from the URL before building the client: a
+        # GitHub Enterprise Server install serves its API from
+        # different base URLs, and the client bakes those in at
+        # construction.  An unparsable URL leaves the host empty and
+        # falls back to the default, which parse_pr_url then rejects.
+        github_client = _pkg.GitHubClient(
+            token, host=(urlparse(pr_url).hostname or "").lower() or None
+        )
         # GitHubClient resolves None -> GITHUB_TOKEN env var (raises if missing)
         assert github_client.token is not None
         token = github_client.token
@@ -129,6 +138,7 @@ def close(
         ctx = _CloseContext(
             token=token,
             github_client=github_client,
+            host=github_client.host,
             owner=owner,
             repo_name=repo_name,
             pr_number=pr_number,

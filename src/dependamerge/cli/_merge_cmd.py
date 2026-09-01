@@ -24,13 +24,13 @@ from ._context import _MergeContext
 from ._merge_dispatch import (
     _dispatch_gerrit,
     _normalise_topic,
-    _parse_merge_target,
     _resolve_gerrit_target,
     _run_guarded,
     _run_single_pr_merge,
     _validate_max_wait,
 )
 from ._merge_inputs import _validate_merge_inputs
+from ._merge_target import _parse_merge_target, _target_host
 from ._org_merge import _handle_org_merge
 from ._repo_merge import _handle_repo_merge
 
@@ -323,6 +323,7 @@ def merge(
         include_human_prs=include_human_prs,
         rebase_local=rebase_local,
         dry_run=dry_run,
+        host=_target_host(target),
     )
 
     gerrit_target = _resolve_gerrit_target(target, topic)

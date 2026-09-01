@@ -38,7 +38,12 @@ from .change import (
     detect_source,
     parse_change_url,
 )
-from .hosts import _host_matches, derive_api_urls
+from .hosts import (
+    _host_matches,
+    derive_api_urls,
+    is_supported_github_host,
+    unsupported_host_message,
+)
 from .models import (
     ChangeSource,
     ParsedGerritTopicUrl,
@@ -51,6 +56,7 @@ from .repos import parse_org_url, parse_owner_arg, parse_repo_url
 from .shorthand import (
     DEFAULT_GITHUB_HOST,
     default_github_host,
+    enterprise_hosts,
     looks_like_host,
     looks_like_owner,
     normalize_target,
@@ -70,6 +76,8 @@ __all__ = [
     "default_github_host",
     "derive_api_urls",
     "detect_source",
+    "enterprise_hosts",
+    "is_supported_github_host",
     "looks_like_host",
     "looks_like_owner",
     "normalize_target",
@@ -79,4 +87,5 @@ __all__ = [
     "parse_owner_arg",
     "parse_repo_url",
     "strip_git_suffix",
+    "unsupported_host_message",
 ]

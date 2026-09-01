@@ -177,9 +177,12 @@ class TestAsyncIntegration:
         assert result.total_repositories == 1
         assert result.total_prs == 2
 
-        # Verify service was used correctly
+        # Verify service was used correctly.  ``host`` is asserted
+        # explicitly: a service built without it addresses github.com,
+        # which is right by luck on dotcom and silently wrong against a
+        # GitHub Enterprise Server install.
         mock_service_class.assert_called_once_with(
-            token="test_token", progress_tracker=None
+            token="test_token", host="github.com", progress_tracker=None
         )
         mock_service.scan_organization.assert_called_once_with(
             "test-org", include_drafts=False

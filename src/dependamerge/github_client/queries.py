@@ -25,6 +25,7 @@ established by ``GitHubClient.__init__``.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -165,15 +166,20 @@ class _GitHubQueryMixin:
 
     # Established by GitHubClient.__init__.
     token: str
+    host: str
+    # Provided by GitHubClient: builds a transport client aimed at
+    # ``host``, so an Enterprise run does not silently fall back to
+    # github.com.  Annotated rather than defined, to avoid shadowing
+    # the real method through the MRO.
+    _new_async: Callable[..., GitHubAsync]
 
     def get_pull_request_info(
         self, owner: str, repo: str, pr_number: int
     ) -> PullRequestInfo:
         """Get detailed information about a pull request using the async REST client."""
-        from ..github_async import GitHubAsync
 
         async def _run() -> PullRequestInfo:
-            async with GitHubAsync(token=self.token) as api:
+            async with self._new_async() as api:
                 pr_response = await api.get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
                 assert isinstance(pr_response, dict), "PR endpoint must return a dict"
                 pr: dict[str, Any] = pr_response
@@ -189,11 +195,10 @@ class _GitHubQueryMixin:
         self, owner: str, repo: str, pr_number: int
     ) -> list[str]:
         """Get commit messages from a pull request using the async REST client."""
-        from ..github_async import GitHubAsync
 
         async def _run() -> list[str]:
             messages: list[str] = []
-            async with GitHubAsync(token=self.token) as api:
+            async with self._new_async() as api:
                 async for page in api.get_paginated(
                     f"/repos/{owner}/{repo}/pulls/{pr_number}/commits", per_page=100
                 ):
@@ -209,11 +214,10 @@ class _GitHubQueryMixin:
 
     def get_organization_repositories(self, org_name: str) -> list[str]:
         """Get all repositories in an organization using REST API. Returns list of full_name strings."""
-        from ..github_async import GitHubAsync
 
         async def _run() -> list[str]:
             repos: list[str] = []
-            async with GitHubAsync(token=self.token) as api:
+            async with self._new_async() as api:
                 try:
                     async for page in api.get_paginated(
                         f"/orgs/{org_name}/repos", per_page=100
@@ -256,7 +260,11 @@ class _GitHubQueryMixin:
         from ..github_service import GitHubService
 
         async def _run():
-            svc = GitHubService(token=self.token, progress_tracker=progress_tracker)
+            svc = GitHubService(
+                token=self.token,
+                host=self.host,
+                progress_tracker=progress_tracker,
+            )
             try:
                 return await svc.scan_organization(
                     org_name, include_drafts=include_drafts

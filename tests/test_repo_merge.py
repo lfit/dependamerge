@@ -152,17 +152,17 @@ class TestParseRepoUrl:
             parse_repo_url("   ")
 
     def test_repo_url_gerrit_style_raises(self):
-        with pytest.raises(UrlParseError, match="only supported for github.com"):
+        with pytest.raises(UrlParseError, match="not enabled for host"):
             parse_repo_url("https://gerrit.example.org/c/project/+/12345")
 
     def test_repo_url_gerrit_style_no_plus_rejected(self):
         """A non-github.com host is rejected regardless of path shape."""
-        with pytest.raises(UrlParseError, match="only supported for github.com"):
+        with pytest.raises(UrlParseError, match="not enabled for host"):
             parse_repo_url("https://gerrit.example.org/c/repo")
 
     def test_repo_url_ghe_rejected(self):
         """GHE hosts are not github.com subdomains — rejected at parse time."""
-        with pytest.raises(UrlParseError, match="only supported for github.com"):
+        with pytest.raises(UrlParseError, match="not enabled for host"):
             parse_repo_url("https://github.enterprise.com/owner/repo")
 
     def test_repo_url_github_subdomain_accepted(self):
@@ -175,7 +175,7 @@ class TestParseRepoUrl:
 
     def test_repo_url_non_github_host_rejected(self):
         # Non-github.com hosts are rejected at parse time to prevent misrouting
-        with pytest.raises(UrlParseError, match="only supported for github.com"):
+        with pytest.raises(UrlParseError, match="not enabled for host"):
             parse_repo_url("https://gitlab.com/owner/repo")
 
     def test_repo_url_extra_segments_raises(self):

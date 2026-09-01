@@ -11,6 +11,8 @@ single place encoding the dotcom-versus-GHE base-URL rule.
 
 from __future__ import annotations
 
+from .shorthand import enterprise_hosts
+
 # aislop-ignore-file ai-slop/hardcoded-url -- This module parses and builds
 # GitHub/Gerrit URLs, so URL literals here are the subject matter, not
 # stray configuration: example URLs in error/usage messages and
@@ -52,6 +54,56 @@ def _host_matches(
     return False
 
 
+def is_supported_github_host(host: str) -> bool:
+    """Report whether ``host`` may be treated as a GitHub API endpoint.
+
+    github.com and its subdomains always qualify.  A GitHub Enterprise
+    Server install qualifies once the operator has declared it --- see
+    :func:`~dependamerge.url_parser.shorthand.enterprise_hosts`.
+
+    SECURITY: the declaration requirement is the point.  Enterprise
+    hostnames are arbitrary, so accepting any host that merely appears
+    in a URL would send the caller's token to whatever a pasted or
+    mistyped link names.  Comparison goes through :func:`_host_matches`
+    rather than substring tests.
+
+    Args:
+        host: The hostname to check.
+
+    Returns:
+        True when requests may be directed at this host.
+    """
+    host = (host or "").strip().lower()
+    if not host:
+        return False
+    if _host_matches(host, "github.com"):
+        return True
+    return any(
+        _host_matches(host, declared, allow_subdomains=False)
+        for declared in enterprise_hosts()
+    )
+
+
+def unsupported_host_message(host: str, scope: str) -> str:
+    """Build the rejection shown for an undeclared host.
+
+    Args:
+        host: The offending hostname.
+        scope: What was being parsed, e.g. ``"Repository"``.
+
+    Returns:
+        A message naming the host and how to permit it.
+    """
+    return (
+        f"{scope} URL parsing is not enabled for host: {host}. "
+        "github.com works out of the box; for a GitHub Enterprise "
+        "Server install, declare it first with "
+        "DEPENDAMERGE_GITHUB_HOSTS=host1,host2 (or GH_HOST=host). "
+        "Hosts are declared rather than inferred so a mistyped URL "
+        "cannot send your token somewhere unintended."
+    )
+
+
 def derive_api_urls(host: str) -> tuple[str, str]:
     """Derive the (REST, GraphQL) API base URLs for a GitHub host.
 
@@ -61,12 +113,10 @@ def derive_api_urls(host: str) -> tuple[str, str]:
     serve the API from ``https://HOST/api/v3`` (REST) and
     ``https://HOST/api/graphql`` (GraphQL).
 
-    GHE is not yet wired through the service/client constructors.  The
-    repository and owner-wide parsers reject non-github.com hosts; a
-    direct pull request URL is accepted for any host, since ``/pull/``
-    identifies it structurally.  Centralising the derivation here means
-    enabling GHE later is a matter of relaxing those two guards and
-    threading the returned URLs through — see the GHE tracking issue.
+    GHE hosts must be declared by the operator before they are used;
+    callers gate on :func:`is_supported_github_host` first.  This
+    function derives URLs for whatever host it is given and performs no
+    trust check of its own.
 
     Args:
         host: The hostname (e.g. ``github.com`` or ``ghe.example.com``).

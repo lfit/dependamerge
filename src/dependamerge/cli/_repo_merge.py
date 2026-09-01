@@ -58,7 +58,7 @@ def _init_repo_merge_client(
         )
         raise typer.Exit(code=1)
 
-    ctx.github_client = _pkg.GitHubClient(ctx.token)
+    ctx.github_client = _pkg.GitHubClient(ctx.token, host=ctx.host)
     assert ctx.github_client.token is not None
     ctx.token = ctx.github_client.token
     ctx.owner = parsed_repo.owner
@@ -101,6 +101,7 @@ def _fetch_repo_prs(
     async def _fetch_prs() -> list[PullRequestInfo]:
         svc = GitHubService(
             token=ctx.token,
+            host=ctx.host,
             progress_tracker=ctx.progress_tracker,
         )
         try:

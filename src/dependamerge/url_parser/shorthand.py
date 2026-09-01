@@ -59,6 +59,41 @@ _PORT_SUFFIX_RE = re.compile(r":\d+\Z")
 _OWNER_RE = re.compile(r"\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\Z")
 
 
+def enterprise_hosts() -> tuple[str, ...]:
+    """Return the GitHub Enterprise hosts the operator has declared.
+
+    Enterprise installs use arbitrary hostnames, so there is no way to
+    recognise one from the name alone.  Trusting whatever host appears
+    in a URL would mean sending the caller's token wherever a pasted or
+    mistyped link points, so a host has to be declared before it is
+    used.
+
+    Declared by ``DEPENDAMERGE_GITHUB_HOSTS`` (comma-separated), and by
+    the single-host ``DEPENDAMERGE_GITHUB_HOST`` / ``GH_HOST`` variables
+    that also set the default for shorthand --- naming a host as your
+    default is a clear enough statement that you trust it.
+
+    Returns:
+        A tuple of lowercased hostnames, without duplicates.
+    """
+    seen: dict[str, None] = {}
+    raw = os.environ.get("DEPENDAMERGE_GITHUB_HOSTS") or ""
+    for candidate in raw.split(","):
+        host = _clean_host(candidate)
+        if host:
+            seen[host] = None
+    for name in _HOST_ENV_VARS:
+        host = _clean_host(os.environ.get(name) or "")
+        if host:
+            seen[host] = None
+    return tuple(seen)
+
+
+def _clean_host(value: str) -> str:
+    """Reduce a configured value to a bare lowercase hostname."""
+    return _strip_scheme(value.strip()).strip("/").split("/", 1)[0].lower()
+
+
 def default_github_host() -> str:
     """Return the host a bare shorthand should resolve against.
 
@@ -67,9 +102,9 @@ def default_github_host() -> str:
     back to github.com.
     """
     for name in _HOST_ENV_VARS:
-        value = (os.environ.get(name) or "").strip()
+        value = _clean_host(os.environ.get(name) or "")
         if value:
-            return _strip_scheme(value).strip("/").lower()
+            return value
     return DEFAULT_GITHUB_HOST
 
 

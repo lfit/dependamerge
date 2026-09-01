@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any
 
 from ..github_async import GitHubAsync
+from ..url_parser import default_github_host, derive_api_urls
 from ._constants import (
     DEFAULT_COMMENTS_PAGE_SIZE,
     DEFAULT_CONTEXTS_PAGE_SIZE,
@@ -60,6 +61,7 @@ class GitHubService(
         self,
         token: str | None = None,
         *,
+        host: str | None = None,
         progress_tracker: Any | None = None,
         max_repo_tasks: int = 8,
         max_page_tasks: int = 16,
@@ -69,6 +71,9 @@ class GitHubService(
         """
         Args:
             token: GitHub token; if None, reads from env GITHUB_TOKEN.
+            host: The GitHub host to address.  Ignored when ``client``
+                is supplied, since that client already carries its own
+                base URLs.
             progress_tracker: Optional ProgressTracker-compatible instance.
             max_repo_tasks: Max concurrent repository scans to schedule at once.
             debug_matching: Enable detailed debugging output for PR matching.
@@ -82,8 +87,12 @@ class GitHubService(
         """
         self._owns_api = client is None
         self._callbacks_attached = False
+        self.host = (host or default_github_host()).strip().lower()
+        api_url, graphql_url = derive_api_urls(self.host)
         self._api = client or GitHubAsync(
             token=token,
+            api_url=api_url,
+            graphql_url=graphql_url,
             on_rate_limited=self._on_rate_limited,
             on_rate_limit_cleared=self._on_rate_limit_cleared,
             on_metrics=self._on_metrics,
