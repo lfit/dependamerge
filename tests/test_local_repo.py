@@ -186,6 +186,20 @@ class TestDetectLocalTarget:
         assert target is not None
         assert target.is_gerrit
         assert target.gitreview is None
+        # Identity still comes through: the guidance names the host and
+        # project, which is what makes it actionable.
+        assert target.host == "gerrit.example.org"
+        assert target.project == "releng/tool"
+
+    def test_gerrit_hostname_detection_also_reports_identity(self, repo):
+        _git(repo, "remote", "add", "origin", "https://gerrit.example.org/releng/tool")
+
+        target = detect_local_target(repo)
+
+        assert target is not None
+        assert target.is_gerrit
+        assert target.host == "gerrit.example.org"
+        assert target.project == "releng/tool"
 
     def test_scp_path_beginning_with_the_gerrit_port_is_not_gerrit(self, repo):
         # An scp remote puts the *path* after the colon, so an owner
@@ -289,6 +303,8 @@ class TestNoUrlUsesTheLocalCheckout:
             remote="origin",
             root=Path("/tmp/tool"),
             gitreview=info,
+            host=info.host,
+            project=info.project,
         )
         mocker.patch(
             "dependamerge.cli._merge_target.detect_local_target", return_value=target
@@ -303,6 +319,25 @@ class TestNoUrlUsesTheLocalCheckout:
         assert "gerrit.linuxfoundation.org" in result.stdout
         assert "releng/tool" in result.stdout
         assert "topic:" in result.stdout
+
+    def test_gerrit_guidance_names_a_remote_only_checkout(self, mocker):
+        # No .gitreview, so the identity comes from the remote alone.
+        target = LocalTarget(
+            source=ChangeSource.GERRIT,
+            url="",
+            remote="origin",
+            root=Path("/tmp/tool"),
+            host="gerrit.example.org",
+            project="releng/tool",
+        )
+        mocker.patch(
+            "dependamerge.cli._merge_target.detect_local_target", return_value=target
+        )
+
+        result = self.runner.invoke(app, ["merge", "--token", "test_token"])
+
+        assert "gerrit.example.org" in result.stdout
+        assert "releng/tool" in result.stdout
 
     def test_outside_a_repository_explains_the_alternatives(self, mocker):
         mocker.patch(

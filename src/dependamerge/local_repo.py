@@ -59,6 +59,12 @@ class LocalTarget:
         remote: The git remote the answer came from, for reporting.
         root: The repository's working tree root.
         gitreview: Gerrit's ``.gitreview``, when the checkout has one.
+        host: The server the checkout belongs to, however it was
+            determined.  Reported back to the operator, so it is
+            populated for a Gerrit checkout recognised by its remote
+            as well as one carrying a ``.gitreview``.
+        project: The Gerrit project, when it is known.  A remote gives
+            this away in its path even without a ``.gitreview``.
     """
 
     source: ChangeSource
@@ -66,6 +72,8 @@ class LocalTarget:
     remote: str
     root: Path
     gitreview: GitReviewInfo | None = None
+    host: str = ""
+    project: str = ""
 
     @property
     def is_gerrit(self) -> bool:
@@ -181,6 +189,24 @@ def _looks_like_gerrit_remote(url: str) -> bool:
     return host_suggests_gerrit(host)
 
 
+def _gerrit_identity_from_remote(url: str) -> tuple[str, str]:
+    """Extract ``(host, project)`` from a Gerrit remote URL.
+
+    Gerrit remotes name the project in their path, so a checkout with
+    no ``.gitreview`` still identifies itself.
+
+    Args:
+        url: The remote URL.
+
+    Returns:
+        The host and project, either of which may be empty.
+    """
+    normalized = normalize_target(url)
+    remainder = normalized.split("://", 1)[-1]
+    host, _, path = remainder.partition("/")
+    return (host, path.strip("/"))
+
+
 def detect_local_target(cwd: Path | None = None) -> LocalTarget | None:
     """Work out what the current checkout points at.
 
@@ -214,22 +240,32 @@ def detect_local_target(cwd: Path | None = None) -> LocalTarget | None:
             remote=remote_name,
             root=root,
             gitreview=gitreview,
+            host=gitreview.host,
+            project=gitreview.project,
         )
 
     if not url:
         return None
 
     if _looks_like_gerrit_remote(url):
+        # Recognised from the remote alone.  Its host and path are the
+        # only identity available, and reporting them is the difference
+        # between actionable guidance and a bare refusal.
+        host, project = _gerrit_identity_from_remote(url)
         return LocalTarget(
             source=ChangeSource.GERRIT,
             url="",
             remote=remote_name,
             root=root,
+            host=host,
+            project=project,
         )
 
+    normalized = normalize_target(url)
     return LocalTarget(
         source=ChangeSource.GITHUB,
-        url=normalize_target(url),
+        url=normalized,
         remote=remote_name,
         root=root,
+        host=normalized.split("://", 1)[-1].split("/", 1)[0],
     )

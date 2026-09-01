@@ -13,9 +13,9 @@ from ..progress_tracker import ProgressTracker
 from ..url_parser import (
     UrlParseError,
     parse_owner_target,
-    set_github_host,
 )
 from ._app import app, console
+from ._github_host import apply_github_host
 from ._reports import _display_status_results
 
 
@@ -59,15 +59,18 @@ def status(
     # Applied before anything parses a target: the flag sets both
     # the host a shorthand resolves against and the set of hosts
     # permitted at all.
-    set_github_host(github_host)
+    apply_github_host(github_host)
 
     # Parse owner login from input (handles a bare login plus every
     # GitHub owner URL form, including /orgs/owner/repositories).
     try:
         org_name, owner_host = parse_owner_target(org_input)
-    except UrlParseError:
-        org_name = ""
-        owner_host = ""
+    except UrlParseError as exc:
+        # The parser's own message carries the remedy --- which
+        # host to declare, and how.  Swallowing it left an
+        # Enterprise operator with only "invalid owner".
+        console.print(f"❌ {exc}")
+        raise typer.Exit(1) from None
     if not org_name:
         console.print("❌ Invalid GitHub owner name or URL")
         console.print(

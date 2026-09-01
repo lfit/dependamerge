@@ -37,9 +37,9 @@ from ..system_utils import get_default_workers
 from ..url_parser import (
     UrlParseError,
     parse_owner_target,
-    set_github_host,
 )
 from ._app import app, console
+from ._github_host import apply_github_host
 from ._reports import _display_blocked_results
 
 
@@ -59,9 +59,12 @@ def _resolve_blocked_owner(org_input: str) -> tuple[str, str]:
     # GitHub owner URL form, including /orgs/owner/repositories).
     try:
         organization, owner_host = parse_owner_target(org_input)
-    except UrlParseError:
-        organization = ""
-        owner_host = ""
+    except UrlParseError as exc:
+        # The parser's own message carries the remedy --- which
+        # host to declare, and how.  Swallowing it left an
+        # Enterprise operator with only "invalid owner".
+        console.print(f"❌ {exc}")
+        raise typer.Exit(1) from None
     if not organization:
         console.print("❌ Invalid GitHub owner name or URL")
         console.print(
@@ -312,7 +315,7 @@ def blocked(
     # Applied before anything parses a target: the flag sets both
     # the host a shorthand resolves against and the set of hosts
     # permitted at all.
-    set_github_host(github_host)
+    apply_github_host(github_host)
 
     organization, owner_host = _resolve_blocked_owner(org_input)
 

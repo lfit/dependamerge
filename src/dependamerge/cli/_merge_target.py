@@ -127,13 +127,17 @@ def _resolve_target_url(pr_url: str) -> str:
 
 
 def _describe_gerrit_checkout(target: LocalTarget) -> str:
-    """Describe where a detected Gerrit checkout lives, if known."""
-    info = target.gitreview
-    if info is None or not info.host:
+    """Describe where a detected Gerrit checkout lives, if known.
+
+    Reads the identity off the target rather than off ``.gitreview``
+    alone, so a checkout recognised by its remote is named too --- the
+    detail that makes the guidance actionable.
+    """
+    if not target.host:
         return ""
-    if info.project:
-        return f" (host {info.host}, project {info.project})"
-    return f" (host {info.host})"
+    if target.project:
+        return f" (host {target.host}, project {target.project})"
+    return f" (host {target.host})"
 
 
 def _report_unparsable_url(
@@ -159,8 +163,15 @@ def _report_unparsable_url(
     """
 
     # Normalise the same way the parsers did, so a scheme-less target
-    # yields a hostname rather than being read as a bare path.
-    _norm = normalize_target(pr_url)
+    # yields a hostname rather than being read as a bare path.  A bad
+    # host *configuration* makes this raise the same error the parsers
+    # already recorded; falling back to the raw string lets that
+    # recorded message be printed instead of escaping from here, where
+    # nothing is catching it.
+    try:
+        _norm = normalize_target(pr_url)
+    except UrlParseError:
+        _norm = pr_url
     try:
         parsed = urlparse(_norm)
         host = parsed.hostname or ""

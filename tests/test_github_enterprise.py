@@ -11,6 +11,7 @@ one is refused before any request carries a token to it.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import pytest
@@ -298,19 +299,46 @@ class TestEveryClientReachesTheDeclaredHost:
         assert built.call_args.kwargs["graphql_url"] == f"https://{GHE}/api/graphql"
 
     def test_close_manager_uses_the_enterprise_base(self, declared_ghe):
+        # Asserting the stored host alone would pass even if the
+        # derive_api_urls wiring were removed, so enter the manager and
+        # check the transport it actually built.
         manager = AsyncCloseManager(token="t", host=GHE)
         assert manager.host == GHE
 
-    def test_merge_manager_accepts_a_host(self, declared_ghe):
+        async def _check() -> tuple[str, str]:
+            async with manager:
+                client = manager._github_client
+                assert client is not None
+                return (client.api_url, client.graphql_url)
+
+        api_url, graphql_url = asyncio.run(_check())
+        assert api_url == f"https://{GHE}/api/v3"
+        assert graphql_url == f"https://{GHE}/api/graphql"
+
+    def test_merge_manager_uses_the_enterprise_base(self, declared_ghe, mocker):
         manager = AsyncMergeManager(token="t", host=GHE)
         assert manager.host == GHE
 
+        built = mocker.patch("dependamerge.merge_manager.GitHubAsync")
+        built.return_value.__aenter__ = mocker.AsyncMock()
+        mocker.patch("dependamerge.merge_manager._lifecycle.GitHubService")
+        mocker.patch("dependamerge.merge_manager._lifecycle.PullRequestStatePoller")
+
+        asyncio.run(manager.__aenter__())
+
+        assert built.call_args.kwargs["api_url"] == f"https://{GHE}/api/v3"
+        assert built.call_args.kwargs["graphql_url"] == f"https://{GHE}/api/graphql"
+
     def test_fix_orchestrator_uses_the_enterprise_base(self, declared_ghe):
-        # The --fix path of ``blocked`` opens its own transport, so it
-        # was scanning the enterprise server and then fetching fix
-        # candidates from github.com.
+        # The orchestrator builds its transport deep inside an async
+        # fetch, so assert the derivation its host feeds instead of
+        # only that the host was stored.
         orchestrator = FixOrchestrator("t", host=GHE)
         assert orchestrator._host == GHE
+        assert derive_api_urls(orchestrator._host) == (
+            f"https://{GHE}/api/v3",
+            f"https://{GHE}/api/graphql",
+        )
 
     def test_fix_orchestrator_defaults_to_dotcom(self, no_declared_hosts):
         assert FixOrchestrator("t")._host == "github.com"
@@ -673,6 +701,60 @@ class TestUndeclaredPullRequestUrlExplainsItself:
         client = GitHubClient("t")
         with pytest.raises(ValueError, match="Invalid GitHub PR URL"):
             client.parse_pr_url("https://github.com/acme/widget")
+
+
+class TestConfigurationErrorsAreReported:
+    """A bad host configuration is a message, not a traceback.
+
+    The refusal is raised by the configuration readers, which run
+    before any command's error handling. Left alone it escaped as an
+    uncaught exception on an ordinary mistake.
+    """
+
+    runner = CliRunner()
+
+    def test_flag_with_a_port_is_reported(self, no_declared_hosts):
+        result = self.runner.invoke(
+            app,
+            [
+                "merge",
+                "acme/widget",
+                "--github-host",
+                "ghe.example.com:8443",
+                "--token",
+                "t",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "names a port" in result.stdout
+        assert not isinstance(result.exception, UrlParseError)
+
+    def test_environment_with_a_port_is_reported(self, monkeypatch):
+        monkeypatch.delenv("DEPENDAMERGE_GITHUB_HOST", raising=False)
+        monkeypatch.setenv("GH_HOST", "ghe.example.com:8443")
+        result = self.runner.invoke(app, ["merge", "acme/widget", "--token", "t"])
+        assert result.exit_code == 1
+        assert "names a port" in result.stdout
+        assert not isinstance(result.exception, UrlParseError)
+
+
+class TestOwnerCommandsExplainAnUndeclaredHost:
+    """``status`` and ``blocked`` surface the parser's remedy.
+
+    Swallowing the parse error left an Enterprise operator with only
+    "invalid owner", which names neither the host nor the fix.
+    """
+
+    runner = CliRunner()
+
+    @pytest.mark.parametrize("command", ["status", "blocked"])
+    def test_message_names_the_remedy(self, no_declared_hosts, command):
+        result = self.runner.invoke(
+            app, [command, f"https://{GHE}/acme", "--token", "t"]
+        )
+        assert result.exit_code == 1
+        assert "DEPENDAMERGE_GITHUB_HOSTS" in result.stdout
+        assert GHE in result.stdout
 
 
 class TestClientCarriesTheHost:

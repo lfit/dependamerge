@@ -34,7 +34,6 @@ from ..github_async import (
 from ..progress_tracker import MergeProgressTracker
 from ..url_parser import (
     normalize_target,
-    set_github_host,  # noqa: F401
 )
 from ._app import app, console
 from ._close import (
@@ -47,6 +46,7 @@ from ._close import (
     _run_interactive_close,
     _validate_close_authorization,
 )
+from ._github_host import apply_github_host
 from ._pr_display import _display_pr_info
 
 
@@ -116,7 +116,7 @@ def close(
     # Applied before anything parses a target: the flag sets both
     # the host a shorthand resolves against and the set of hosts
     # permitted at all.
-    set_github_host(github_host)
+    apply_github_host(github_host)
 
     progress_tracker = None
 

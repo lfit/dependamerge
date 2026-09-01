@@ -17,7 +17,7 @@ from typing import (
 )
 
 from ._base import _GitHubAsyncBase
-from ._permissions import OPERATION_PERMISSIONS
+from ._permissions import OPERATION_PERMISSIONS, web_host_for
 
 
 async def _check_repo_write_permission(
@@ -136,7 +136,11 @@ async def _check_merge_workflow_permission(
         result["guidance"] = {
             "classic": perms.get("classic"),
             "fine_grained": perms.get("fine_grained"),
-            "fix": "Run: gh auth refresh -h github.com -s workflow",
+            # Derived from the endpoint in use: ``gh auth refresh``
+            # takes the host whose credentials need changing, and
+            # naming dotcom sends an Enterprise operator to modify an
+            # unrelated token.
+            "fix": (f"Run: gh auth refresh -h {web_host_for(api.api_url)} -s workflow"),
         }
     else:
         # ``True`` (scope present) or ``None``

@@ -168,9 +168,11 @@ class TestStatusCommand:
             env={"GITHUB_TOKEN": "fake-token"},
         )
 
-        # Should fail with invalid input
+        # Should fail with invalid input.  The message is now the
+        # parser's own, which names the problem precisely rather than
+        # flattening every failure to "Invalid GitHub owner".
         assert result.exit_code == 1
-        assert "Invalid GitHub owner" in result.stdout
+        assert "cannot be empty" in result.stdout
 
     @patch("dependamerge.github_service.GitHubService")
     def test_status_command_with_errors(self, mock_service_class):
@@ -307,4 +309,9 @@ class TestStatusCommandUrlForms:
         )
 
         assert result.exit_code == 1
-        assert "Invalid GitHub owner" in result.stdout
+        # The parser's message reaches the operator now, so it names the
+        # host and how to permit one --- which "Invalid GitHub owner"
+        # never did.  The rejection itself is what this test guards.
+        assert "not enabled for host" in result.stdout
+        assert "gitlab.com" in result.stdout
+        mock_service_class.assert_not_called()

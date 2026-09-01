@@ -19,9 +19,9 @@ import typer
 from ..merge_manager import (
     DEFAULT_MERGE_TIMEOUT,
 )
-from ..url_parser import set_github_host
 from ._app import DEFAULT_MAX_WAIT, app
 from ._context import _MergeContext
+from ._github_host import apply_github_host
 from ._merge_dispatch import (
     _dispatch_gerrit,
     _normalise_topic,
@@ -306,7 +306,7 @@ def merge(
     # Applied before anything parses a target: the flag sets both
     # the host a shorthand resolves against and the set of hosts
     # permitted at all.
-    set_github_host(github_host)
+    apply_github_host(github_host)
 
     github2gerrit_mode = _validate_merge_inputs(
         submit_gerrit_changes,
