@@ -159,7 +159,9 @@ class TestNormalizeTarget:
 
     def test_web_port_is_kept(self):
         # By contrast a port on a scheme-less web host is part of the
-        # address and must survive.
+        # address and must survive normalisation.  Whether the rest of
+        # the stack can *use* it is a separate question --- see
+        # TestPortBearingTargets.
         assert (
             normalize_target("ghe.example.com:8443/acme/widget")
             == "https://ghe.example.com:8443/acme/widget"

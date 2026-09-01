@@ -12,8 +12,14 @@ one is refused before any request carries a token to it.
 from __future__ import annotations
 
 import pytest
+from typer.testing import CliRunner
 
+from dependamerge.cli import app
+from dependamerge.cli._merge_permissions import _check_merge_permissions
+from dependamerge.close_manager import AsyncCloseManager
 from dependamerge.github_client import GitHubClient
+from dependamerge.github_service import GitHubService
+from dependamerge.merge_manager import AsyncMergeManager
 from dependamerge.url_parser import (
     UrlParseError,
     derive_api_urls,
@@ -21,6 +27,7 @@ from dependamerge.url_parser import (
     is_supported_github_host,
     parse_change_url,
     parse_org_url,
+    parse_owner_target,
     parse_repo_url,
 )
 
@@ -169,6 +176,168 @@ class TestEnterpriseUrlParsing:
         # every other host.
         with pytest.raises(UrlParseError, match="not enabled for host"):
             parse_repo_url("https://gitlab.com/acme/widget")
+
+
+class TestPortBearingTargets:
+    """Ports are refused rather than silently discarded.
+
+    ``urlparse`` reports ``hostname`` without the port, and ``host`` is
+    what the parsed models carry and what the API base URLs derive
+    from.  A port therefore survives normalisation and is then dropped,
+    so accepting one would address a server the operator did not name.
+    """
+
+    @pytest.mark.parametrize(
+        "parser",
+        [parse_repo_url, parse_org_url],
+    )
+    def test_port_is_refused_with_an_explanation(self, monkeypatch, parser):
+        monkeypatch.setenv("DEPENDAMERGE_GITHUB_HOSTS", "ghe.example.com:8443")
+        with pytest.raises(UrlParseError) as excinfo:
+            parser("https://ghe.example.com:8443/acme/widget")
+        assert "does not support a port" in str(excinfo.value)
+
+    def test_ordinary_hosts_are_unaffected(self):
+        assert parse_repo_url("https://github.com/acme/widget").host == "github.com"
+
+
+class TestEveryClientReachesTheDeclaredHost:
+    """Regression: the host has to reach *all* the transports.
+
+    Enterprise support fails in the least obvious way when only some
+    call sites carry the host --- discovery succeeds against the
+    enterprise server while the writes go to github.com.
+    """
+
+    def test_permission_preflight_uses_the_enterprise_base(self, declared_ghe, mocker):
+        # Runs before anything else on every non-dry merge, so getting
+        # this wrong aborts the run before the host-aware clients exist.
+        # Let asyncio.run actually run: patching it would leave the
+        # coroutine unawaited, which the suite now treats as a failure.
+        api = mocker.AsyncMock()
+        api.check_token_permissions = mocker.AsyncMock(
+            return_value={"merge": {"has_permission": True}}
+        )
+        built = mocker.patch("dependamerge.cli._merge_permissions.GitHubAsync")
+        built.return_value.__aenter__ = mocker.AsyncMock(return_value=api)
+        built.return_value.__aexit__ = mocker.AsyncMock(return_value=None)
+
+        ctx = mocker.MagicMock()
+        ctx.host = GHE
+        ctx.token = "t"
+        ctx.no_fix = True
+        mocker.patch(
+            "dependamerge.cli._merge_permissions._source_pr_modifies_workflows",
+            return_value=False,
+        )
+
+        _check_merge_permissions(ctx)
+
+        assert built.call_args.kwargs["api_url"] == f"https://{GHE}/api/v3"
+        assert built.call_args.kwargs["graphql_url"] == f"https://{GHE}/api/graphql"
+
+    def test_close_manager_uses_the_enterprise_base(self, declared_ghe):
+        manager = AsyncCloseManager(token="t", host=GHE)
+        assert manager.host == GHE
+
+    def test_merge_manager_accepts_a_host(self, declared_ghe):
+        manager = AsyncMergeManager(token="t", host=GHE)
+        assert manager.host == GHE
+
+    def test_service_uses_the_enterprise_base(self, declared_ghe):
+        # Asserted on the constructed transport rather than on a patched
+        # constructor: ``GitHubAsync`` is bound in more than one module
+        # of this package, so patching one of them would prove less
+        # than it appears to.
+        service = GitHubService(token="t", host=GHE)
+        assert service._api.api_url == f"https://{GHE}/api/v3"
+        assert service._api.graphql_url == f"https://{GHE}/api/graphql"
+
+    def test_service_defaults_to_dotcom(self, no_declared_hosts):
+        service = GitHubService(token="t")
+        assert service._api.api_url == "https://api.github.com"
+
+
+class TestOwnerArgumentKeepsItsHost:
+    """``status`` and ``blocked`` must not lose the host.
+
+    Returning the login alone was safe only while github.com was the
+    sole possibility.  With Enterprise hosts available, an accepted
+    owner URL whose host was dropped scans the wrong server in silence.
+    """
+
+    def test_bare_login_uses_the_default_host(self, no_declared_hosts):
+        assert parse_owner_target("acme") == ("acme", "github.com")
+
+    def test_enterprise_owner_url_keeps_its_host(self, declared_ghe):
+        assert parse_owner_target(f"https://{GHE}/acme") == ("acme", GHE)
+
+    def test_canonical_orgs_form_keeps_its_host(self, declared_ghe):
+        assert parse_owner_target(f"https://{GHE}/orgs/acme/repositories") == (
+            "acme",
+            GHE,
+        )
+
+    def test_undeclared_host_is_still_refused(self, no_declared_hosts):
+        with pytest.raises(UrlParseError, match="not enabled for host"):
+            parse_owner_target("https://evil.example.com/acme")
+
+
+class TestShorthandReachesTheCloseCommand:
+    """``parse_pr_url`` understands the same shorthand as ``merge``."""
+
+    def test_shorthand_pull_request(self, no_declared_hosts):
+        client = GitHubClient("t")
+        assert client.parse_pr_url("acme/widget/pull/7") == ("acme", "widget", 7)
+
+    def test_scheme_less_host(self, no_declared_hosts):
+        client = GitHubClient("t")
+        assert client.parse_pr_url("github.com/acme/widget/pull/7") == (
+            "acme",
+            "widget",
+            7,
+        )
+
+    def test_shorthand_resolves_against_the_clients_host(self, declared_ghe):
+        # The client's own host is the default for a shorthand, so a
+        # close run started from an enterprise URL stays on that server.
+        client = GitHubClient("t", host=GHE)
+        assert client.parse_pr_url("acme/widget/pull/7") == ("acme", "widget", 7)
+
+
+class TestEnterpriseRepositoryMergeRuns:
+    """The documented Enterprise flow reaches the merge path.
+
+    Regression: relaxing the parser guard was not enough on its own.
+    A second, github.com-only guard in the repository handler still
+    rejected every Enterprise host, so the flow this PR advertises
+    could not run at all while every unit test passed.
+    """
+
+    runner = CliRunner()
+
+    def test_declared_host_reaches_repository_mode(self, declared_ghe):
+        result = self.runner.invoke(
+            app,
+            [
+                "merge",
+                f"https://{GHE}/acme/widget",
+                "--token",
+                "t",
+                "--dry-run",
+            ],
+        )
+        out = result.stdout
+        assert "Repository mode" in out
+        assert "only supported" not in out
+
+    def test_undeclared_host_is_still_refused(self, no_declared_hosts):
+        result = self.runner.invoke(
+            app,
+            ["merge", f"https://{GHE}/acme/widget", "--token", "t", "--dry-run"],
+        )
+        assert result.exit_code == 1
+        assert "Repository mode" not in result.stdout
 
 
 class TestClientCarriesTheHost:

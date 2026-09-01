@@ -12,7 +12,7 @@ import typer
 from ..progress_tracker import ProgressTracker
 from ..url_parser import (
     UrlParseError,
-    parse_owner_arg,
+    parse_owner_target,
 )
 from ._app import app, console
 from ._reports import _display_status_results
@@ -49,9 +49,10 @@ def status(
     # Parse owner login from input (handles a bare login plus every
     # GitHub owner URL form, including /orgs/owner/repositories).
     try:
-        org_name = parse_owner_arg(org_input)
+        org_name, owner_host = parse_owner_target(org_input)
     except UrlParseError:
         org_name = ""
+        owner_host = ""
     if not org_name:
         console.print("❌ Invalid GitHub owner name or URL")
         console.print(
@@ -80,7 +81,11 @@ def status(
         from ..github_service import GitHubService
 
         async def _run_status_check():
-            svc = GitHubService(token=token, progress_tracker=progress_tracker)
+            svc = GitHubService(
+                token=token,
+                host=owner_host,
+                progress_tracker=progress_tracker,
+            )
             try:
                 return await svc.gather_organization_status(org_name)
             finally:

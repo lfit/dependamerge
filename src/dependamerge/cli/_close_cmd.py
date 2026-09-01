@@ -32,6 +32,7 @@ from ..github_async import (
     SecondaryRateLimitError,
 )
 from ..progress_tracker import MergeProgressTracker
+from ..url_parser import normalize_target
 from ._app import app, console
 from ._close import (
     _CloseContext,
@@ -106,10 +107,11 @@ def close(
         # Derive the host from the URL before building the client: a
         # GitHub Enterprise Server install serves its API from
         # different base URLs, and the client bakes those in at
-        # construction.  An unparsable URL leaves the host empty and
-        # falls back to the default, which parse_pr_url then rejects.
+        # construction.  Normalise first, or a scheme-less target is
+        # read as a bare path and yields no host at all.
         github_client = _pkg.GitHubClient(
-            token, host=(urlparse(pr_url).hostname or "").lower() or None
+            token,
+            host=(urlparse(normalize_target(pr_url)).hostname or "").lower() or None,
         )
         # GitHubClient resolves None -> GITHUB_TOKEN env var (raises if missing)
         assert github_client.token is not None

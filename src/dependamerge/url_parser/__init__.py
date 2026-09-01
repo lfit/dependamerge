@@ -52,7 +52,12 @@ from .models import (
     ParsedUrl,
     UrlParseError,
 )
-from .repos import parse_org_url, parse_owner_arg, parse_repo_url
+from .repos import (
+    parse_org_url,
+    parse_owner_arg,
+    parse_owner_target,
+    parse_repo_url,
+)
 from .shorthand import (
     DEFAULT_GITHUB_HOST,
     default_github_host,
@@ -85,6 +90,7 @@ __all__ = [
     "parse_gerrit_topic_url",
     "parse_org_url",
     "parse_owner_arg",
+    "parse_owner_target",
     "parse_repo_url",
     "strip_git_suffix",
     "unsupported_host_message",

@@ -57,6 +57,7 @@ def _run_close_parallel(
     async def _close_parallel() -> list[CloseResult]:
         close_manager = _pkg.AsyncCloseManager(
             token=ctx.token,
+            host=ctx.host,
             progress_tracker=ctx.progress_tracker,
             preview_mode=preview_mode,
         )

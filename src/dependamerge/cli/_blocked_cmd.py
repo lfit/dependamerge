@@ -36,13 +36,13 @@ from ..resolve_conflicts import FixOptions, FixOrchestrator, PRSelection
 from ..system_utils import get_default_workers
 from ..url_parser import (
     UrlParseError,
-    parse_owner_arg,
+    parse_owner_target,
 )
 from ._app import app, console
 from ._reports import _display_blocked_results
 
 
-def _resolve_blocked_owner(org_input: str) -> str:
+def _resolve_blocked_owner(org_input: str) -> tuple[str, str]:
     """Resolve the owner login the blocked report should scan.
 
     Args:
@@ -57,9 +57,10 @@ def _resolve_blocked_owner(org_input: str) -> str:
     # Parse owner login from input (handles a bare login plus every
     # GitHub owner URL form, including /orgs/owner/repositories).
     try:
-        organization = parse_owner_arg(org_input)
+        organization, owner_host = parse_owner_target(org_input)
     except UrlParseError:
         organization = ""
+        owner_host = ""
     if not organization:
         console.print("❌ Invalid GitHub owner name or URL")
         console.print(
@@ -67,7 +68,7 @@ def _resolve_blocked_owner(org_input: str) -> str:
             "'owner-name' or 'https://github.com/owner-name/'"
         )
         raise typer.Exit(1)
-    return organization
+    return (organization, owner_host)
 
 
 def _scan_for_blocked_prs(
@@ -75,6 +76,7 @@ def _scan_for_blocked_prs(
     token: str | None,
     include_drafts: bool,
     progress_tracker: ProgressTracker | None,
+    host: str = "",
 ):
     """Scan every repository of an owner for unmergeable pull requests.
 
@@ -83,6 +85,9 @@ def _scan_for_blocked_prs(
         token: GitHub token, or ``None`` to fall back to the environment.
         include_drafts: Include draft pull requests in the report.
         progress_tracker: Live progress display, when one is running.
+        host: The GitHub host the owner lives on.  Carried from the
+            parsed argument, so an Enterprise owner URL scans the
+            server it named rather than github.com.
 
     Returns:
         The scan result reported by the GitHub service.
@@ -90,7 +95,11 @@ def _scan_for_blocked_prs(
     from ..github_service import GitHubService
 
     async def _run_blocked_check():
-        svc = GitHubService(token=token, progress_tracker=progress_tracker)
+        svc = GitHubService(
+            token=token,
+            host=host,
+            progress_tracker=progress_tracker,
+        )
         try:
             return await svc.scan_organization(
                 organization, include_drafts=include_drafts
@@ -288,7 +297,7 @@ def blocked(
 
     Standard code review requirements are not considered blocking.
     """
-    organization = _resolve_blocked_owner(org_input)
+    organization, owner_host = _resolve_blocked_owner(org_input)
 
     progress_tracker = None
 
@@ -308,7 +317,7 @@ def blocked(
 
         # Perform the scan
         scan_result = _scan_for_blocked_prs(
-            organization, token, include_drafts, progress_tracker
+            organization, token, include_drafts, progress_tracker, owner_host
         )
 
         _print_blocked_scan_summary(progress_tracker)

@@ -84,6 +84,41 @@ def is_supported_github_host(host: str) -> bool:
     )
 
 
+def reject_port_bearing_host(netloc: str, scope: str) -> None:
+    """Refuse a target that names a non-default port.
+
+    ``urlparse`` reports ``hostname`` without the port, and ``host`` is
+    what every parsed model carries and what
+    :func:`derive_api_urls` builds from.  A port therefore survives
+    normalisation and is then dropped, so ``ghe.example.com:8443``
+    would quietly be addressed on 443.
+
+    Refusing is the honest answer while the port has nowhere to live.
+    Silently discarding it would send requests to a server the operator
+    did not name.
+
+    Args:
+        netloc: The authority as parsed, possibly ``host:port``.
+        scope: What was being parsed, e.g. ``"Repository"``.
+
+    Raises:
+        UrlParseError: When ``netloc`` carries a port.
+    """
+    from .models import UrlParseError
+
+    if ":" not in netloc:
+        return
+    host, _, port = netloc.rpartition(":")
+    if not port.isdigit():
+        return
+    raise UrlParseError(
+        f"{scope} URL parsing does not support a port ({netloc}). "
+        f"The port cannot be carried through to the API base URL, so "
+        f"requests would go to {host} on the default port instead. "
+        "Use a host without a port, or a direct pull request URL."
+    )
+
+
 def unsupported_host_message(host: str, scope: str) -> str:
     """Build the rejection shown for an undeclared host.
 

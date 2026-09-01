@@ -24,6 +24,7 @@ from ..url_parser import (
     default_github_host,
     derive_api_urls,
     is_supported_github_host,
+    normalize_target,
 )
 from .actions import _GitHubActionMixin
 from .queries import _GitHubQueryMixin
@@ -85,10 +86,15 @@ class GitHubClient(_GitHubQueryMixin, _GitHubActionMixin, _GitHubStatusMixin):
         return "GitHubClient(token=***)"
 
     def parse_pr_url(self, url: str) -> tuple[str, str, int]:
-        """Parse GitHub PR URL to extract owner, repo, and PR number."""
+        """Parse GitHub PR URL to extract owner, repo, and PR number.
+
+        Accepts the same shorthand the URL parsers do, so
+        ``acme/widget/pull/7`` and a scheme-less host both work here as
+        well as in ``merge``.
+        """
         # SECURITY: Use urlparse for host extraction, not substring checks.
         # See CodeQL rule py/incomplete-url-substring-sanitization.
-        parsed = urlparse(url)
+        parsed = urlparse(normalize_target(url, default_host=self.host))
         host = (parsed.hostname or "").lower()
         if not is_supported_github_host(host):
             raise ValueError(f"Invalid GitHub PR URL: {url}")

@@ -12,9 +12,13 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
-from .hosts import is_supported_github_host, unsupported_host_message
+from .hosts import (
+    is_supported_github_host,
+    reject_port_bearing_host,
+    unsupported_host_message,
+)
 from .models import ChangeSource, ParsedOrgUrl, ParsedRepoUrl, UrlParseError
-from .shorthand import normalize_target
+from .shorthand import default_github_host, normalize_target
 
 # aislop-ignore-file ai-slop/hardcoded-url -- This module parses and builds
 # GitHub/Gerrit URLs, so URL literals here are the subject matter, not
@@ -67,6 +71,7 @@ def parse_repo_url(url: str) -> ParsedRepoUrl:
     # URL directing a token at an unintended host.  This is the single
     # choke point for repository URLs --- do NOT scatter additional host
     # checks elsewhere.
+    reject_port_bearing_host(parsed.netloc.lower(), "Repository")
     if not is_supported_github_host(host):
         raise UrlParseError(unsupported_host_message(host, "Repository"))
 
@@ -164,6 +169,7 @@ def parse_org_url(url: str) -> ParsedOrgUrl:
     # what stops a mistyped URL directing a token at an unintended
     # host.  This is the single choke point for owner-wide URLs --- do
     # NOT scatter additional host checks elsewhere.
+    reject_port_bearing_host(parsed.netloc.lower(), "Owner-wide")
     if not is_supported_github_host(host):
         raise UrlParseError(unsupported_host_message(host, "Owner-wide"))
 
@@ -203,6 +209,41 @@ def parse_org_url(url: str) -> ParsedOrgUrl:
         owner=owner,
         original_url=url,
     )
+
+
+def parse_owner_target(value: str) -> tuple[str, str]:
+    """Extract an owner login *and its host* from a CLI argument.
+
+    The companion to :func:`parse_owner_arg`, which returns the login
+    alone.  Dropping the host is safe only while github.com is the sole
+    possibility; with GitHub Enterprise Server hosts available, a
+    command that keeps the login and forgets the host accepts
+    ``https://ghe.example.com/acme`` and then scans ``acme`` on
+    github.com --- the wrong server, silently.
+
+    Args:
+        value: The raw CLI argument.
+
+    Returns:
+        An ``(owner, host)`` pair.  A bare login resolves against the
+        default host.
+
+    Raises:
+        UrlParseError: If ``value`` is empty or is a URL that is not a
+            recognised owner URL on a permitted host.
+    """
+    value = (value or "").strip()
+    if not value:
+        raise UrlParseError("Owner name or URL cannot be empty")
+
+    bare = value.rstrip("/")
+    if not bare:
+        raise UrlParseError("Owner name or URL cannot be empty")
+    if "/" not in bare and "://" not in bare:
+        return (bare, default_github_host())
+
+    parsed = parse_org_url(value)
+    return (parsed.owner, parsed.host)
 
 
 def parse_owner_arg(value: str) -> str:

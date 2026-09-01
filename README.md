@@ -205,9 +205,9 @@ or user account in one command.
   passing `--include-human-prs` brings them into scope behind an explicit
   confirmation prompt covering the entire owner
 
-> **Note**: Owner-wide merging supports `github.com` alone for now.
-> GitHub Enterprise Server support exists in scaffold form but remains
-> disabled.
+> **Note**: Owner-wide merging works against `github.com` and against
+> any GitHub Enterprise Server host you declare. See
+> [GitHub Enterprise Server](#github-enterprise-server).
 
 ### General Features
 
