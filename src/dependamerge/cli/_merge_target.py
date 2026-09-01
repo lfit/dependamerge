@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 
 import typer
 
+from ..local_repo import LocalTarget, detect_local_target
 from ..url_parser import (
     ParsedGerritTopicUrl,
     ParsedOrgUrl,
@@ -65,6 +66,72 @@ def _target_host(target: _MergeTarget) -> str:
         if shape is not None:
             return shape.host
     return ""
+
+
+def _resolve_target_url(pr_url: str) -> str:
+    """Return the URL to act on, inferring it when none was given.
+
+    Omitting the argument means "this repository".  The checkout's
+    remote supplies a repository URL, which then flows through the same
+    parsing as a typed one --- so the inference adds a source of URLs
+    rather than a second code path.
+
+    Args:
+        pr_url: The argument as given, possibly empty.
+
+    Returns:
+        A URL for :func:`_parse_merge_target`.
+
+    Raises:
+        typer.Exit: When nothing was given and nothing could be
+            inferred, or when the checkout is a Gerrit one, whose
+            changes are not addressable from the checkout alone.
+    """
+    if pr_url.strip():
+        return pr_url
+
+    target = detect_local_target()
+    if target is None:
+        console.print(
+            "❌ No URL given, and this is not a git repository with a usable remote."
+        )
+        console.print(
+            "   Pass a target, or run from a checkout. Shorthand is "
+            "accepted: 'owner', 'owner/repo', 'owner/repo/pull/7'."
+        )
+        raise typer.Exit(1)
+
+    if target.is_gerrit:
+        # Stop here rather than letting a Gerrit checkout fall through
+        # to the GitHub path, which would fail somewhere far less
+        # informative.  Gerrit changes are addressed by change or topic,
+        # neither of which the checkout alone determines.
+        where = _describe_gerrit_checkout(target)
+        console.print(f"ℹ️ Detected a Gerrit repository{where}.")
+        console.print(
+            "   Gerrit changes are not addressable as a repository, so "
+            "a target is required here:"
+        )
+        console.print("     a change URL   https://HOST/c/PROJECT/+/12345")
+        console.print("     a topic URL    https://HOST/q/topic:my-topic")
+        console.print("     or --topic with either of the above")
+        raise typer.Exit(1)
+
+    console.print(
+        f"📍 No URL given; using the '{target.remote}' remote of "
+        f"{target.root.name}: {target.url}"
+    )
+    return target.url
+
+
+def _describe_gerrit_checkout(target: LocalTarget) -> str:
+    """Describe where a detected Gerrit checkout lives, if known."""
+    info = target.gitreview
+    if info is None or not info.host:
+        return ""
+    if info.project:
+        return f" (host {info.host}, project {info.project})"
+    return f" (host {info.host})"
 
 
 def _report_unparsable_url(
