@@ -16,6 +16,8 @@ it is about what a path *means*, not about expanding an abbreviation.
 
 from __future__ import annotations
 
+from .models import UrlParseError
+
 #: The Gerrit path segment that separates a project from its change
 #: number, and the prefix its REST API uses.
 _GERRIT_CHANGE_SEP = "+"
@@ -80,24 +82,59 @@ def _is_gerrit_rest_change(segments: list[str]) -> bool:
     )
 
 
-def _names_a_change(segments: list[str]) -> bool:
+def _is_github_host(host: str) -> bool:
+    """Report whether this tool treats ``host`` as GitHub.
+
+    The import is deferred because :mod:`hosts` imports :mod:`shorthand`,
+    which imports this module; a module-level import would close that
+    cycle.
+
+    Args:
+        host: The hostname from the URL being normalised.
+
+    Returns:
+        True for github.com, its subdomains, and any declared
+        Enterprise host.
+    """
+    from .hosts import is_supported_github_host
+
+    try:
+        return is_supported_github_host(host)
+    except UrlParseError:
+        # Unusable host configuration says nothing about this path, and
+        # normalisation must not fail over settings it does not need.
+        # An unreadable declaration is treated as no declaration.
+        return False
+
+
+def _names_a_change(segments: list[str], host: str) -> bool:
     """Report whether a path addresses one change rather than a project.
 
     Each shape mirrors the corresponding regex in the change parser,
     **including where the marker sits**, so that this agrees with the
     parser it protects rather than being a second, divergent test.
 
-    Position is what keeps the rule honest.  Gerrit projects nest, so a
-    project may legitimately contain a ``pull`` or ``changes`` segment
-    with a numeric component after it --- ``/org/pull/123.git`` is a
-    clone URL, not pull request 123.
+    Which shapes apply depends on the host, because the markers are
+    ordinary names on the other platform.  ``changes`` and ``c`` are
+    valid GitHub logins, so ``github.com/changes/123.git`` is a clone
+    URL for the repository ``123``, not Gerrit change 123.  The change
+    parser resolves this the same way, by asking about the host before
+    trying the Gerrit shapes.
+
+    A ``/pull/N`` path stays a GitHub shape on every host, matching
+    ``_is_github_url``.  On an undeclared host that is also the safe
+    reading: keeping the suffix refuses the URL, whereas removing it
+    would repair a malformed target into a live pull request.
 
     Args:
         segments: The non-empty path segments, in order.
+        host: The hostname the URL names.
 
     Returns:
         True when the path names an individual change.
     """
+    if _is_github_host(host):
+        return _is_github_pull_request(segments)
     return (
         _is_github_pull_request(segments)
         or _is_gerrit_change(segments)
@@ -105,7 +142,7 @@ def _names_a_change(segments: list[str]) -> bool:
     )
 
 
-def strips_git_suffix(path: str) -> bool:
+def strips_git_suffix(path: str, host: str) -> bool:
     """Report whether ``.git`` on this path is a clone-URL artefact.
 
     It is, on a repository path.  A clone URL's path *is* the project,
@@ -127,6 +164,8 @@ def strips_git_suffix(path: str) -> bool:
 
     Args:
         path: The URL path, without query or fragment.
+        host: The hostname the URL names.  Required, because the same
+            path means different things on the two platforms.
 
     Returns:
         True when a trailing ``.git`` should come off.
@@ -137,7 +176,7 @@ def strips_git_suffix(path: str) -> bool:
     last = segments[-1].lower()
     if ":" in last or "%3a" in last:
         return False
-    return not _names_a_change(segments)
+    return not _names_a_change(segments, host)
 
 
 def strip_git_suffix(path: str) -> str:

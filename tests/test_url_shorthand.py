@@ -413,6 +413,39 @@ class TestNormalizeTarget:
             == f"https://gerrit.example.org/{path}"
         )
 
+    @pytest.mark.parametrize("owner", ["changes", "c"])
+    def test_gerrit_markers_are_ordinary_logins_on_github(self, owner):
+        # ``changes`` and ``c`` are valid GitHub logins, so these are
+        # clone URLs for the repository ``123``.  Applying the Gerrit
+        # shapes regardless of host left the suffix on, and the
+        # repository came out as ``123.git``.
+        assert (
+            normalize_target(f"https://github.com/{owner}/123.git")
+            == f"https://github.com/{owner}/123"
+        )
+
+    def test_a_declared_enterprise_host_is_read_as_github(self, monkeypatch):
+        # The same reasoning has to reach Enterprise, or a declared
+        # host keeps the Gerrit reading of its own repository names.
+        monkeypatch.setenv("DEPENDAMERGE_GITHUB_HOSTS", "ghe.example.com")
+
+        assert (
+            normalize_target("https://ghe.example.com/changes/123.git")
+            == "https://ghe.example.com/changes/123"
+        )
+
+    def test_unusable_host_configuration_does_not_break_normalisation(
+        self, monkeypatch
+    ):
+        # Consulting the declaration must not let unrelated broken
+        # configuration make normalisation raise.
+        monkeypatch.setenv("GH_HOST", "broken:8443")
+
+        assert (
+            normalize_target("https://github.com/acme/widget.git")
+            == "https://github.com/acme/widget"
+        )
+
     @pytest.mark.parametrize(
         "url, expected",
         [

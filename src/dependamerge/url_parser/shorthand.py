@@ -390,6 +390,10 @@ def _rebuild(url: str, *, strip_git: bool = True) -> str:
     split = re.match(r"\A([^?#]*)(.*)\Z", path, re.DOTALL)
     assert split is not None
     path_part = split.group(1)
-    if not strips_git_suffix(path_part):
+    # The same path means different things on the two platforms, so the
+    # decision needs the host as well.
+    netloc = authority.split("://", 1)[-1].rsplit("@", 1)[-1]
+    host = _PORT_SUFFIX_RE.sub("", netloc).lower()
+    if not strips_git_suffix(path_part, host):
         return url
     return f"{authority}{strip_git_suffix(path_part)}{split.group(2)}"
