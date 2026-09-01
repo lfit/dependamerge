@@ -375,6 +375,48 @@ class TestNormalizeTarget:
         url = "https://gerrit.example.org/q/topic%3Arelease.git"
         assert normalize_target(url) == url
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://github.com/acme/widget/pull/7.git",
+            "https://gerrit.example.org/c/acme/widget/+/123.git",
+            "https://gerrit.example.org/changes/123.git",
+        ],
+    )
+    def test_change_urls_keep_a_git_suffix(self, url):
+        # No such clone URL exists, so trimming the suffix *repaired* a
+        # malformed URL into a valid reference to a change the operator
+        # never named.  It has to stay invalid.
+        assert normalize_target(url) == url
+
+    @pytest.mark.parametrize(
+        "url, expected",
+        [
+            (
+                "https://github.com/acme/widget/pull/7.git",
+                "Invalid GitHub PR URL format",
+            ),
+            (
+                "https://gerrit.example.org/c/acme/widget/+/123.git",
+                "Invalid Gerrit change URL format",
+            ),
+        ],
+    )
+    def test_change_urls_with_a_git_suffix_are_refused(self, url, expected):
+        # The unstripped suffix is only the mechanism; what matters is
+        # that no operation is reachable through it.
+        with pytest.raises(UrlParseError, match=expected):
+            parse_change_url(url)
+
+    def test_a_project_named_pull_still_gets_clone_handling(self):
+        # Gerrit projects nest, so ``pull`` can be a real path segment.
+        # A marker counts only when a *number* follows it, as the
+        # change parsers require.
+        assert (
+            normalize_target("https://gerrit.example.org/org/pull/widget.git")
+            == "https://gerrit.example.org/org/pull/widget"
+        )
+
     @pytest.mark.parametrize("raw", ["", "   "])
     def test_empty_input_passes_through(self, raw):
         # Left empty so callers keep raising their own "URL cannot be

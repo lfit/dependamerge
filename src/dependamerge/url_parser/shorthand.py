@@ -27,6 +27,8 @@ from __future__ import annotations
 import os
 import re
 
+from .git_suffix import strip_git_suffix, strips_git_suffix
+
 # aislop-ignore-file ai-slop/hardcoded-url -- This module parses and builds
 # GitHub/Gerrit URLs, so URL literals here are the subject matter, not
 # stray configuration.  Enterprise hosts are always derived from the
@@ -243,53 +245,6 @@ def looks_like_owner(segment: str) -> bool:
     return bool(_OWNER_RE.match(segment.strip()))
 
 
-def _strips_git_suffix(path: str) -> bool:
-    """Report whether ``.git`` on this path is a clone-URL artefact.
-
-    It is, on a repository path.  It is not inside a Gerrit search,
-    where the trailing text is a *value*: ``/q/topic:release.git`` names
-    a topic that genuinely ends in ``.git``, and trimming it silently
-    searches for the wrong thing.
-
-    The test is the final segment carrying a query operator's colon,
-    encoded or otherwise --- not the presence of a ``q`` segment, which
-    an owner may legitimately be called.  ``github.com/q/widget.git`` is
-    a clone URL belonging to the owner ``q``.
-
-    Args:
-        path: The URL path, without query or fragment.
-
-    Returns:
-        True when a trailing ``.git`` should come off.
-    """
-    segments = [s for s in path.split("/") if s]
-    if not segments:
-        return False
-    last = segments[-1].lower()
-    return ":" not in last and "%3a" not in last
-
-
-def strip_git_suffix(path: str) -> str:
-    """Remove a trailing ``.git`` from a URL path.
-
-    Clone URLs carry it and web URLs do not, so without this a remote
-    copied from ``git remote -v`` yields a repository literally named
-    ``dependamerge.git``.
-
-    A path that does not end in ``.git`` is returned untouched ---
-    including its trailing slashes, which callers record verbatim as
-    the original URL.
-    """
-    trimmed = path.rstrip("/")
-    # Guard on the final *segment*, not the whole path: "/.git" has no
-    # repository name in front of the suffix, so there is nothing to
-    # strip down to.
-    last = trimmed.rsplit("/", 1)[-1]
-    if last.endswith(".git") and len(last) > len(".git"):
-        return trimmed[: -len(".git")]
-    return path
-
-
 def _is_scp_remote(match: re.Match[str]) -> bool:
     """Decide whether an ambiguous ``host:tail`` is an scp remote.
 
@@ -429,6 +384,6 @@ def _rebuild(url: str, *, strip_git: bool = True) -> str:
     split = re.match(r"\A([^?#]*)(.*)\Z", path, re.DOTALL)
     assert split is not None
     path_part = split.group(1)
-    if not _strips_git_suffix(path_part):
+    if not strips_git_suffix(path_part):
         return url
     return f"{authority}{strip_git_suffix(path_part)}{split.group(2)}"

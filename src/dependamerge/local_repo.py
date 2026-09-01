@@ -54,7 +54,7 @@ _USERINFO_RE = re.compile(r"\A([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]+@")
 _SCHEME_RE = re.compile(r"\A[A-Za-z][A-Za-z0-9+.-]*://")
 
 #: scp-style remote: ``[user@]host:path``.
-_SCP_REMOTE_RE = re.compile(r"\A(?:[^@/]+@)?(?P<host>[^@/:]+):(?!//)[^\s]+\Z")
+_SCP_REMOTE_RE = re.compile(r"\A(?:(?P<user>[^@/]+)@)?(?P<host>[^@/:]+):(?!//)[^\s]+\Z")
 
 
 @dataclass(frozen=True)
@@ -221,9 +221,15 @@ def _names_a_server(url: str) -> bool:
     scp = _SCP_REMOTE_RE.match(raw)
     if scp is None:
         return False
+    # Userinfo settles it.  ``git@ghe:acme/widget.git`` addresses a
+    # server whose DNS name has a single label, which an internal
+    # Enterprise installation may well have, and no filesystem path
+    # carries a ``user@`` prefix.
+    if scp.group("user"):
+        return True
     # ``C:/repos/widget.git`` is a Windows drive, not a host, and the
-    # scp pattern cannot tell them apart on its own.  A real remote
-    # host is dotted, or is localhost.
+    # scp pattern cannot tell them apart on its own.  Without userinfo
+    # a real remote host is dotted, or is localhost.
     authority = scp.group("host").lower()
     return "." in authority or authority == "localhost"
 

@@ -294,6 +294,11 @@ class TestDetectLocalTarget:
                 "ssh://git@github.com/acme/widget.git",
                 "https://github.com/acme/widget",
             ),
+            # An internal Enterprise installation may answer to a
+            # single-label DNS name.  Userinfo is what separates this
+            # from the Windows drive above: no filesystem path carries
+            # a ``user@`` prefix.
+            ("git@ghe:acme/widget.git", "https://ghe/acme/widget"),
         ],
     )
     def test_remotes_that_do_name_a_server_still_work(self, repo, remote, expected):
