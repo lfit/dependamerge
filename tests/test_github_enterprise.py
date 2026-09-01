@@ -621,6 +621,15 @@ class TestUndeclaredHostErrorIsActionable:
         )
         assert "Invalid URL" in result.stdout
 
+    def test_bare_host_does_not_advise_declaring(self, no_declared_hosts):
+        # No path at all names no target on any host, so declaring it
+        # cannot change the outcome.
+        result = self.runner.invoke(
+            app, ["merge", "https://invalid-url.com", "--token", "t"]
+        )
+        assert "Invalid URL" in result.stdout
+        assert "DEPENDAMERGE_GITHUB_HOSTS" not in result.stdout
+
 
 class TestCloneUrlFallbacksFollowTheHost:
     """Synthesised clone URLs must name the right server.
@@ -720,6 +729,26 @@ class TestUndeclaredPullRequestUrlExplainsItself:
         client = GitHubClient("t")
         with pytest.raises(ValueError, match="Invalid GitHub PR URL"):
             client.parse_pr_url("https://github.com/acme/widget")
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://invalid-url.com",
+            "https://invalid-url.com/acme",
+            "https://invalid-url.com/acme/widget",
+        ],
+    )
+    def test_non_pull_request_paths_do_not_advise_declaring(
+        self, no_declared_hosts, url
+    ):
+        # Declaring the host cannot turn these into pull requests, so
+        # the guidance would send the operator to configure something
+        # and then meet the real error anyway.
+        client = GitHubClient("t")
+        with pytest.raises(ValueError) as excinfo:
+            client.parse_pr_url(url)
+        assert "Invalid GitHub PR URL" in str(excinfo.value)
+        assert "DEPENDAMERGE_GITHUB_HOSTS" not in str(excinfo.value)
 
 
 class TestConfigurationErrorsAreReported:

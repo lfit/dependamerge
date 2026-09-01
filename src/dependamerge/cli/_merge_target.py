@@ -187,12 +187,18 @@ def _report_unparsable_url(
             console.print(f"❌ Invalid URL: {change_err}")
         elif segs and (segs[0] == "orgs" or len(segs) == 1):
             console.print(f"❌ Invalid URL: {org_err}")
-        else:
+        elif len(segs) >= 2:
             # An ordinary owner/repo shape on an undeclared host.  Its
             # rejection carries the instructions for declaring that
             # host; "cannot determine platform" does not, and reporting
             # that instead left the operator with no way forward.
             console.print(f"❌ Invalid URL: {repo_err}")
+        else:
+            # A host with no path at all names no target on any host,
+            # so declaring it cannot help.  Keep the platform-agnostic
+            # message rather than sending the operator to configure
+            # something that will not change the outcome.
+            console.print(f"❌ Invalid URL: {change_err}")
     else:
         console.print(f"❌ Invalid URL: {repo_err}")
     raise typer.Exit(1) from None

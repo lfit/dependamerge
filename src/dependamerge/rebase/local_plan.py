@@ -44,7 +44,7 @@ def _build_rebase_plan(
     owner: str,
     repo: str,
     log: logging.Logger,
-    host: str = "",
+    host: str,
 ) -> _RebasePlan | None:
     """Resolve remotes, branches and fork status, or None to give up.
 

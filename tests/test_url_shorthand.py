@@ -40,7 +40,6 @@ class TestLooksLikeHost:
             "github.com",
             "ghe.corp.example.com",
             "gerrit.linuxfoundation.org",
-            "localhost",
             "localhost:3000",
             "example.com:8443",
         ],
@@ -50,12 +49,25 @@ class TestLooksLikeHost:
 
     @pytest.mark.parametrize(
         "segment",
-        ["lfreleng-actions", "acme", "o", "some-org-name", ""],
+        ["lfreleng-actions", "acme", "o", "some-org-name", "", "localhost"],
     )
     def test_owner_shaped_segments(self, segment):
         # A GitHub login cannot contain a dot, which is what makes the
-        # two-segment case decidable at all.
+        # two-segment case decidable at all.  Bare ``localhost``
+        # satisfies the login grammar and names a real account, so it
+        # is an owner here; a local server is named with a port or an
+        # explicit scheme.
         assert looks_like_host(segment) is False
+
+    def test_bare_localhost_is_an_owner_shorthand(self):
+        assert normalize_target("localhost/widget") == (
+            "https://github.com/localhost/widget"
+        )
+
+    def test_localhost_with_a_port_is_a_host(self):
+        assert normalize_target("localhost:3000/acme/widget") == (
+            "https://localhost:3000/acme/widget"
+        )
 
 
 class TestLooksLikeOwner:

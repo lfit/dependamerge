@@ -195,8 +195,13 @@ def looks_like_host(segment: str) -> bool:
     """Report whether a leading path segment names a host.
 
     GitHub owner logins are alphanumerics and hyphens only, so a dot
-    settles it.  A port or the ``localhost`` special case settle the
-    rest.
+    settles it, and so does a port.
+
+    Bare ``localhost`` deliberately does *not* qualify.  It satisfies
+    the login grammar and names a real GitHub account, so treating it
+    as a host would contradict the documented rule and make
+    ``localhost/widget`` unreachable.  A local server still works when
+    named with a port or an explicit scheme.
 
     Args:
         segment: The first segment of a schemeless target.
@@ -207,8 +212,6 @@ def looks_like_host(segment: str) -> bool:
     segment = segment.strip().lower()
     if not segment:
         return False
-    if segment == "localhost" or segment.startswith("localhost:"):
-        return True
     if _PORT_SUFFIX_RE.search(segment):
         return True
     return "." in segment

@@ -968,6 +968,7 @@ class TestLocalRebaseFailClosed:
             owner="owner",
             repo="repo",
             token="fake-token",
+            host="github.com",
             log=logging.getLogger("test"),
         )
         # Must NOT attempt the rebase — we'd risk pushing to the

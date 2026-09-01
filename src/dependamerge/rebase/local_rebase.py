@@ -39,7 +39,7 @@ async def local_rebase_pr(
     repo: str,
     token: str,
     log: logging.Logger,
-    host: str = "",
+    host: str,
 ) -> bool:
     """Rebase a PR locally and force-push the result.
 
@@ -48,6 +48,13 @@ async def local_rebase_pr(
     ``git rebase``, and force-pushes with lease back to the head
     repo.  All git invocations inherit the user's ``~/.gitconfig``,
     so signing config is respected.
+
+    ``host`` is required rather than defaulted.  This function is
+    re-exported for compatibility, and a default would map silently to
+    github.com through ``clone_url_for`` --- so an Enterprise pull
+    request whose clone URL is absent would be cloned, and force-pushed
+    to, on the wrong server.  A caller that has no host should say
+    ``"github.com"`` and mean it.
 
     Returns True only if every step succeeds.  On any failure (no
     ``git`` on PATH, conflict during rebase, network error, push

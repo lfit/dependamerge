@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -35,6 +36,10 @@ from .queries import _GitHubQueryMixin
 from .status import _GitHubStatusMixin
 
 logger = logging.getLogger("dependamerge.github_client")
+
+# The path shape a pull request URL must have before declaring its host
+# could possibly help.
+_PR_PATH_RE = re.compile(r"\A/[^/]+/[^/]+/pull/\d+(?:/.*)?\Z")
 
 if TYPE_CHECKING:
     from ..github_async import GitHubAsync
@@ -110,11 +115,11 @@ class GitHubClient(_GitHubQueryMixin, _GitHubActionMixin, _GitHubStatusMixin):
             raise ValueError(str(exc)) from exc
         host = (parsed.hostname or "").lower()
         if not is_supported_github_host(host):
-            if host:
-                # Structurally a pull request URL, just on a host nobody
-                # has declared.  Say so, and how to fix it --- the
-                # repository and owner parsers already do, and a
-                # direct-PR user deserves the same instructions.
+            # Declaration guidance only helps when the URL is otherwise
+            # a pull request.  Offering it for something that is not
+            # one sends the operator to configure a host, only to meet
+            # the real error afterwards.
+            if host and _PR_PATH_RE.match(parsed.path):
                 raise ValueError(unsupported_host_message(host, "Pull request"))
             raise ValueError(f"Invalid GitHub PR URL: {url}")
 
