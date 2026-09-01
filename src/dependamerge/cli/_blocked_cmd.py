@@ -147,6 +147,7 @@ def _run_blocked_fix(
     reason: str | None,
     limit: int | None,
     *,
+    host: str = "",
     workdir: str | None = None,
     keep_temp: bool = False,
     prefetch: int | None = None,
@@ -198,6 +199,7 @@ def _run_blocked_fix(
     try:
         orchestrator = FixOrchestrator(
             token_to_use,
+            host=host,
             progress_tracker=progress_tracker,
             logger=lambda m: console.print(m),
         )
@@ -333,6 +335,7 @@ def blocked(
                 token,
                 reason,
                 limit,
+                host=owner_host,
                 workdir=workdir,
                 keep_temp=keep_temp,
                 prefetch=prefetch,

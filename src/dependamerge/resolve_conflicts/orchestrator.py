@@ -25,6 +25,7 @@ from ..git_ops import (
     rebase_abort,
     secure_rmtree,
 )
+from ..url_parser import default_github_host
 from .models import FixOptions, FixResult, PRContext, PRSelection
 from .preparation import _FixPreparationMixin
 from .resolver import InteractiveResolver
@@ -41,12 +42,17 @@ class FixOrchestrator(_FixPreparationMixin):
         self,
         token: str,
         *,
+        host: str | None = None,
         progress_tracker: object | None = None,
         logger: Callable[[str], None] | None = None,
     ) -> None:
         if not token:
             raise ValueError("A GitHub token is required for fix operations.")
         self._token = token
+        # The host fix candidates are fetched from.  Without it a run
+        # started against a GitHub Enterprise Server install scans that
+        # server and then fetches from api.github.com.
+        self._host = (host or default_github_host()).strip().lower()
         self._progress = progress_tracker
         self._logger = logger or (lambda m: None)
 

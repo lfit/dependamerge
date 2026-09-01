@@ -20,6 +20,7 @@ from dependamerge.close_manager import AsyncCloseManager
 from dependamerge.github_client import GitHubClient
 from dependamerge.github_service import GitHubService
 from dependamerge.merge_manager import AsyncMergeManager
+from dependamerge.resolve_conflicts import FixOrchestrator
 from dependamerge.url_parser import (
     UrlParseError,
     derive_api_urls,
@@ -244,6 +245,16 @@ class TestEveryClientReachesTheDeclaredHost:
         manager = AsyncMergeManager(token="t", host=GHE)
         assert manager.host == GHE
 
+    def test_fix_orchestrator_uses_the_enterprise_base(self, declared_ghe):
+        # The --fix path of ``blocked`` opens its own transport, so it
+        # was scanning the enterprise server and then fetching fix
+        # candidates from github.com.
+        orchestrator = FixOrchestrator("t", host=GHE)
+        assert orchestrator._host == GHE
+
+    def test_fix_orchestrator_defaults_to_dotcom(self, no_declared_hosts):
+        assert FixOrchestrator("t")._host == "github.com"
+
     def test_service_uses_the_enterprise_base(self, declared_ghe):
         # Asserted on the constructed transport rather than on a patched
         # constructor: ``GitHubAsync`` is bound in more than one module
@@ -338,6 +349,80 @@ class TestEnterpriseRepositoryMergeRuns:
         )
         assert result.exit_code == 1
         assert "Repository mode" not in result.stdout
+
+
+class TestClientRefusesAnotherHost:
+    """A client bound to one host must not act on another's URL.
+
+    Both hosts may be declared and both may hold an ``acme/widget``.
+    Parsing a URL from one while the client addresses the other would
+    act on the wrong instance under a name that looks right.
+    """
+
+    @pytest.fixture
+    def two_declared_hosts(self, monkeypatch):
+        monkeypatch.delenv("DEPENDAMERGE_GITHUB_HOST", raising=False)
+        monkeypatch.delenv("GH_HOST", raising=False)
+        monkeypatch.setenv("DEPENDAMERGE_GITHUB_HOSTS", f"{GHE},other.example.com")
+
+    def test_url_from_a_different_declared_host_is_refused(self, two_declared_hosts):
+        client = GitHubClient("t", host=GHE)
+        with pytest.raises(ValueError, match="address the wrong server"):
+            client.parse_pr_url("https://other.example.com/acme/widget/pull/7")
+
+    def test_dotcom_url_is_refused_by_an_enterprise_client(self, declared_ghe):
+        client = GitHubClient("t", host=GHE)
+        with pytest.raises(ValueError, match="address the wrong server"):
+            client.parse_pr_url("https://github.com/acme/widget/pull/7")
+
+    def test_matching_host_is_accepted(self, declared_ghe):
+        client = GitHubClient("t", host=GHE)
+        assert client.parse_pr_url(f"https://{GHE}/acme/widget/pull/7") == (
+            "acme",
+            "widget",
+            7,
+        )
+
+    def test_dotcom_subdomains_are_the_same_instance(self, no_declared_hosts):
+        # foo.github.com and github.com are one service, so this must
+        # not become a false positive on the ordinary path.
+        client = GitHubClient("t", host="github.com")
+        assert client.parse_pr_url("https://foo.github.com/acme/widget/pull/7") == (
+            "acme",
+            "widget",
+            7,
+        )
+
+
+class TestUndeclaredHostErrorIsActionable:
+    """The rejection shown must be the one that says what to do.
+
+    An undeclared Enterprise repository URL has two path segments, and
+    the reporter used to answer those with ``parse_change_url``'s
+    "cannot determine platform" --- true, but it leaves the operator
+    with no way forward.
+    """
+
+    runner = CliRunner()
+
+    def test_repository_shape_reports_the_declaration_instructions(
+        self, no_declared_hosts
+    ):
+        result = self.runner.invoke(
+            app, ["merge", f"https://{GHE}/acme/widget", "--token", "t"]
+        )
+        out = result.stdout
+        assert "DEPENDAMERGE_GITHUB_HOSTS" in out
+        assert "Cannot determine platform" not in out
+
+    def test_gerrit_shape_keeps_the_platform_guidance(self, no_declared_hosts):
+        # A structurally Gerrit-looking path is a different mistake and
+        # keeps the platform-agnostic message.
+        result = self.runner.invoke(
+            app,
+            ["merge", "https://review.example.org/c/proj/+/abc", "--token", "t"],
+        )
+        assert "Invalid URL" in result.stdout
 
 
 class TestClientCarriesTheHost:

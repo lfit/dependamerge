@@ -153,6 +153,31 @@ def looks_like_owner(segment: str) -> bool:
     return bool(_OWNER_RE.match(segment.strip()))
 
 
+def _strips_git_suffix(path: str) -> bool:
+    """Report whether ``.git`` on this path is a clone-URL artefact.
+
+    It is, on a repository path.  It is not inside a Gerrit search,
+    where the trailing text is a *value*: ``/q/topic:release.git`` names
+    a topic that genuinely ends in ``.git``, and trimming it silently
+    searches for the wrong thing.
+
+    Args:
+        path: The URL path, without query or fragment.
+
+    Returns:
+        True when a trailing ``.git`` should come off.
+    """
+    segments = [s for s in path.split("/") if s]
+    if not segments:
+        return False
+    # Gerrit search URLs put the query in the path after a /q/ segment,
+    # and its operators carry colons.  Either is enough to say the tail
+    # is a value rather than a repository name.
+    if "q" in segments:
+        return False
+    return ":" not in segments[-1]
+
+
 def strip_git_suffix(path: str) -> str:
     """Remove a trailing ``.git`` from a URL path.
 
@@ -277,4 +302,7 @@ def _rebuild(url: str, *, strip_git: bool = True) -> str:
     # Preserve any query or fragment; only the path carries ``.git``.
     split = re.match(r"\A([^?#]*)(.*)\Z", path, re.DOTALL)
     assert split is not None
-    return f"{authority}{strip_git_suffix(split.group(1))}{split.group(2)}"
+    path_part = split.group(1)
+    if not _strips_git_suffix(path_part):
+        return url
+    return f"{authority}{strip_git_suffix(path_part)}{split.group(2)}"

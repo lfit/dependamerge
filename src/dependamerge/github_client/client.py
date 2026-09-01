@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from ..url_parser import (
+    _host_matches,
     default_github_host,
     derive_api_urls,
     is_supported_github_host,
@@ -98,6 +99,20 @@ class GitHubClient(_GitHubQueryMixin, _GitHubActionMixin, _GitHubStatusMixin):
         host = (parsed.hostname or "").lower()
         if not is_supported_github_host(host):
             raise ValueError(f"Invalid GitHub PR URL: {url}")
+
+        # This client's API base URLs were fixed at construction, so a
+        # URL naming a *different* permitted host would be acted on
+        # against the wrong server --- and an owner/repository pair can
+        # exist on both.  Declaring two hosts must not let one stand in
+        # for the other.
+        if not _host_matches(host, self.host, allow_subdomains=False) and not (
+            _host_matches(host, "github.com") and _host_matches(self.host, "github.com")
+        ):
+            raise ValueError(
+                f"Pull request URL names host {host}, but this client is "
+                f"configured for {self.host}. Acting on it here would "
+                "address the wrong server."
+            )
 
         # Use parsed.path to ignore query strings and fragments
         # when splitting.

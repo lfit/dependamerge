@@ -502,8 +502,9 @@ entries.
 
 ### Naming a Target
 
-Every command that takes a target accepts shorthand as well as a full
-URL. The shorthand saves a great deal of typing:
+`merge` and `close` accept shorthand as well as a full URL, and
+`status` and `blocked` accept a bare owner login or an owner URL. The
+shorthand saves a great deal of typing:
 
 ```bash
 # Owner-wide: every repository beneath an org or user
@@ -577,8 +578,10 @@ dependamerge merge acme/widget
 Naming a host in either single-host variable also declares it, so there
 is no need to set both. `github.com` needs no configuration.
 
-Direct pull request URLs have always worked on any host, since `/pull/`
-identifies them structurally.
+The parsers accept a direct pull request URL on any host without
+configuration, because `/pull/` identifies one structurally. Acting on
+it still needs the host declared, so the client refuses an Enterprise
+pull request URL until you declare that host.
 
 ### Closing Pull Requests
 

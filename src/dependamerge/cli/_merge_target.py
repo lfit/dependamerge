@@ -29,6 +29,8 @@ from ..url_parser import (
     ParsedUrl,
     UrlParseError,
     _host_matches,
+    _is_gerrit_url,
+    normalize_target,
     parse_change_url,
     parse_gerrit_topic_url,
     parse_org_url,
@@ -156,32 +158,30 @@ def _report_unparsable_url(
         typer.Exit: Always.
     """
 
-    # Prepend scheme if missing so urlparse can extract the
-    # hostname.  Without a scheme, schemeless URLs like
-    # "gerrit.example.org/..." are parsed as a path with no
-    # hostname, causing the wrong error to be shown.
-    _norm = pr_url
-    if not _norm.startswith(("http://", "https://")):
-        _norm = "https://" + _norm
+    # Normalise the same way the parsers did, so a scheme-less target
+    # yields a hostname rather than being read as a bare path.
+    _norm = normalize_target(pr_url)
     try:
-        host = urlparse(_norm).hostname or ""
+        parsed = urlparse(_norm)
+        host = parsed.hostname or ""
+        path = parsed.path
     except Exception:
-        host = ""
+        host, path = "", ""
+
     if host and not _host_matches(host.lower(), "github.com"):
-        # Non-github host.  An owner-shaped path (``/orgs/owner``
-        # or a single bare segment) most likely means the user
-        # aimed an owner-wide URL at a non-github host (e.g.
-        # GHE), so surface parse_org_url's actionable rejection
-        # ("Owner-wide URL parsing is only supported for
-        # github.com … use a direct PR URL") instead of the
-        # generic parse_change_url "cannot determine platform"
-        # message.  Any other shape (including Gerrit-style
-        # URLs) keeps the platform-agnostic guidance.
-        segs = [s for s in urlparse(_norm).path.split("/") if s]
-        if segs and (segs[0] == "orgs" or len(segs) == 1):
+        segs = [s for s in path.split("/") if s]
+        if _is_gerrit_url(host.lower(), path.rstrip("/")):
+            # Structurally a Gerrit change, so the platform-agnostic
+            # guidance from parse_change_url is the useful one.
+            console.print(f"❌ Invalid URL: {change_err}")
+        elif segs and (segs[0] == "orgs" or len(segs) == 1):
             console.print(f"❌ Invalid URL: {org_err}")
         else:
-            console.print(f"❌ Invalid URL: {change_err}")
+            # An ordinary owner/repo shape on an undeclared host.  Its
+            # rejection carries the instructions for declaring that
+            # host; "cannot determine platform" does not, and reporting
+            # that instead left the operator with no way forward.
+            console.print(f"❌ Invalid URL: {repo_err}")
     else:
         console.print(f"❌ Invalid URL: {repo_err}")
     raise typer.Exit(1) from None

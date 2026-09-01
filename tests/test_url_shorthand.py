@@ -15,6 +15,7 @@ import pytest
 
 from dependamerge.url_parser import (
     parse_change_url,
+    parse_gerrit_topic_url,
     parse_org_url,
     parse_repo_url,
 )
@@ -170,6 +171,24 @@ class TestNormalizeTarget:
     def test_gerrit_topic_colon_is_not_a_port(self):
         url = "https://gerrit.onap.org/r/q/topic:update-settings"
         assert normalize_target(url) == url
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://gerrit.example.org/q/topic:release.git",
+            "https://gerrit.example.org/r/q/topic:release.git",
+        ],
+    )
+    def test_gerrit_topic_keeps_a_dot_git_value(self, url):
+        # Inside a Gerrit search the trailing text is a *value*, not a
+        # repository name.  Trimming it searched for the wrong topic.
+        assert normalize_target(url) == url
+
+    def test_gerrit_topic_with_a_git_suffix_parses_intact(self):
+        parsed = parse_gerrit_topic_url(
+            "https://gerrit.example.org/q/topic:release.git"
+        )
+        assert parsed.topic == "release.git"
 
     @pytest.mark.parametrize("raw", ["", "   "])
     def test_empty_input_passes_through(self, raw):
