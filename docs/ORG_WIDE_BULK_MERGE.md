@@ -49,6 +49,7 @@ In scope:
 Out of scope (deferred):
 
 - Actually enabling GitHub Enterprise hosts — tracked in #343.
+  **Since delivered**: see [Host support](#host-support-and-the-ghe-scaffold).
 - Routing the existing single-repo flow through the striped scheduler.
 
 ## Command surface
@@ -103,15 +104,28 @@ The low-level transport (`GitHubAsync`) already accepts `api_url` and
   graphql_url)` encodes the dotcom-vs-GHE base-URL rule in one place.
   The github.com path flows through it and returns the existing
   constants.
-- A single, well-commented guard that accepts `github.com` alone remains
-  at the parser layer — one place to relax when GHE lands. The rejection
-  message stays forward-looking ("GitHub Enterprise support is not yet
-  enabled"), never implying impossibility.
+- A single, well-commented guard at the parser layer decides which hosts
+  to permit — one place to change, rather than a check scattered
+  through the handlers.
 
-This PR does **not** thread `host`-derived base URLs through
-`GitHubService` / `GitHubClient` / `AsyncMergeManager`; that is #343's
-job. The parsed objects already carry the `host` those constructors will
-consume.
+> **Update (#343 delivered).** The scaffold described above is now
+> connected. The parser guard accepts `github.com` and any GitHub
+> Enterprise Server host the operator has *declared*, and the resolved
+> `host` travels through `GitHubService`, `GitHubClient`,
+> `AsyncMergeManager`, `AsyncCloseManager` and the fix orchestrator into
+> `GitHubAsync`.
+>
+> You declare hosts rather than having them inferred — with
+> `--github-host`, `DEPENDAMERGE_GITHUB_HOSTS`,
+> `DEPENDAMERGE_GITHUB_HOST` or `GH_HOST` — because Enterprise
+> hostnames are arbitrary, so trusting whichever host a URL names would
+> send the caller's token wherever a mistyped link points. See the
+> README's *GitHub Enterprise Server* section for the resolution order.
+>
+> The one caveat retained from the scaffold: a host naming a **port** is
+> refused. `urlparse` reports `hostname` without it, so the port cannot
+> reach the derived base URLs and the request would resolve to 443
+> instead.
 
 ## Account-type detection (org vs user)
 
