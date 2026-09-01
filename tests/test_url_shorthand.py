@@ -195,6 +195,83 @@ class TestConfiguredHostWithAPort:
         assert default_github_host() == "ghe.example.com"
 
 
+class TestUnsupportedSchemes:
+    """Only web URLs and git transports are accepted.
+
+    Rewriting an arbitrary scheme to https turned a target that should
+    be refused into a real GitHub operation --- the parsers read only
+    the netloc and path, so ``javascript://github.com/acme/widget``
+    parsed as an ordinary repository.
+    """
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "javascript://github.com/acme/widget",
+            "file:///etc/passwd",
+            "data://github.com/acme/widget",
+            "ftp://github.com/acme/widget",
+        ],
+    )
+    def test_unsupported_scheme_is_refused(self, raw):
+        with pytest.raises(UrlParseError, match="Unsupported URL scheme"):
+            normalize_target(raw)
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "javascript://github.com/acme/widget",
+            "file:///etc/passwd",
+        ],
+    )
+    def test_parsers_refuse_them_too(self, raw):
+        # The check has to bite at the parser, not merely in
+        # normalisation, or the netloc still reaches a real request.
+        with pytest.raises(UrlParseError):
+            parse_repo_url(raw)
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "ssh://git@github.com/acme/widget.git",
+            "git://github.com/acme/widget.git",
+            "https://github.com/acme/widget",
+            "http://github.com/acme/widget",
+        ],
+    )
+    def test_supported_schemes_still_work(self, raw):
+        assert normalize_target(raw).startswith(("http://", "https://"))
+
+
+class TestDefaultHostIsResolvedLazily:
+    """An explicit URL does not depend on the GitHub default.
+
+    The default was resolved before the function knew whether it was
+    needed, so a misconfigured ``GH_HOST`` broke even a Gerrit URL that
+    never consults it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _broken_default(self, monkeypatch):
+        monkeypatch.delenv("DEPENDAMERGE_GITHUB_HOST", raising=False)
+        monkeypatch.setenv("GH_HOST", "broken:8443")
+
+    def test_explicit_gerrit_topic_is_unaffected(self):
+        parsed = parse_gerrit_topic_url("https://gerrit.example.org/q/topic:x")
+        assert parsed.topic == "x"
+
+    def test_explicit_github_url_is_unaffected(self):
+        assert parse_repo_url("https://github.com/acme/widget").project == (
+            "acme/widget"
+        )
+
+    def test_shorthand_still_reports_the_misconfiguration(self):
+        # The shorthand branch is the one that needs the default, so it
+        # is the one that must still complain.
+        with pytest.raises(UrlParseError, match="names a port"):
+            normalize_target("acme/widget")
+
+
 class TestNormalizeTarget:
     """Expansion of every accepted input form."""
 

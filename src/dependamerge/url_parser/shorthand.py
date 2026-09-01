@@ -51,6 +51,15 @@ _SCP_REMOTE_RE = re.compile(
 # A path that is purely a number, i.e. indistinguishable from a port.
 _NUMERIC_PATH_RE = re.compile(r"\A\d+(?:/|\Z)")
 
+#: Schemes that already name a web URL, kept as given.
+_WEB_SCHEMES = frozenset({"http", "https"})
+
+#: Git transports whose remotes map onto a web URL by dropping the
+#: scheme, credentials and port.  Anything outside both sets is left
+#: alone for the parsers to reject, rather than being rewritten into a
+#: request that would then be made for real.
+_GIT_TRANSPORT_SCHEMES = frozenset({"ssh", "git", "git+ssh", "ssh+git", "rsync"})
+
 # A path segment that names a host rather than an owner.
 _PORT_SUFFIX_RE = re.compile(r":\d+\Z")
 
@@ -333,8 +342,6 @@ def normalize_target(value: str, *, default_host: str | None = None) -> str:
     if value.startswith("/"):
         return value
 
-    host = (default_host or default_github_host()).strip().lower()
-
     # ssh://, git://, and friends: keep the host and path, drop the
     # scheme, any credentials, and any port.  A Gerrit SSH remote such
     # as ssh://user@gerrit.example.org:29418/releng/tool differs from
@@ -342,7 +349,7 @@ def normalize_target(value: str, *, default_host: str | None = None) -> str:
     scheme_match = re.match(r"\A([A-Za-z][A-Za-z0-9+.-]*)://(.*)\Z", value, re.DOTALL)
     if scheme_match:
         scheme = scheme_match.group(1).lower()
-        if scheme in ("http", "https"):
+        if scheme in _WEB_SCHEMES:
             # Credentials are stripped even here, where the scheme and
             # port are kept.  A clone remote may embed a token, and the
             # normalised URL is printed back to the operator when a
@@ -352,10 +359,21 @@ def normalize_target(value: str, *, default_host: str | None = None) -> str:
                 f"{scheme}://"
                 + _strip_userinfo(scheme_match.group(2), strip_port=False)
             )
+        if scheme not in _GIT_TRANSPORT_SCHEMES:
+            # Anything else is refused outright.  Returning it unchanged
+            # is not enough: the parsers read only the netloc and path,
+            # so ``javascript://github.com/acme/widget`` would parse as
+            # an ordinary repository and trigger a real operation.
+            from .models import UrlParseError
+
+            raise UrlParseError(
+                f"Unsupported URL scheme {scheme!r}. Targets must be "
+                "http(s) URLs, git remotes, or shorthand."
+            )
         remainder = scheme_match.group(2)
-        # A non-web scheme carries a transport port --- Gerrit's 29418,
-        # for instance --- which has no bearing on the web URL, so it
-        # goes along with any credentials.
+        # A git transport carries a port --- Gerrit's 29418, for
+        # instance --- which has no bearing on the web URL, so it goes
+        # along with any credentials.
         return _rebuild("https://" + _strip_userinfo(remainder, strip_port=True))
 
     # scp-style remote, which has no scheme at all.
@@ -377,6 +395,10 @@ def normalize_target(value: str, *, default_host: str | None = None) -> str:
         # expanded into a plausible-looking URL that cannot resolve.
         return value
 
+    # Only now is a default host needed.  Resolving it earlier makes an
+    # explicit URL --- a Gerrit one, even --- fail on an unrelated
+    # GitHub host misconfiguration it never consults.
+    host = (default_host or default_github_host()).strip().lower()
     return _rebuild(f"https://{host}/{value.lstrip('/')}")
 
 
