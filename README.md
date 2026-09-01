@@ -500,6 +500,86 @@ entries.
 
 ## Usage
 
+### Naming a Target
+
+Every command that takes a target accepts shorthand as well as a full
+URL. The shorthand saves a great deal of typing:
+
+```bash
+# Owner-wide: every repository beneath an org or user
+dependamerge merge lfreleng-actions
+
+# One repository
+dependamerge merge lfreleng-actions/dependamerge
+
+# One pull request
+dependamerge merge lfreleng-actions/dependamerge/pull/7
+
+# A git remote, as printed by `git remote -v`
+dependamerge merge git@github.com:lfreleng-actions/dependamerge.git
+```
+
+Full URLs work as before, with or without the scheme, and a trailing
+`.git` makes no difference.
+
+Two segments are ambiguous — is `a/b` an owner and a repository, or a
+host and an owner? A GitHub login cannot contain a dot, so a dotted
+first segment names a host and an undotted one names a login:
+
+| Input             | Read as                             |
+| ----------------- | ----------------------------------- |
+| `acme/widget`     | repository `widget` owned by `acme` |
+| `github.com/acme` | owner `acme` on `github.com`        |
+
+### Working From a Checkout
+
+Omit the target entirely to act on the repository you are standing in:
+
+```bash
+cd ~/src/dependamerge
+dependamerge merge
+```
+
+The `upstream` remote takes precedence over `origin`, since in the fork
+workflow `origin` names your own fork rather than the repository you
+mean to merge. The tool prints the remote it chose before it does
+anything.
+
+The tool also recognises Gerrit checkouts — by `.gitreview`, by an SSH
+remote on port 29418, or by the hostname — and prints the host and
+project it found. You address a Gerrit change by change or topic, and a
+checkout determines neither, so Gerrit still needs an explicit target.
+
+### GitHub Enterprise Server
+
+Enterprise hosts work once you declare them. Their hostnames are
+arbitrary, so accepting whichever host a URL happens to name would send
+your token wherever a mistyped or pasted link points:
+
+```bash
+# Declare one or more Enterprise hosts
+export DEPENDAMERGE_GITHUB_HOSTS=ghe.corp.example.com
+
+dependamerge merge https://ghe.corp.example.com/acme/widget
+```
+
+To make an Enterprise host the default that shorthand resolves against,
+set `DEPENDAMERGE_GITHUB_HOST` — or reuse `GH_HOST`, the GitHub CLI's
+own variable, if you have already pointed `gh` at your instance:
+
+```bash
+export GH_HOST=ghe.corp.example.com
+
+# Now shorthand resolves against the Enterprise host
+dependamerge merge acme/widget
+```
+
+Naming a host in either single-host variable also declares it, so there
+is no need to set both. `github.com` needs no configuration.
+
+Direct pull request URLs have always worked on any host, since `/pull/`
+identifies them structurally.
+
 ### Closing Pull Requests
 
 Close pull requests across an entire GitHub organization:
