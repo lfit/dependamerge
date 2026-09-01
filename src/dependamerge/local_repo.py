@@ -77,13 +77,20 @@ def _git(args: list[str], cwd: Path | None) -> str | None:
     """Run a read-only git command, returning stripped stdout or None.
 
     Every failure mode here --- not a repository, no such remote, git
-    missing entirely --- is an ordinary "cannot infer" answer rather
-    than an error, because the caller always has the option of asking
-    the operator for a URL.
+    missing entirely, an unreadable working directory --- is an
+    ordinary "cannot infer" answer rather than an error, because the
+    caller always has the option of asking the operator for a URL.
+
+    ``OSError`` is caught alongside ``GitError`` deliberately.
+    ``run_git`` converts timeouts and non-zero exits, but process
+    creation failures --- a missing ``git``, a working directory that
+    does not exist --- surface as ``FileNotFoundError`` and would
+    otherwise crash the command with a traceback instead of the
+    guidance.
     """
     try:
         result = run_git(args, cwd=cwd, check=True, timeout=_GIT_TIMEOUT)
-    except GitError as exc:
+    except (GitError, OSError) as exc:
         log.debug("git %s failed: %s", " ".join(args[1:]), exc)
         return None
     output = result.stdout.strip()

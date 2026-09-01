@@ -40,8 +40,10 @@ from .change import (
 )
 from .hosts import (
     _host_matches,
+    clone_url_for,
     derive_api_urls,
     is_supported_github_host,
+    pull_request_url_for,
     reject_port_bearing_host,
     unsupported_host_message,
 )
@@ -81,6 +83,7 @@ __all__ = [
     "ParsedUrl",
     "UrlParseError",
     "_host_matches",
+    "clone_url_for",
     "default_github_host",
     "derive_api_urls",
     "detect_source",
@@ -96,6 +99,7 @@ __all__ = [
     "parse_owner_arg",
     "parse_owner_target",
     "parse_repo_url",
+    "pull_request_url_for",
     "reject_port_bearing_host",
     "set_github_host",
     "strip_git_suffix",

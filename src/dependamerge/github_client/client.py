@@ -28,6 +28,7 @@ from ..url_parser import (
     is_supported_github_host,
     normalize_target,
     reject_port_bearing_host,
+    unsupported_host_message,
 )
 from .actions import _GitHubActionMixin
 from .queries import _GitHubQueryMixin
@@ -109,6 +110,12 @@ class GitHubClient(_GitHubQueryMixin, _GitHubActionMixin, _GitHubStatusMixin):
             raise ValueError(str(exc)) from exc
         host = (parsed.hostname or "").lower()
         if not is_supported_github_host(host):
+            if host:
+                # Structurally a pull request URL, just on a host nobody
+                # has declared.  Say so, and how to fix it --- the
+                # repository and owner parsers already do, and a
+                # direct-PR user deserves the same instructions.
+                raise ValueError(unsupported_host_message(host, "Pull request"))
             raise ValueError(f"Invalid GitHub PR URL: {url}")
 
         # This client's API base URLs were fixed at construction, so a

@@ -11,6 +11,8 @@ one is refused before any request carries a token to it.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 import typer
 from typer.testing import CliRunner
@@ -25,9 +27,11 @@ from dependamerge.github_async._permissions import (
 from dependamerge.github_client import GitHubClient
 from dependamerge.github_service import GitHubService
 from dependamerge.merge_manager import AsyncMergeManager
+from dependamerge.models import PullRequestInfo
 from dependamerge.resolve_conflicts import FixOrchestrator
 from dependamerge.url_parser import (
     UrlParseError,
+    clone_url_for,
     default_github_host,
     derive_api_urls,
     enterprise_hosts,
@@ -589,6 +593,88 @@ class TestUndeclaredHostErrorIsActionable:
         assert "Invalid URL" in result.stdout
 
 
+class TestCloneUrlFallbacksFollowTheHost:
+    """Synthesised clone URLs must name the right server.
+
+    A clone URL is missing from some API payloads and gets built from
+    the repository's full name.  Hard-coding github.com there sends a
+    clone --- and a force-push, carrying the token --- to dotcom for a
+    repository that lives on an Enterprise server.
+    """
+
+    def test_enterprise_host(self, declared_ghe):
+        assert clone_url_for(GHE, "acme/widget") == f"https://{GHE}/acme/widget.git"
+
+    def test_dotcom(self):
+        assert (
+            clone_url_for("github.com", "acme/widget")
+            == "https://github.com/acme/widget.git"
+        )
+
+    def test_empty_host_falls_back_to_dotcom(self):
+        assert clone_url_for("", "acme/widget") == "https://github.com/acme/widget.git"
+
+    def test_rebase_plan_uses_the_host_for_missing_urls(self, declared_ghe):
+        # The local rebase path clones and force-pushes, so a wrong
+        # host here is the most consequential of the fallbacks.
+        from dependamerge.rebase.local_plan import _build_rebase_plan
+
+        pr = PullRequestInfo(
+            number=1,
+            title="t",
+            body=None,
+            author="dependabot[bot]",
+            head_sha="abc",
+            base_branch="main",
+            head_branch="dep/x",
+            state="open",
+            mergeable=True,
+            mergeable_state="clean",
+            behind_by=0,
+            files_changed=[],
+            repository_full_name="acme/widget",
+            html_url=f"https://{GHE}/acme/widget/pull/1",
+            head_repo_full_name="acme/widget",
+        )
+
+        plan = _build_rebase_plan(
+            pr_info=pr,
+            owner="acme",
+            repo="widget",
+            log=logging.getLogger("test"),
+            host=GHE,
+        )
+
+        assert plan is not None
+        # ``origin_url`` is where the rebase clones from and force-pushes
+        # to, so this is the field that matters most.
+        assert GHE in plan.origin_url
+        assert "github.com" not in plan.origin_url
+        assert "github.com" not in plan.upstream_url
+
+
+class TestUndeclaredPullRequestUrlExplainsItself:
+    """A structurally valid PR URL on an undeclared host says why.
+
+    The repository and owner parsers name the environment variable;
+    a direct-PR user was told only "Invalid GitHub PR URL", which
+    reads as though the URL were malformed.
+    """
+
+    def test_message_names_the_remedy(self, no_declared_hosts):
+        client = GitHubClient("t")
+        with pytest.raises(ValueError) as excinfo:
+            client.parse_pr_url(f"https://{GHE}/acme/widget/pull/7")
+        message = str(excinfo.value)
+        assert "DEPENDAMERGE_GITHUB_HOSTS" in message
+        assert GHE in message
+
+    def test_genuinely_malformed_url_keeps_its_own_message(self, no_declared_hosts):
+        client = GitHubClient("t")
+        with pytest.raises(ValueError, match="Invalid GitHub PR URL"):
+            client.parse_pr_url("https://github.com/acme/widget")
+
+
 class TestClientCarriesTheHost:
     """The resolved host reaches the transport layer."""
 
@@ -619,5 +705,8 @@ class TestClientCarriesTheHost:
 
     def test_pr_url_on_an_undeclared_host_is_refused(self, no_declared_hosts):
         client = GitHubClient("t")
-        with pytest.raises(ValueError, match="Invalid GitHub PR URL"):
+        # The message changed to name the remedy; the refusal itself is
+        # what this test guards.  See
+        # TestUndeclaredPullRequestUrlExplainsItself for the wording.
+        with pytest.raises(ValueError, match="not enabled for host"):
             client.parse_pr_url("https://evil.example.com/acme/widget/pull/7")

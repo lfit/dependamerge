@@ -106,6 +106,9 @@ class _MergeManagerBase:
     fix_semantic_title: bool
     force_level: str
     github2gerrit_mode: str
+    # The GitHub host this run addresses.  Carried on the base so every
+    # mixin can build host-correct URLs rather than assuming dotcom.
+    host: str
     log: logging.Logger
     max_retries: int
     netrc_file: Path | None

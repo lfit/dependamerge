@@ -166,6 +166,44 @@ def unsupported_host_message(host: str, scope: str) -> str:
     )
 
 
+def clone_url_for(host: str, full_name: str) -> str:
+    """Build the HTTPS clone URL for ``owner/repo`` on ``host``.
+
+    Used where a clone URL is missing from an API payload and has to
+    be synthesised.  Hard-coding github.com there sends a clone or a
+    force-push --- carrying the caller's token --- to dotcom for a
+    repository that lives on an Enterprise server.
+
+    Args:
+        host: The GitHub host the repository lives on.
+        full_name: The ``owner/repo`` identifier.
+
+    Returns:
+        An HTTPS clone URL.
+    """
+    resolved = (host or "").strip().lower() or "github.com"
+    return f"https://{resolved}/{full_name}.git"
+
+
+def pull_request_url_for(host: str, full_name: str, number: int) -> str:
+    """Build the web URL for a pull request on ``host``.
+
+    A fallback for payloads that omit ``html_url``.  Lives here with
+    the other URL construction so the host substitution happens in one
+    place rather than being reinvented at each display site.
+
+    Args:
+        host: The GitHub host the repository lives on.
+        full_name: The ``owner/repo`` identifier.
+        number: The pull request number.
+
+    Returns:
+        A web URL for the pull request.
+    """
+    resolved = (host or "").strip().lower() or "github.com"
+    return f"https://{resolved}/{full_name}/pull/{number}"
+
+
 def derive_api_urls(host: str) -> tuple[str, str]:
     """Derive the (REST, GraphQL) API base URLs for a GitHub host.
 

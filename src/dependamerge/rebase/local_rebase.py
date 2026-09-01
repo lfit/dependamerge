@@ -39,6 +39,7 @@ async def local_rebase_pr(
     repo: str,
     token: str,
     log: logging.Logger,
+    host: str = "",
 ) -> bool:
     """Rebase a PR locally and force-push the result.
 
@@ -62,7 +63,9 @@ async def local_rebase_pr(
         log.debug("Local rebase unavailable (no git on PATH?): %s", exc)
         return False
 
-    plan = _build_rebase_plan(pr_info=pr_info, owner=owner, repo=repo, log=log)
+    plan = _build_rebase_plan(
+        pr_info=pr_info, owner=owner, repo=repo, log=log, host=host
+    )
     if plan is None:
         return False
 

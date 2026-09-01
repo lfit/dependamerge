@@ -44,8 +44,19 @@ class TestGitHubClient:
 
     def test_parse_pr_url_invalid(self):
         client = GitHubClient(token="test_token")
-        with pytest.raises(ValueError, match="Invalid GitHub PR URL"):
+        # An undeclared host is refused, and the message now names the
+        # remedy rather than only calling the URL invalid — see
+        # TestUndeclaredPullRequestUrlExplainsItself in
+        # tests/test_github_enterprise.py.
+        with pytest.raises(ValueError, match="not enabled for host"):
             client.parse_pr_url("https://invalid-url.com")
+
+    def test_parse_pr_url_malformed_on_a_known_host(self):
+        client = GitHubClient(token="test_token")
+        # A permitted host with a path that is not a pull request keeps
+        # the original wording, since nothing needs declaring.
+        with pytest.raises(ValueError, match="Invalid GitHub PR URL"):
+            client.parse_pr_url("https://github.com/acme/widget")
 
     def test_parse_pr_url_with_files_path(self):
         client = GitHubClient(token="test_token")

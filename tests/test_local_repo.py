@@ -211,6 +211,13 @@ class TestDetectLocalTarget:
         outside.mkdir()
         assert detect_local_target(outside) is None
 
+    def test_missing_working_directory_does_not_crash(self, tmp_path):
+        # ``run_git`` converts timeouts and non-zero exits to GitError,
+        # but process creation failures stay OSError.  Catching only
+        # GitError crashed the command with a traceback instead of
+        # showing the no-usable-remote guidance.
+        assert detect_local_target(tmp_path / "does-not-exist") is None
+
     def test_none_without_a_remote(self, repo):
         assert detect_local_target(repo) is None
 
