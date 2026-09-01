@@ -137,14 +137,25 @@ def pytest_collection_modifyitems(
 
 
 @pytest.fixture(autouse=True)
-def _reset_github_host_override():
-    """Clear the ``--github-host`` override around every test.
+def _reset_github_host_override(monkeypatch):
+    """Detach every test from ambient GitHub host configuration.
 
-    The override is process-wide, because it is process-wide
-    configuration.  That makes it exactly the kind of state that leaks
-    between tests and produces order-dependent failures, so it is reset
-    on both sides rather than trusting each test to tidy up.
+    The resolved host comes from a process-wide override *and* three
+    environment variables.  Clearing only the override leaves the rest:
+    a developer who legitimately has ``GH_HOST`` set for their
+    Enterprise installation would run the otherwise-dotcom suite
+    against that host and see failures nobody else can reproduce.
+
+    The same hazard as the ambient git configuration in
+    ``tests/test_local_repo.py``, and worth the same treatment.  Tests
+    that want a host set do so explicitly, after this has run.
     """
+    for name in (
+        "DEPENDAMERGE_GITHUB_HOST",
+        "DEPENDAMERGE_GITHUB_HOSTS",
+        "GH_HOST",
+    ):
+        monkeypatch.delenv(name, raising=False)
     set_github_host(None)
     yield
     set_github_host(None)
