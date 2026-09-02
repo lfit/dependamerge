@@ -18,6 +18,7 @@ import json
 from collections.abc import AsyncIterator
 from typing import (
     Any,
+    cast,
 )
 
 import httpx
@@ -45,6 +46,7 @@ from ._errors import (
     _is_secondary_rate_limited,
     _is_transient_graphql_error,
 )
+from ._json_body import decode_json_body
 from ._throttling import _maybe_await
 
 
@@ -241,6 +243,38 @@ class _TransportMixin(_GitHubAsyncBase):
             finally:
                 await _maybe_await(self.on_rate_limit_cleared)
 
+    async def _request_once(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Perform one attempt, with rate-limit and transient handling.
+
+        Un-retried on purpose.  Both :meth:`_request` and
+        :meth:`_request_json` wrap this with the *same* retry policy, so
+        decoding can happen inside the retried scope without nesting two
+        policies or duplicating one.
+        """
+        async with self.semaphore:
+            async with self.limiter:
+                r = await self._client.request(method, url, **kwargs)
+
+        # 401 should not be retried (bad credentials)
+        if r.status_code == 401:
+            r.raise_for_status()
+
+        # Primary rate limit: examine headers and body
+        if r.status_code == 403:
+            await _handle_forbidden(self, r)
+
+        # Retryable transient statuses
+        if _is_retryable_status(r.status_code):
+            await _handle_retryable_status(self, r)
+
+        # All other errors -> raise.  This covers 4xx and 5xx, and also
+        # 3xx, since redirects are not followed --- so nothing below
+        # this line is looking at a failed response.
+        r.raise_for_status()
+
+        await _finish_successful_request(self, r)
+        return r
+
     @retry(
         reraise=True,
         stop=stop_after_attempt(6),
@@ -259,57 +293,75 @@ class _TransportMixin(_GitHubAsyncBase):
         Low-level request with concurrency limit, RPS limit, and retry handling.
         Handles primary/secondary rate limits and transient statuses.
         """
-        async with self.semaphore:
-            async with self.limiter:
-                r = await self._client.request(method, url, **kwargs)
+        return await self._request_once(method, url, **kwargs)
 
-        # 401 should not be retried (bad credentials)
-        if r.status_code == 401:
-            r.raise_for_status()
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(6),
+        wait=wait_random_exponential(multiplier=0.5, max=_TENACITY_MAX_BACKOFF),
+        retry=retry_if_exception_type(
+            (
+                httpx.TransportError,
+                httpx.ReadTimeout,
+                RetryableError,
+                SecondaryRateLimitError,
+            )
+        ),
+    )
+    async def _request_json(
+        self, method: str, url: str, **kwargs
+    ) -> tuple[httpx.Response, dict[str, Any] | list[dict[str, Any]]]:
+        """Perform a request and decode its JSON body, retrying both.
 
-        # Primary rate limit: examine headers and body
-        if r.status_code == 403:
-            await _handle_forbidden(self, r)
+        Decoding sits *inside* the retried scope deliberately.  A 2xx
+        carrying an empty or non-JSON body is a transient symptom of
+        upstream trouble, so it should be retried like any other, rather
+        than escaping as a decode failure that matches no predicate.
 
-        # Retryable transient statuses
-        if _is_retryable_status(r.status_code):
-            await _handle_retryable_status(self, r)
+        Returns the response alongside the body, because a caller may
+        still need the headers --- pagination reads ``Link``.
+        """
+        r = await self._request_once(method, url, **kwargs)
+        return r, decode_json_body(r, method, url)
 
-        # All other errors -> raise
-        r.raise_for_status()
+    async def _fetch_json(
+        self, method: str, url: str, **kwargs
+    ) -> tuple[httpx.Response, dict[str, Any] | list[dict[str, Any]]]:
+        """Restore the type the retry decorator erases.
 
-        await _finish_successful_request(self, r)
-        return r
+        Tenacity's decorator is untyped, so awaiting :meth:`_request_json`
+        yields ``Any`` and that leaks into every caller --- which is how
+        the unchecked ``.json()`` calls went unnoticed in the first place.
+        Narrowing once here keeps all six verbs honest without six casts.
+        """
+        return cast(
+            "tuple[httpx.Response, dict[str, Any] | list[dict[str, Any]]]",
+            await self._request_json(method, url, **kwargs),
+        )
 
     async def get(
         self, path: str, params: dict[str, Any] | None = None
     ) -> dict[str, Any] | list[dict[str, Any]]:
-        r = await self._request("GET", f"{self.api_url}{path}", params=params)
-        return r.json()  # type: ignore[no-any-return]
+        _, body = await self._fetch_json("GET", f"{self.api_url}{path}", params=params)
+        return body
 
     async def post(
         self, path: str, json: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        r = await self._request("POST", f"{self.api_url}{path}", json=json)
-        if r.status_code == 204:
-            return {}
-        return r.json()  # type: ignore[no-any-return]
+        _, body = await self._fetch_json("POST", f"{self.api_url}{path}", json=json)
+        return body  # type: ignore[return-value]
 
     async def put(
         self, path: str, json: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        r = await self._request("PUT", f"{self.api_url}{path}", json=json)
-        if r.status_code == 204:
-            return {}
-        return r.json()  # type: ignore[no-any-return]
+        _, body = await self._fetch_json("PUT", f"{self.api_url}{path}", json=json)
+        return body  # type: ignore[return-value]
 
     async def patch(
         self, path: str, json: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        r = await self._request("PATCH", f"{self.api_url}{path}", json=json)
-        if r.status_code == 204:
-            return {}
-        return r.json()  # type: ignore[no-any-return]
+        _, body = await self._fetch_json("PATCH", f"{self.api_url}{path}", json=json)
+        return body  # type: ignore[return-value]
 
     async def graphql(
         self, query: str, variables: dict[str, Any] | None = None
@@ -331,8 +383,10 @@ class _TransportMixin(_GitHubAsyncBase):
             ),
         ):
             with attempt:
-                r = await self._request("POST", self.graphql_url, json=payload)
-                data = r.json()
+                _, data = await self._fetch_json("POST", self.graphql_url, json=payload)
+                if not isinstance(data, dict):
+                    self.log.debug("GraphQL response was not an object; retrying")
+                    raise RetryableError("Malformed GraphQL response")
                 if "errors" in data and data["errors"]:
                     # Retry on transient errors, otherwise raise
                     if _is_transient_graphql_error(data["errors"]):
@@ -359,18 +413,21 @@ class _TransportMixin(_GitHubAsyncBase):
         params: dict[str, Any] | None = None,
         per_page: int = 100,
         max_pages: int | None = None,
-    ) -> AsyncIterator[dict[str, Any]]:
+    ) -> AsyncIterator[dict[str, Any] | list[dict[str, Any]]]:
         """
         Iterate through a paginated REST collection.
 
-        Yields JSON arrays/items for each page. Caller can flatten as needed.
+        Yields each page as the API returned it.  That is a *list* for
+        collection endpoints and a *dict* for the ones that wrap their
+        items in an object (``/actions/runs``, for instance), so callers
+        check the shape before using it.  The annotation said ``dict``
+        only, which was never true; the type is now honest about both.
         """
         page = 1
         while True:
             q = dict(params or {})
             q.update({"per_page": per_page, "page": page})
-            r = await self._request("GET", f"{self.api_url}{path}", params=q)
-            data = r.json()
+            r, data = await self._fetch_json("GET", f"{self.api_url}{path}", params=q)
             if not data:
                 return
             yield data

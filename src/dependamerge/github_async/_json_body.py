@@ -1,0 +1,113 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+"""
+Turning a successful response body into JSON, in one place.
+
+Six call sites used to decide this for themselves, and three of them
+omitted the empty-body check, so a body that could not be JSON was
+parsed anyway and the resulting ``JSONDecodeError`` escaped the
+transport with no status, URL or body to act on --- abandoning a whole
+multi-repository run over one bad response.
+
+Kept apart from :mod:`_transport` so the decision lives somewhere
+nameable rather than being repeated per verb.
+"""
+
+from __future__ import annotations
+
+from typing import Any, cast
+
+import httpx
+
+from ._errors import RetryableError
+
+#: Status codes defined to carry no body, so there is nothing to parse.
+_BODILESS_STATUSES = frozenset({204, 205})
+
+#: How much of an unexpected body to quote back.  Enough to recognise an
+#: HTML error page or a proxy notice; short enough for one log line.
+_BODY_SNIPPET_LIMIT = 200
+
+
+def _looks_like_json(content_type: str) -> bool:
+    """Report whether a content-type declares a JSON body.
+
+    Accepts ``application/json`` and the ``+json`` structured-suffix
+    family (``application/vnd.github+json``), ignoring parameters such
+    as ``; charset=utf-8``.  An absent content-type is treated as JSON,
+    because the body itself then settles it and refusing outright would
+    reject responses that parse perfectly well.
+    """
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if not media_type:
+        return True
+    return media_type == "application/json" or media_type.endswith("+json")
+
+
+def decode_json_body(
+    r: httpx.Response, method: str, url: str
+) -> dict[str, Any] | list[dict[str, Any]]:
+    """Decode a successful response body, or say why it could not be.
+
+    The single place the transport turns bytes into JSON.  Every verb
+    routes through here so content-type handling, empty-body handling
+    and error wording cannot drift apart --- previously six call sites
+    each decided this for themselves, and three of them omitted the
+    204 check entirely.
+
+    Only 2xx responses reach this function: ``raise_for_status`` has
+    already rejected 4xx and 5xx, and rejects 3xx too because redirects
+    are not followed.  So the question here is never "did the request
+    fail" but "is this body parseable".
+
+    A body that cannot be JSON is reported as :class:`RetryableError`,
+    not as a decode failure.  On a 2xx this almost always means an
+    intermediary answered in place of the API --- an HTML error page or
+    an empty body during upstream trouble --- which is transient, and
+    the surrounding retry policy is exactly the machinery for it.  A
+    bare ``JSONDecodeError`` matched no retry predicate, so one bad body
+    abandoned an entire multi-repository run.
+
+    Args:
+        r: The successful response.
+        method: HTTP method, for the error message.
+        url: Request URL, for the error message.
+
+    Returns:
+        The decoded body, or an empty dict for a status defined to
+        carry none.
+
+    Raises:
+        RetryableError: The body is absent or is not JSON.
+    """
+    if r.status_code in _BODILESS_STATUSES:
+        # Defined to carry no body; an empty string is the correct
+        # answer here rather than a parse failure.
+        return {}
+
+    content_type = r.headers.get("content-type", "")
+    body = r.content or b""
+    if not body.strip():
+        raise RetryableError(
+            f"{method} {url} returned {r.status_code} with an empty body; expected JSON"
+        )
+    if not _looks_like_json(content_type):
+        snippet = " ".join(r.text[:_BODY_SNIPPET_LIMIT].split())
+        raise RetryableError(
+            f"{method} {url} returned {r.status_code} with content-type "
+            f"{content_type!r}, expected JSON. Body began: {snippet!r}"
+        )
+    try:
+        # ``cast`` rather than an ignore comment: silencing the warning
+        # would leave the value typed ``Any``, which then leaks through
+        # every caller and defeats the checking this function exists to
+        # make possible.
+        return cast("dict[str, Any] | list[dict[str, Any]]", r.json())
+    except ValueError as exc:
+        # Declared JSON but is not.  Same conclusion as a wrong
+        # content-type, and worth quoting the body for the same reason.
+        snippet = " ".join(r.text[:_BODY_SNIPPET_LIMIT].split())
+        raise RetryableError(
+            f"{method} {url} returned {r.status_code} with an unparsable "
+            f"JSON body ({exc}). Body began: {snippet!r}"
+        ) from exc
