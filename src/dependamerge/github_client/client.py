@@ -102,6 +102,15 @@ class GitHubClient(_GitHubQueryMixin, _GitHubActionMixin, _GitHubStatusMixin):
         Accepts the same shorthand the URL parsers do, so
         ``acme/widget/pull/7`` and a scheme-less host both work here as
         well as in ``merge``.
+
+        Raises:
+            UrlParseError: The target is not a usable pull request URL.
+                It subclasses :class:`ValueError`, so callers catching
+                that keep working while the dispatcher can still tell a
+                URL problem from an API one.  Raising bare
+                ``ValueError`` here reported an undeclared host as a
+                missing-permissions error, sending the operator to
+                regenerate a token that was never at fault.
         """
         # SECURITY: Use urlparse for host extraction, not substring checks.
         # See CodeQL rule py/incomplete-url-substring-sanitization.
@@ -111,10 +120,7 @@ class GitHubClient(_GitHubQueryMixin, _GitHubActionMixin, _GitHubStatusMixin):
         # send the token to the default port of a server the operator
         # did not name.  A malformed port is refused for the same
         # reason it is there --- it resolves to a bare hostname.
-        try:
-            reject_port_bearing_host(parsed.netloc.lower(), "Pull request")
-        except UrlParseError as exc:
-            raise ValueError(str(exc)) from exc
+        reject_port_bearing_host(parsed.netloc.lower(), "Pull request")
         host = (parsed.hostname or "").lower()
         if not is_supported_github_host(host):
             # Declaration guidance only helps when the URL is otherwise
@@ -122,8 +128,8 @@ class GitHubClient(_GitHubQueryMixin, _GitHubActionMixin, _GitHubStatusMixin):
             # one sends the operator to configure a host, only to meet
             # the real error afterwards.
             if host and _PR_PATH_RE.match(parsed.path):
-                raise ValueError(unsupported_host_message(host, "Pull request"))
-            raise ValueError(f"Invalid GitHub PR URL: {url}")
+                raise UrlParseError(unsupported_host_message(host, "Pull request"))
+            raise UrlParseError(f"Invalid GitHub PR URL: {url}")
 
         # This client's API base URLs were fixed at construction, so a
         # URL naming a *different* permitted host would be acted on
@@ -133,7 +139,7 @@ class GitHubClient(_GitHubQueryMixin, _GitHubActionMixin, _GitHubStatusMixin):
         if not _host_matches(host, self.host, allow_subdomains=False) and not (
             _host_matches(host, "github.com") and _host_matches(self.host, "github.com")
         ):
-            raise ValueError(
+            raise UrlParseError(
                 f"Pull request URL names host {host}, but this client is "
                 f"configured for {self.host}. Acting on it here would "
                 "address the wrong server."
@@ -148,7 +154,7 @@ class GitHubClient(_GitHubQueryMixin, _GitHubActionMixin, _GitHubStatusMixin):
         # that made that possible.
         match = _PR_PATH_RE.match(parsed.path)
         if match is None:
-            raise ValueError(f"Invalid GitHub PR URL: {url}")
+            raise UrlParseError(f"Invalid GitHub PR URL: {url}")
         return (
             match.group("owner"),
             match.group("repo"),

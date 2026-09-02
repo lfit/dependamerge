@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 from dependamerge.cli import app
 from dependamerge.cli._merge_permissions import _check_merge_permissions
 from dependamerge.close_manager import AsyncCloseManager
+from dependamerge.error_codes import is_github_api_permission_error
 from dependamerge.github_async import GitHubAsync
 from dependamerge.github_async._permissions import (
     _unauthorized_permission_error,
@@ -775,6 +776,44 @@ class TestUndeclaredPullRequestUrlExplainsItself:
         client = GitHubClient("t")
         with pytest.raises(ValueError, match="Invalid GitHub PR URL"):
             client.parse_pr_url("https://github.com/acme/widget")
+
+    def test_the_error_is_not_reported_as_a_credentials_fault(self, no_declared_hosts):
+        # ``is_github_api_permission_error`` matches *substrings of the
+        # message*, and "token" is one of them.  The remedy text ends
+        # "...cannot send your token somewhere unintended", so the
+        # undeclared-host error was reported as "provide a GITHUB_TOKEN
+        # with the required permissions" --- advice for a fault that
+        # was not there, which also hid the message saying what to do.
+        client = GitHubClient("t")
+        with pytest.raises(ValueError) as excinfo:
+            client.parse_pr_url(f"https://{GHE}/acme/widget/pull/7")
+
+        assert "token" in str(excinfo.value)  # the substring that misled it
+        assert is_github_api_permission_error(excinfo.value) is False
+
+    def test_a_url_error_is_typed_so_callers_can_tell_it_apart(self, no_declared_hosts):
+        # UrlParseError subclasses ValueError, so callers catching the
+        # latter keep working.  Raising bare ValueError discarded the
+        # only signal that separates a URL problem from an API one.
+        client = GitHubClient("t")
+        with pytest.raises(UrlParseError):
+            client.parse_pr_url(f"https://{GHE}/acme/widget/pull/7")
+        with pytest.raises(ValueError):
+            client.parse_pr_url(f"https://{GHE}/acme/widget/pull/7")
+
+    @pytest.mark.parametrize(
+        ("exception", "expected"),
+        [
+            (Exception("Bad credentials"), True),
+            (Exception("Resource not accessible by integration"), True),
+            (Exception("HTTP 403 Forbidden"), True),
+            (ValueError("invalid token supplied"), True),
+        ],
+    )
+    def test_real_permission_errors_still_classify(self, exception, expected):
+        # The complement: excluding URL errors must not stop a genuine
+        # credentials failure being reported as one.
+        assert is_github_api_permission_error(exception) is expected
 
     @pytest.mark.parametrize(
         "url",

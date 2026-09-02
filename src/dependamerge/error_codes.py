@@ -17,6 +17,8 @@ from typing import NoReturn
 
 from rich.console import Console
 
+from .url_parser.models import UrlParseError
+
 log = logging.getLogger("dependamerge.error_codes")
 console = Console()
 
@@ -230,6 +232,17 @@ def is_github_api_permission_error(exception: Exception) -> bool:
     Returns:
         True if the exception indicates GitHub API permission issues
     """
+    # A URL that could not be parsed is never a credentials problem, and
+    # this check has to come first because the patterns below match
+    # *substrings of the message*.  The undeclared-host error explains
+    # that hosts are declared "so a mistyped URL cannot send your token
+    # somewhere unintended"; the bare word "token" in that sentence was
+    # enough to report it as "provide a GITHUB_TOKEN with the required
+    # permissions", which sent the operator to regenerate a credential
+    # that was never at fault and buried the message saying what to do.
+    if isinstance(exception, UrlParseError):
+        return False
+
     error_str = str(exception).lower()
 
     github_permission_patterns = [
