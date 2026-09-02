@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import (
     Any,
+    TypeVar,
     cast,
 )
 
@@ -41,178 +42,55 @@ from ._errors import (
     GraphQLError,
     RetryableError,
     SecondaryRateLimitError,
-    _is_primary_rate_limited,
     _is_retryable_status,
-    _is_secondary_rate_limited,
     _is_transient_graphql_error,
 )
 from ._json_body import decode_json_body
+from ._responses import (
+    _finish_successful_request,
+    _handle_forbidden,
+    _handle_retryable_status,
+)
 from ._throttling import _maybe_await
 
+_F = TypeVar("_F", bound=Callable[..., Any])
 
-async def _handle_secondary_rate_limit(api: _TransportMixin, r: httpx.Response) -> None:
-    """Wait out an abuse-detection 403, then signal a retry.
 
-    Always raises :class:`SecondaryRateLimitError`.
+class _GraphQLRetry(Exception):
+    """A GraphQL-level fault worth another attempt.
+
+    Distinct from :class:`RetryableError` on purpose.  Transport and
+    decode faults are retried inside ``_request_json``; if the GraphQL
+    loop caught the same type it would retry them a second time, and
+    the two bounds would multiply.
     """
-    retry_after = r.headers.get("Retry-After")
-    delay: float | None = None
-    if retry_after:
-        try:
-            delay = float(retry_after)
-            api._last_retry_after = delay
-            api._apply_retry_after_throttling(delay)
-        except (TypeError, ValueError):
-            delay = None
-    # Track error for adaptive throttling
-    api._track_error("secondary_rate_limit")
-    if delay is not None:
-        # GitHub told us exactly how long to wait.  Sleeping
-        # here *and* letting tenacity back off on top would
-        # stack the two; hand tenacity a pre-slept signal
-        # instead by waiting the advised time and then
-        # raising, which tenacity adds its own (smaller,
-        # jittered) delay to.  Keep that combined wait honest
-        # by subtracting tenacity's cap from our sleep.
-        effective = max(0.0, delay - _TENACITY_MAX_BACKOFF)
-        api.log.warning(
-            "Secondary rate limit hit. Retry-After=%ss, sleeping %ss",
-            delay,
-            effective,
-        )
-        if effective:
-            await asyncio.sleep(effective)
-    else:
-        api.log.warning(
-            "Secondary rate limit hit without Retry-After; deferring to retry backoff"
-        )
-    raise SecondaryRateLimitError("Secondary rate limit encountered")
 
 
-async def _handle_primary_rate_limit(
-    api: _TransportMixin, r: httpx.Response, reset_epoch: float | None
-) -> None:
-    """Wait out an exhausted primary rate limit, then signal a retry.
+def _transport_retry() -> Callable[[_F], _F]:
+    """The retry policy every transport entry point shares.
 
-    Always raises :class:`RetryableError`.
+    Defined once rather than repeated per method.  ``_request`` and
+    ``_request_json`` differ only in whether they decode, and they are
+    required to behave identically otherwise; copying the decorator
+    would let a later change to the attempt count, the backoff or the
+    exception list apply to one and silently not the other.
     """
-    # Honor a Retry-After header if present (primary rate
-    # limits may be reported as 403 or 429).  Parse it up
-    # front so that an unparsable value (e.g. an HTTP-date)
-    # falls back to the reset/backoff handling below rather
-    # than triggering an immediate retry.
-    retry_after = r.headers.get("Retry-After")
-    retry_after_delay: float | None = None
-    if retry_after:
-        try:
-            retry_after_delay = float(retry_after)
-        except (TypeError, ValueError):
-            retry_after_delay = None
-    if retry_after_delay is not None:
-        api._last_retry_after = retry_after_delay
-        api.log.warning(
-            "Primary rate limit with Retry-After: %ss",
-            retry_after_delay,
-        )
-        await asyncio.sleep(max(0.0, retry_after_delay))
-        api._apply_retry_after_throttling(retry_after_delay)
-    elif reset_epoch:
-        api.log.warning(
-            "Primary rate limit exhausted. Waiting until reset: %s",
-            reset_epoch,
-        )
-        await api._sleep_until(reset_epoch)
-    else:
-        # If no reset header, backoff and retry
-        api.log.warning(
-            "Primary rate limit suspected without reset header; backing off"
-        )
-        await asyncio.sleep(5.0)
-
-    # Track error for adaptive throttling
-    api._track_error("primary_rate_limit")
-    raise RetryableError("Primary rate limit reset waited; retrying")
-
-
-async def _handle_forbidden(api: _TransportMixin, r: httpx.Response) -> None:
-    """Classify a 403 as a secondary or primary rate limit, if either.
-
-    Returns normally when the 403 is neither, leaving the caller to
-    apply its ordinary error handling.
-    """
-    body_text: str
-    try:
-        body_text = r.text or ""
-    except Exception:
-        body_text = ""
-
-    remaining, _, reset_epoch = api._parse_rate_limit_headers(r)
-
-    # Secondary rate limit (abuse detection)
-    if _is_secondary_rate_limited(body_text):
-        await _handle_secondary_rate_limit(api, r)
-
-    # Primary rate limit exhausted
-    if remaining == 0 or _is_primary_rate_limited(body_text):
-        await _handle_primary_rate_limit(api, r, reset_epoch)
-
-
-async def _handle_retryable_status(api: _TransportMixin, r: httpx.Response) -> None:
-    """Honour any Retry-After, then signal a retry.
-
-    Always raises :class:`RetryableError`.
-    """
-    retry_after = r.headers.get("Retry-After")
-    if retry_after:
-        retry_after_delay = None
-        try:
-            retry_after_delay = float(retry_after)
-        except (TypeError, ValueError):
-            # Retry-After was not a numeric delay; fall through
-            # to the standard retry handling.
-            retry_after_delay = None
-        if retry_after_delay is not None:
-            api._last_retry_after = retry_after_delay
-            api.log.debug(
-                "HTTP %s with Retry-After: %ss",
-                r.status_code,
-                retry_after_delay,
-            )
-            await asyncio.sleep(max(0.0, retry_after_delay))
-            api._apply_retry_after_throttling(retry_after_delay)
-
-    api._track_error("transient_error")
-    api.log.debug("Retryable HTTP status %s received", r.status_code)
-    raise RetryableError(f"Transient HTTP status: {r.status_code}")
-
-
-async def _finish_successful_request(api: _TransportMixin, r: httpx.Response) -> None:
-    """Post-success pacing, adaptive tuning and metrics reporting."""
-    api._track_request()
-
-    # Pace the next request when recent Retry-After headers indicated
-    # sustained pressure.  Decays with time (see ``_current_adaptive_delay``).
-    delay = api._current_adaptive_delay()
-    if delay > 0:
-        await asyncio.sleep(delay)
-
-    # Dynamic concurrency and RPS tuning from the latest headers.
-    try:
-        api._record_budget(r)
-        api._tune(api._headroom())
-    except Exception as e:
-        # Tuning is best-effort; never fail the request on tuning errors.
-        api.log.debug("Adaptive concurrency tuning skipped: %s", e)
-    # Push current metrics to progress tracker (if provided)
-    try:
-        await _maybe_await(
-            getattr(api, "on_metrics", None),
-            api._max_concurrency,
-            float(api._current_rps),
-        )
-    except Exception as e:
-        # Metrics reporting is best-effort.
-        api.log.debug("Progress metrics reporting failed: %s", e)
+    return cast(
+        "Callable[[_F], _F]",
+        retry(
+            reraise=True,
+            stop=stop_after_attempt(6),
+            wait=wait_random_exponential(multiplier=0.5, max=_TENACITY_MAX_BACKOFF),
+            retry=retry_if_exception_type(
+                (
+                    httpx.TransportError,
+                    httpx.ReadTimeout,
+                    RetryableError,
+                    SecondaryRateLimitError,
+                )
+            ),
+        ),
+    )
 
 
 class _TransportMixin(_GitHubAsyncBase):
@@ -271,43 +149,19 @@ class _TransportMixin(_GitHubAsyncBase):
         # 3xx, since redirects are not followed --- so nothing below
         # this line is looking at a failed response.
         r.raise_for_status()
-
-        await _finish_successful_request(self, r)
         return r
 
-    @retry(
-        reraise=True,
-        stop=stop_after_attempt(6),
-        wait=wait_random_exponential(multiplier=0.5, max=_TENACITY_MAX_BACKOFF),
-        retry=retry_if_exception_type(
-            (
-                httpx.TransportError,
-                httpx.ReadTimeout,
-                RetryableError,
-                SecondaryRateLimitError,
-            )
-        ),
-    )
+    @_transport_retry()
     async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
         """
         Low-level request with concurrency limit, RPS limit, and retry handling.
         Handles primary/secondary rate limits and transient statuses.
         """
-        return await self._request_once(method, url, **kwargs)
+        r = await self._request_once(method, url, **kwargs)
+        await _finish_successful_request(self, r)
+        return r
 
-    @retry(
-        reraise=True,
-        stop=stop_after_attempt(6),
-        wait=wait_random_exponential(multiplier=0.5, max=_TENACITY_MAX_BACKOFF),
-        retry=retry_if_exception_type(
-            (
-                httpx.TransportError,
-                httpx.ReadTimeout,
-                RetryableError,
-                SecondaryRateLimitError,
-            )
-        ),
-    )
+    @_transport_retry()
     async def _request_json(
         self, method: str, url: str, **kwargs
     ) -> tuple[httpx.Response, dict[str, Any] | list[dict[str, Any]]]:
@@ -318,11 +172,24 @@ class _TransportMixin(_GitHubAsyncBase):
         upstream trouble, so it should be retried like any other, rather
         than escaping as a decode failure that matches no predicate.
 
+        Success is recorded *after* decoding, not before.  The throttler
+        infers load from the ratio of tracked errors to tracked
+        requests, so counting a malformed body as a success would keep
+        the error rate looking healthy during precisely the upstream
+        trouble that produces malformed bodies --- and it would then
+        decline to back off.
+
         Returns the response alongside the body, because a caller may
         still need the headers --- pagination reads ``Link``.
         """
         r = await self._request_once(method, url, **kwargs)
-        return r, decode_json_body(r, method, url)
+        try:
+            body = decode_json_body(r, method, url)
+        except RetryableError:
+            self._track_error("transient_error")
+            raise
+        await _finish_successful_request(self, r)
+        return r, body
 
     async def _fetch_json(
         self, method: str, url: str, **kwargs
@@ -374,19 +241,23 @@ class _TransportMixin(_GitHubAsyncBase):
         """
         payload = {"query": query, "variables": variables or {}}
 
+        # Retries only on *GraphQL-level* faults --- a 200 whose payload
+        # reports a transient error.  Transport and decode faults are
+        # already retried inside ``_fetch_json`` and must not be caught
+        # again here: sharing ``RetryableError`` between the two layers
+        # multiplied the bounds, so a persistently malformed response
+        # made up to thirty requests rather than the six intended.
         async for attempt in AsyncRetrying(
             reraise=True,
             stop=stop_after_attempt(5),
             wait=wait_random_exponential(multiplier=0.5, max=10.0),
-            retry=retry_if_exception_type(
-                (RetryableError, httpx.TransportError, httpx.ReadTimeout)
-            ),
+            retry=retry_if_exception_type(_GraphQLRetry),
         ):
             with attempt:
                 _, data = await self._fetch_json("POST", self.graphql_url, json=payload)
                 if not isinstance(data, dict):
                     self.log.debug("GraphQL response was not an object; retrying")
-                    raise RetryableError("Malformed GraphQL response")
+                    raise _GraphQLRetry("Malformed GraphQL response")
                 if "errors" in data and data["errors"]:
                     # Retry on transient errors, otherwise raise
                     if _is_transient_graphql_error(data["errors"]):
@@ -394,7 +265,7 @@ class _TransportMixin(_GitHubAsyncBase):
                             "Transient GraphQL error encountered; retrying: %s",
                             data["errors"],
                         )
-                        raise RetryableError("Transient GraphQL error")
+                        raise _GraphQLRetry("Transient GraphQL error")
                     # Non-transient; raise detailed error
                     raise GraphQLError(json.dumps(data["errors"]))
                 if "data" not in data:

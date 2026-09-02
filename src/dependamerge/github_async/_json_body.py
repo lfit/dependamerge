@@ -89,7 +89,8 @@ def decode_json_body(
     body = r.content or b""
     if not body.strip():
         raise RetryableError(
-            f"{method} {url} returned {r.status_code} with an empty body; expected JSON"
+            f"{method} {url} returned {r.status_code} with content-type "
+            f"{content_type!r} and an empty body; expected JSON"
         )
     if not _looks_like_json(content_type):
         snippet = " ".join(r.text[:_BODY_SNIPPET_LIMIT].split())
@@ -101,13 +102,32 @@ def decode_json_body(
         # ``cast`` rather than an ignore comment: silencing the warning
         # would leave the value typed ``Any``, which then leaks through
         # every caller and defeats the checking this function exists to
-        # make possible.
-        return cast("dict[str, Any] | list[dict[str, Any]]", r.json())
+        # make possible.  The cast is honest only because the shape is
+        # checked immediately below.
+        decoded = cast("object", r.json())
     except ValueError as exc:
         # Declared JSON but is not.  Same conclusion as a wrong
         # content-type, and worth quoting the body for the same reason.
         snippet = " ".join(r.text[:_BODY_SNIPPET_LIMIT].split())
         raise RetryableError(
-            f"{method} {url} returned {r.status_code} with an unparsable "
-            f"JSON body ({exc}). Body began: {snippet!r}"
+            f"{method} {url} returned {r.status_code} with content-type "
+            f"{content_type!r} and an unparsable JSON body ({exc}). "
+            f"Body began: {snippet!r}"
         ) from exc
+
+    # Valid JSON is not necessarily a *usable* payload: ``null``, a bare
+    # string and a number all parse.  Returning one would satisfy the
+    # type checker through the cast while failing in a caller far from
+    # here, so the container shape is checked where it is known.
+    #
+    # Only the top level is checked.  Verifying every element of a
+    # hundred-item page would cost more than it is worth, and callers
+    # that care already inspect the items they use.
+    if not isinstance(decoded, dict | list):
+        snippet = " ".join(r.text[:_BODY_SNIPPET_LIMIT].split())
+        raise RetryableError(
+            f"{method} {url} returned {r.status_code} with content-type "
+            f"{content_type!r} and JSON that is neither an object nor an "
+            f"array ({type(decoded).__name__}). Body began: {snippet!r}"
+        )
+    return cast("dict[str, Any] | list[dict[str, Any]]", decoded)
