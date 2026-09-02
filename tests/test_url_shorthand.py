@@ -291,6 +291,53 @@ class TestDefaultHostIsResolvedLazily:
             normalize_target("acme/widget")
 
 
+class TestPageRoutesKeepTheirGitSuffix:
+    """No clone URL ends in a GitHub page route.
+
+    Removing a ``.git`` tail from one repairs a malformed URL into a
+    valid target, and for the ``orgs`` routes a *broader* one: an
+    owner-wide merge of everything the owner has.
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://github.com/orgs/acme.git",
+            "https://github.com/orgs/acme/repositories.git",
+            "https://github.com/acme/widget/pulls.git",
+        ],
+    )
+    def test_the_suffix_stays_so_the_url_stays_invalid(self, url):
+        assert normalize_target(url) == url
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            # The route words are ordinary names in any other position,
+            # and both of these are real repositories.
+            (
+                "https://github.com/clerk/orgs.git",
+                "https://github.com/clerk/orgs",
+            ),
+            (
+                "https://github.com/csabella/pulls.git",
+                "https://github.com/csabella/pulls",
+            ),
+            # Route names on GitHub, project path segments on Gerrit.
+            (
+                "https://gerrit.example.org/orgs/acme.git",
+                "https://gerrit.example.org/orgs/acme",
+            ),
+            (
+                "https://gerrit.example.org/a/b/pulls.git",
+                "https://gerrit.example.org/a/b/pulls",
+            ),
+        ],
+    )
+    def test_clone_urls_are_unaffected(self, url, expected):
+        assert normalize_target(url) == expected
+
+
 class TestReservedRouteShorthand:
     """A shorthand's first segment is an owner, never a URL route.
 

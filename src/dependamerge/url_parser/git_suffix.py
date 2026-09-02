@@ -149,6 +149,35 @@ def _names_a_change(segments: list[str], host: str) -> bool:
     )
 
 
+def _names_a_page_route(segments: list[str], host: str) -> bool:
+    """Report whether a path addresses a GitHub web page, not a project.
+
+    ``/orgs/acme/repositories`` and ``/acme/widget/pulls`` are pages the
+    site serves, so no clone URL ends in them.  Removing a ``.git``
+    tail repairs such a URL into a valid target --- and for the ``orgs``
+    routes, a *broader* one: ``/orgs/acme.git`` would become an
+    owner-wide merge of everything ``acme`` owns.
+
+    GitHub only.  These are route names there and ordinary project path
+    segments on Gerrit, which is the same distinction
+    :func:`_names_a_change` draws for ``changes``.
+
+    Args:
+        segments: The non-empty path segments, in order.
+        host: The hostname the URL names.
+
+    Returns:
+        True when the path names a page rather than a project.
+    """
+    if not _is_github_host(host):
+        return False
+    if segments[0].lower() == "orgs":
+        return True
+    # The suffix is still attached at this point, so it is discounted
+    # before the comparison --- the last segment reads ``pulls.git``.
+    return len(segments) >= 3 and segments[-1].lower().removesuffix(".git") == "pulls"
+
+
 def strips_git_suffix(path: str, host: str) -> bool:
     """Report whether ``.git`` on this path is a clone-URL artefact.
 
@@ -182,6 +211,8 @@ def strips_git_suffix(path: str, host: str) -> bool:
         return False
     last = segments[-1].lower()
     if ":" in last or "%3a" in last:
+        return False
+    if _names_a_page_route(segments, host):
         return False
     return not _names_a_change(segments, host)
 
