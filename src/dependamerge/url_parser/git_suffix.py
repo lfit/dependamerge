@@ -173,6 +173,14 @@ def _names_a_page_route(segments: list[str], host: str) -> bool:
         return False
     if segments[0].lower() == "orgs":
         return True
+    if len(segments) < 2:
+        # A GitHub clone URL always names an owner *and* a repository,
+        # so a single segment is not one.  Trimming the suffix turns
+        # ``github.com/acme.git`` into the owner URL for ``acme`` and
+        # the dispatcher then merges every repository they own ---
+        # scope invented out of a malformed URL.  Gerrit projects do
+        # sit at the root, which is why this is gated on the host.
+        return True
     # The suffix is still attached at this point, so it is discounted
     # before the comparison --- the last segment reads ``pulls.git``.
     return len(segments) >= 3 and segments[-1].lower().removesuffix(".git") == "pulls"

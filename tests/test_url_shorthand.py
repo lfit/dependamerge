@@ -334,6 +334,11 @@ class TestPageRoutesKeepTheirGitSuffix:
             "https://github.com/orgs/acme.git",
             "https://github.com/orgs/acme/repositories.git",
             "https://github.com/acme/widget/pulls.git",
+            # A GitHub clone URL always names an owner *and* a
+            # repository, so one segment is not one.  Trimming turned
+            # this into the owner URL for ``acme``, and the dispatcher
+            # merged every repository they own.
+            "https://github.com/acme.git",
         ],
     )
     def test_the_suffix_stays_so_the_url_stays_invalid(self, url):
@@ -360,6 +365,13 @@ class TestPageRoutesKeepTheirGitSuffix:
             (
                 "https://gerrit.example.org/a/b/pulls.git",
                 "https://gerrit.example.org/a/b/pulls",
+            ),
+            # Gerrit projects do sit at the root, so a single segment is
+            # a genuine clone URL there.  This is why the rule above is
+            # gated on the host rather than applied everywhere.
+            (
+                "https://gerrit.example.org/project.git",
+                "https://gerrit.example.org/project",
             ),
         ],
     )
