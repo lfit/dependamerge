@@ -119,10 +119,17 @@ def _resolve_target_url(pr_url: str) -> str:
         console.print("     or --topic with either of the above")
         raise typer.Exit(1)
 
+    # The URL goes on its own line, indented to sit under the text
+    # rather than the marker.  It is the longest part of the message and
+    # the part worth reading, so wrapping it mid-path buries it.  The
+    # directory name is left out because the URL already carries the
+    # repository, and the two disagreeing --- a clone in a renamed
+    # directory --- reads as a contradiction.
     console.print(
         f"📍 No URL given; using the '{target.remote}' remote of "
-        f"{target.root.name}: {target.url}"
+        "current Git repository:"
     )
+    console.print(f"   {target.url}")
     return target.url
 
 

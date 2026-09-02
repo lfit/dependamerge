@@ -428,6 +428,17 @@ class TestNoUrlUsesTheLocalCheckout:
         assert "No URL given" in result.stdout
         assert "upstream" in result.stdout
         assert "https://github.com/acme/widget" in result.stdout
+        # The URL sits on its own line, indented under the text rather
+        # than the marker.  It is the longest and most important part of
+        # the message, so wrapping it mid-path buries it.
+        assert "current Git repository:\n   https://github.com/acme/widget" in (
+            result.stdout
+        )
+        # The directory name is deliberately absent as a *label*: the
+        # URL already carries the repository, and a clone in a renamed
+        # directory would make the two disagree.  (It may still appear
+        # inside the URL, which is the point.)
+        assert f"remote of {target.root.name}:" not in result.stdout
         # And it must actually have dispatched, rather than printing
         # the message and failing on the way.
         handler.assert_called_once()
