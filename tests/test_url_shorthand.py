@@ -369,6 +369,57 @@ class TestReservedRouteShorthand:
         # repository, and nothing about it is ambiguous.
         assert normalize_target("clerk/orgs") == "https://github.com/clerk/orgs"
 
+    def test_a_bare_reserved_word_expands_normally(self):
+        # No second segment means no ambiguity to report: it is simply
+        # an owner that happens not to exist, so it expands like any
+        # other and the API says so.  Building the two-segment message
+        # unconditionally raised IndexError, so ``merge orgs`` crashed
+        # through normalisation instead of reporting anything.
+        assert normalize_target("orgs") == "https://github.com/orgs"
+
+
+class TestGerritTopicNeedsItsOwnHost:
+    """Owner shorthand must not manufacture a Gerrit target.
+
+    Shorthand is a GitHub convenience and resolves against the GitHub
+    default host, so ``q/topic:x`` expanded to
+    ``https://github.com/q/topic:x`` --- whose path this parser then
+    accepted, dispatching a Gerrit topic run against github.com.
+    """
+
+    def test_owner_shorthand_is_refused(self):
+        with pytest.raises(UrlParseError, match="no host"):
+            parse_gerrit_topic_url("q/topic:x")
+
+    @pytest.mark.parametrize(
+        ("url", "host", "topic"),
+        [
+            ("gerrit.example.org/q/topic:x", "gerrit.example.org", "x"),
+            (
+                "https://gerrit.example.org/q/topic:release",
+                "gerrit.example.org",
+                "release",
+            ),
+            (
+                "https://gerrit.onap.org/r/q/topic:update",
+                "gerrit.onap.org",
+                "update",
+            ),
+            (
+                "https://gerrit.example.org/#/q/topic:legacy",
+                "gerrit.example.org",
+                "legacy",
+            ),
+        ],
+    )
+    def test_every_host_bearing_form_still_parses(self, url, host, topic):
+        # The complement, including the scheme-less and legacy-fragment
+        # forms: requiring a host must not cost any shape that names one.
+        parsed = parse_gerrit_topic_url(url)
+
+        assert parsed.host == host
+        assert parsed.topic == topic
+
 
 class TestRepositoryNamedPulls:
     """``/owner/repo/pulls`` is a page; ``pulls`` is also a repo name.

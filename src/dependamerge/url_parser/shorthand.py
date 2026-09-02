@@ -255,7 +255,8 @@ def normalize_target(value: str, *, default_host: str | None = None) -> str:
         # expanded into a plausible-looking URL that cannot resolve.
         return value
 
-    if first.lower() in _URL_ONLY_ROUTES:
+    remainder = value.split("/", 1)[1].strip("/") if "/" in value else ""
+    if remainder and first.lower() in _URL_ONLY_ROUTES:
         # ``orgs`` is a route segment in a GitHub URL, not an owner, so
         # expanding the shorthand ``orgs/acme`` would produce
         # ``https://github.com/orgs/acme`` --- the canonical owner-wide
@@ -263,10 +264,15 @@ def normalize_target(value: str, *, default_host: str | None = None) -> str:
         # silently widens the request into an owner-wide merge of
         # everything ``acme`` owns.  Refuse rather than guess: the two
         # readings differ in scope, and the broader one is destructive.
+        #
+        # A remainder is required.  Bare ``orgs`` names no second
+        # segment, so there is no ambiguity to report --- it is simply
+        # an owner that happens not to exist, and it expands like any
+        # other so the API says so.
         raise UrlParseError(
             f"{value!r} is ambiguous: {first!r} is a path segment in a "
             "GitHub URL, not an owner. For every repository owned by "
-            f"{value.split('/', 1)[1]!r}, give the owner on its own; "
+            f"{remainder!r}, give the owner on its own; "
             "for a single repository, give the full URL."
         )
 
