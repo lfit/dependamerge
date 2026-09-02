@@ -24,24 +24,38 @@ a shorthand, so the rule is not lossy.
 
 from __future__ import annotations
 
-import os
 import re
 
 from .git_suffix import strip_git_suffix, strips_git_suffix
+from .host_config import (
+    DEFAULT_GITHUB_HOST,
+    default_github_host,
+    enterprise_hosts,
+    github_host_override,
+    iter_enterprise_hosts,
+    set_github_host,
+)
+from .models import UrlParseError
+
+# Re-exported so the long-standing ``url_parser.shorthand`` import path
+# keeps working now that host declaration lives in its own module.
+__all__ = [
+    "DEFAULT_GITHUB_HOST",
+    "default_github_host",
+    "enterprise_hosts",
+    "github_host_override",
+    "iter_enterprise_hosts",
+    "looks_like_host",
+    "looks_like_owner",
+    "normalize_target",
+    "set_github_host",
+    "strip_git_suffix",
+]
 
 # aislop-ignore-file ai-slop/hardcoded-url -- This module parses and builds
 # GitHub/Gerrit URLs, so URL literals here are the subject matter, not
 # stray configuration.  Enterprise hosts are always derived from the
 # caller's input or from an explicit environment override.
-
-#: The host assumed when a shorthand names no host of its own.
-DEFAULT_GITHUB_HOST = "github.com"
-
-#: Environment variables consulted, in order, for the default host.
-#: ``GH_HOST`` is the GitHub CLI's own variable, so an operator who has
-#: already pointed ``gh`` at their Enterprise instance gets the same
-#: shorthand behaviour here without configuring anything twice.
-_HOST_ENV_VARS = ("DEPENDAMERGE_GITHUB_HOST", "GH_HOST")
 
 # scp-style remote: [user@]host:path, with no scheme and no leading
 # slash on the path.  Whether a bare ``host:something`` is scp or
@@ -82,134 +96,11 @@ _PORT_SUFFIX_RE = re.compile(r":\d+\Z")
 # follow the dotcom grammar at all.
 _OWNER_RE = re.compile(r"\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\Z")
 
-#: Host named by ``--github-host`` on the command line, if any.
-#:
-#: Process-wide because it is process-wide configuration: the flag is a
-#: higher-priority source of the same setting the environment variables
-#: provide, and the parsers that consult it are pure functions reached
-#: long before any per-run context object exists.  Set once at command
-#: entry via :func:`set_github_host`.
-_HOST_OVERRIDE: str | None = None
-
-
-def set_github_host(host: str | None) -> None:
-    """Record the host named by ``--github-host``.
-
-    Takes priority over ``DEPENDAMERGE_GITHUB_HOST`` and ``GH_HOST``
-    for both purposes those serve: the default a bare shorthand
-    resolves against, and the set of hosts permitted at all.  Naming a
-    host on the command line is at least as deliberate as exporting it.
-
-    Anything that is not a string is treated as absent.  This tolerates
-    direct Python calls to the commands (as the tests make), where
-    Typer's ``OptionInfo`` default object arrives unresolved --- the
-    same allowance ``_normalise_topic`` and ``_validate_max_wait``
-    make.
-
-    Args:
-        host: The hostname, or None to clear a previous value.
-    """
-    global _HOST_OVERRIDE
-    if not isinstance(host, str):
-        _HOST_OVERRIDE = None
-        return
-    cleaned = _clean_host(host)
-    _HOST_OVERRIDE = cleaned or None
-
-
-def github_host_override() -> str | None:
-    """Return the host named by ``--github-host``, if any."""
-    return _HOST_OVERRIDE
-
-
-def enterprise_hosts() -> tuple[str, ...]:
-    """Return the GitHub Enterprise hosts the operator has declared.
-
-    Enterprise installs use arbitrary hostnames, so there is no way to
-    recognise one from the name alone.  Trusting whatever host appears
-    in a URL would mean sending the caller's token wherever a pasted or
-    mistyped link points, so a host has to be declared before it is
-    used.
-
-    Declared by ``--github-host`` on the command line, by
-    ``DEPENDAMERGE_GITHUB_HOSTS`` (comma-separated), and by the
-    single-host ``DEPENDAMERGE_GITHUB_HOST`` / ``GH_HOST`` variables
-    that also set the default for shorthand --- naming a host as your
-    default is a clear enough statement that you trust it.
-
-    Returns:
-        A tuple of lowercased hostnames, without duplicates.
-    """
-    seen: dict[str, None] = {}
-    if _HOST_OVERRIDE:
-        seen[_HOST_OVERRIDE] = None
-    raw = os.environ.get("DEPENDAMERGE_GITHUB_HOSTS") or ""
-    for candidate in raw.split(","):
-        host = _clean_host(candidate)
-        if host:
-            seen[host] = None
-    for name in _HOST_ENV_VARS:
-        host = _clean_host(os.environ.get(name) or "")
-        if host:
-            seen[host] = None
-    return tuple(seen)
-
-
-def _clean_host(value: str) -> str:
-    """Reduce a configured value to a bare lowercase hostname.
-
-    Raises rather than trimming a port.  Ports are unsupported end to
-    end --- ``urlparse`` drops them before the API base URLs are built
-    --- so a configured ``host:8443`` would otherwise expand shorthand
-    into a URL its own parser then rejects, or quietly address port
-    443.
-
-    Raises:
-        UrlParseError: If the configured value names a port.
-    """
-    from .models import UrlParseError
-
-    host = _strip_scheme(value.strip()).strip("/").split("/", 1)[0].lower()
-    if not host:
-        return ""
-    name, _, port = host.rpartition(":")
-    if name and port:
-        raise UrlParseError(
-            f"Configured GitHub host {host!r} names a port, which is not "
-            "supported: the port cannot be carried through to the API "
-            f"base URL, so requests would go to {name} on the default "
-            "port instead. Configure the host without a port."
-        )
-    return host
-
-
-def default_github_host() -> str:
-    """Return the host a bare shorthand should resolve against.
-
-    Resolution order, highest priority first:
-
-    1. ``--github-host`` on the command line
-    2. ``DEPENDAMERGE_GITHUB_HOST``
-    3. ``GH_HOST`` --- the GitHub CLI's own variable, so an operator
-       who has already pointed ``gh`` at an Enterprise instance does
-       not configure the same thing twice
-    4. github.com
-
-    Returns:
-        A bare lowercase hostname.
-    """
-    if _HOST_OVERRIDE:
-        return _HOST_OVERRIDE
-    for name in _HOST_ENV_VARS:
-        value = _clean_host(os.environ.get(name) or "")
-        if value:
-            return value
-    return DEFAULT_GITHUB_HOST
-
-
-def _strip_scheme(value: str) -> str:
-    """Remove any ``scheme://`` prefix from ``value``."""
-    return re.sub(r"\A[A-Za-z][A-Za-z0-9+.-]*://", "", value)
+#: First segments that GitHub reserves as URL routes, so they can never
+#: be an owner.  Expanding a shorthand beginning with one would produce
+#: a URL meaning something other than ``owner/repo`` --- and in the case
+#: of ``orgs``, something broader.
+_URL_ONLY_ROUTES = frozenset({"orgs"})
 
 
 def looks_like_host(segment: str) -> bool:
@@ -335,8 +226,6 @@ def normalize_target(value: str, *, default_host: str | None = None) -> str:
             # is not enough: the parsers read only the netloc and path,
             # so ``javascript://github.com/acme/widget`` would parse as
             # an ordinary repository and trigger a real operation.
-            from .models import UrlParseError
-
             raise UrlParseError(
                 f"Unsupported URL scheme {scheme!r}. Targets must be "
                 "http(s) URLs, git remotes, or shorthand."
@@ -365,6 +254,21 @@ def normalize_target(value: str, *, default_host: str | None = None) -> str:
         # the parsers reject it on their own terms, rather than being
         # expanded into a plausible-looking URL that cannot resolve.
         return value
+
+    if first.lower() in _URL_ONLY_ROUTES:
+        # ``orgs`` is a route segment in a GitHub URL, not an owner, so
+        # expanding the shorthand ``orgs/acme`` would produce
+        # ``https://github.com/orgs/acme`` --- the canonical owner-wide
+        # URL.  A two-segment shorthand means *one repository*, so that
+        # silently widens the request into an owner-wide merge of
+        # everything ``acme`` owns.  Refuse rather than guess: the two
+        # readings differ in scope, and the broader one is destructive.
+        raise UrlParseError(
+            f"{value!r} is ambiguous: {first!r} is a path segment in a "
+            "GitHub URL, not an owner. For every repository owned by "
+            f"{value.split('/', 1)[1]!r}, give the owner on its own; "
+            "for a single repository, give the full URL."
+        )
 
     # Only now is a default host needed.  Resolving it earlier makes an
     # explicit URL --- a Gerrit one, even --- fail on an unrelated

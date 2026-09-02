@@ -14,6 +14,7 @@ from __future__ import annotations
 import pytest
 
 from dependamerge.url_parser import (
+    is_supported_github_host,
     parse_change_url,
     parse_gerrit_topic_url,
     parse_org_url,
@@ -27,6 +28,7 @@ from dependamerge.url_parser.shorthand import (
     looks_like_host,
     looks_like_owner,
     normalize_target,
+    set_github_host,
     strip_git_suffix,
 )
 
@@ -289,6 +291,87 @@ class TestDefaultHostIsResolvedLazily:
             normalize_target("acme/widget")
 
 
+class TestReservedRouteShorthand:
+    """A shorthand's first segment is an owner, never a URL route.
+
+    ``orgs`` is a path segment GitHub reserves, so expanding the
+    shorthand ``orgs/acme`` produced ``https://github.com/orgs/acme``
+    --- the canonical *owner-wide* URL.  A two-segment shorthand names
+    one repository, so that silently widened the request into a merge
+    of everything ``acme`` owns.  Scope must never broaden by
+    accident, so the ambiguity is reported instead of guessed.
+    """
+
+    def test_reserved_first_segment_is_refused(self):
+        with pytest.raises(UrlParseError) as excinfo:
+            normalize_target("orgs/acme")
+        message = str(excinfo.value)
+        assert "orgs" in message
+        assert "acme" in message
+
+    def test_the_explicit_url_still_means_owner_wide(self):
+        # Only the *shorthand* is ambiguous.  Typed in full, this is
+        # GitHub's own owner URL and keeps its meaning.
+        assert (
+            normalize_target("https://github.com/orgs/acme")
+            == "https://github.com/orgs/acme"
+        )
+
+    def test_a_reserved_word_elsewhere_is_an_ordinary_name(self):
+        # Only the first segment is a route.  ``clerk/orgs`` is a real
+        # repository, and nothing about it is ambiguous.
+        assert normalize_target("clerk/orgs") == "https://github.com/clerk/orgs"
+
+
+class TestRepositoryNamedPulls:
+    """``/owner/repo/pulls`` is a page; ``pulls`` is also a repo name.
+
+    Stripping the suffix unconditionally left ``/owner/pulls`` with a
+    single segment, so every repository actually called ``pulls`` was
+    rejected as malformed.  There are more than fifty on github.com.
+    """
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["csabella/pulls", "https://github.com/csabella/pulls"],
+    )
+    def test_a_repository_named_pulls_resolves(self, raw):
+        assert parse_repo_url(raw).project == "csabella/pulls"
+
+    def test_the_pulls_page_suffix_still_comes_off(self):
+        # The complement: the suffix exists because this form is
+        # accepted, and narrowing the rule must not lose it.
+        assert (
+            parse_repo_url("https://github.com/acme/widget/pulls").project
+            == "acme/widget"
+        )
+
+
+class TestDeclarationPrecedenceShortCircuits:
+    """A losing declaration must not veto the winning one.
+
+    Authorisation materialised every declared source, so validating a
+    lower-priority value that lost the precedence contest could reject
+    a host the operator had just named with ``--github-host``.
+    """
+
+    def test_a_malformed_lower_priority_value_does_not_block(self, monkeypatch):
+        monkeypatch.setenv("GH_HOST", "broken:8443")
+        set_github_host("ghe.example.com")
+
+        assert is_supported_github_host("ghe.example.com") is True
+        assert is_supported_github_host("github.com") is True
+
+    def test_the_malformed_value_is_still_reported(self, monkeypatch):
+        # It is not swallowed: a caller that genuinely has to read
+        # every declaration still meets the configuration error.
+        monkeypatch.setenv("GH_HOST", "broken:8443")
+        set_github_host("ghe.example.com")
+
+        with pytest.raises(UrlParseError, match="broken:8443"):
+            enterprise_hosts()
+
+
 class TestNormalizeTarget:
     """Expansion of every accepted input form."""
 
@@ -299,7 +382,10 @@ class TestNormalizeTarget:
             ("lfreleng-actions", "https://github.com/lfreleng-actions"),
             ("acme/widget", "https://github.com/acme/widget"),
             ("acme/widget/pull/7", "https://github.com/acme/widget/pull/7"),
-            ("orgs/acme", "https://github.com/orgs/acme"),
+            # ``orgs/acme`` is deliberately absent: see
+            # TestReservedRouteShorthand.  It expanded here until that
+            # was found to widen a two-segment shorthand, which names
+            # one repository, into an owner-wide URL.
             # Scheme-less but host-shaped
             ("github.com/acme", "https://github.com/acme"),
             ("github.com/acme/widget", "https://github.com/acme/widget"),

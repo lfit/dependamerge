@@ -11,7 +11,7 @@ single place encoding the dotcom-versus-GHE base-URL rule.
 
 from __future__ import annotations
 
-from .shorthand import enterprise_hosts
+from .shorthand import iter_enterprise_hosts
 
 # aislop-ignore-file ai-slop/hardcoded-url -- This module parses and builds
 # GitHub/Gerrit URLs, so URL literals here are the subject matter, not
@@ -78,9 +78,13 @@ def is_supported_github_host(host: str) -> bool:
         return False
     if _host_matches(host, "github.com"):
         return True
+    # Lazily, so the first declaration that matches ends the search.
+    # Materialising every source would validate values that lost the
+    # precedence contest, letting a stale ``GH_HOST`` reject a host the
+    # operator had just named with ``--github-host``.
     return any(
         _host_matches(host, declared, allow_subdomains=False)
-        for declared in enterprise_hosts()
+        for declared in iter_enterprise_hosts()
     )
 
 

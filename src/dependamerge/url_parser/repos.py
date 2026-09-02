@@ -80,8 +80,12 @@ def parse_repo_url(url: str) -> ParsedRepoUrl:
     # Strip the path, remove "pulls" suffix if present
     parts = [p for p in path.split("/") if p]
 
-    # Remove "pulls" suffix if present
-    if parts and parts[-1] == "pulls":
+    # Remove a "pulls" *page* suffix, which is what /owner/repo/pulls
+    # is.  Only when an owner and a repository remain: "pulls" is a
+    # legal repository name, and stripping it unconditionally left
+    # /owner/pulls as a single segment, so every repository actually
+    # called "pulls" was rejected as a malformed URL.
+    if len(parts) > 2 and parts[-1] == "pulls":
         parts = parts[:-1]
 
     if len(parts) < 2:
