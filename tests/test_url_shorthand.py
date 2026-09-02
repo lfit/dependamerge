@@ -135,6 +135,33 @@ class TestStripGitSuffix:
     def test_bare_dot_git_is_not_a_suffix(self):
         assert strip_git_suffix("/.git") == "/.git"
 
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            (
+                "https://github.com/acme/tool.git.git",
+                "https://github.com/acme/tool.git",
+            ),
+            (
+                "git@github.com:acme/tool.git.git",
+                "https://github.com/acme/tool.git",
+            ),
+        ],
+    )
+    def test_a_repository_named_dot_git_is_reachable(self, url, expected):
+        # Exactly one suffix comes off, never a greedy sweep.  A
+        # repository genuinely called ``tool.git`` has the clone URL
+        # ``tool.git.git``, so this is the form git itself reports and
+        # it round-trips to the right project.  Stripping repeatedly
+        # would make such a repository unreachable.
+        assert normalize_target(url) == expected
+
+    def test_the_project_survives_the_round_trip(self):
+        assert (
+            parse_repo_url("https://github.com/acme/tool.git.git").project
+            == "acme/tool.git"
+        )
+
 
 class TestCredentialsAreNotCarried:
     """Embedded credentials never survive normalisation.
