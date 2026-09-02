@@ -12,7 +12,9 @@ else so that the parsers still reject rubbish on their own terms.
 from __future__ import annotations
 
 import pytest
+from typer.testing import CliRunner
 
+from dependamerge.cli import app
 from dependamerge.url_parser import (
     is_supported_github_host,
     parse_change_url,
@@ -396,13 +398,27 @@ class TestReservedRouteShorthand:
         # repository, and nothing about it is ambiguous.
         assert normalize_target("clerk/orgs") == "https://github.com/clerk/orgs"
 
-    def test_a_bare_reserved_word_expands_normally(self):
-        # No second segment means no ambiguity to report: it is simply
-        # an owner that happens not to exist, so it expands like any
-        # other and the API says so.  Building the two-segment message
-        # unconditionally raised IndexError, so ``merge orgs`` crashed
-        # through normalisation instead of reporting anything.
-        assert normalize_target("orgs") == "https://github.com/orgs"
+    def test_a_bare_reserved_word_is_refused_with_a_reason(self):
+        # Building the two-segment message unconditionally raised
+        # IndexError, so ``merge orgs`` crashed through normalisation.
+        # Letting it expand instead was no better: the parsers rejected
+        # ``https://github.com/orgs`` as a malformed *repository* URL,
+        # which explains nothing.  GitHub reserves the name, so no such
+        # account exists and the reason is known here.
+        with pytest.raises(UrlParseError, match="not an owner"):
+            normalize_target("orgs")
+
+    @pytest.mark.parametrize("target", ["orgs", "orgs/acme"])
+    def test_the_cli_reports_it_rather_than_crashing(self, target):
+        # The normalisation assertion above is not enough on its own:
+        # an earlier version passed it while ``merge orgs`` still failed
+        # downstream with an unrelated message.  This exercises the
+        # path the operator actually takes.
+        result = CliRunner().invoke(app, ["merge", target, "--token", "t", "--dry-run"])
+
+        assert result.exit_code != 0
+        assert "not an owner" in result.stdout
+        assert "Invalid GitHub repository URL format" not in result.stdout
 
 
 class TestGerritTopicNeedsItsOwnHost:

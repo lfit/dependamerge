@@ -256,24 +256,27 @@ def normalize_target(value: str, *, default_host: str | None = None) -> str:
         return value
 
     remainder = value.split("/", 1)[1].strip("/") if "/" in value else ""
-    if remainder and first.lower() in _URL_ONLY_ROUTES:
-        # ``orgs`` is a route segment in a GitHub URL, not an owner, so
-        # expanding the shorthand ``orgs/acme`` would produce
-        # ``https://github.com/orgs/acme`` --- the canonical owner-wide
-        # URL.  A two-segment shorthand means *one repository*, so that
-        # silently widens the request into an owner-wide merge of
-        # everything ``acme`` owns.  Refuse rather than guess: the two
-        # readings differ in scope, and the broader one is destructive.
-        #
-        # A remainder is required.  Bare ``orgs`` names no second
-        # segment, so there is no ambiguity to report --- it is simply
-        # an owner that happens not to exist, and it expands like any
-        # other so the API says so.
+    if first.lower() in _URL_ONLY_ROUTES:
+        # ``orgs`` is a route segment in a GitHub URL, not an owner, and
+        # GitHub reserves it, so no such account can exist.  Left to
+        # expand, ``orgs/acme`` produces ``https://github.com/orgs/acme``
+        # --- the canonical owner-wide URL --- so a two-segment
+        # shorthand naming one repository silently widens into a merge
+        # of everything ``acme`` owns.  Bare ``orgs`` expands to a path
+        # the parsers then reject as a malformed repository URL, which
+        # explains nothing.  Both are refused here, where the reason is
+        # known.
+        if remainder:
+            raise UrlParseError(
+                f"{value!r} is ambiguous: {first!r} is a path segment in a "
+                "GitHub URL, not an owner. For every repository owned by "
+                f"{remainder!r}, give the owner on its own; "
+                "for a single repository, give the full URL."
+            )
         raise UrlParseError(
-            f"{value!r} is ambiguous: {first!r} is a path segment in a "
-            "GitHub URL, not an owner. For every repository owned by "
-            f"{remainder!r}, give the owner on its own; "
-            "for a single repository, give the full URL."
+            f"{first!r} is a path segment in a GitHub URL, not an owner, "
+            "so no account has that name. Give an owner, an owner/repo "
+            "pair, or a full URL."
         )
 
     # Only now is a default host needed.  Resolving it earlier makes an
