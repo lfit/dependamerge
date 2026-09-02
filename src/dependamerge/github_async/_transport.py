@@ -269,9 +269,13 @@ class _TransportMixin(_GitHubAsyncBase):
                     # Non-transient; raise detailed error
                     raise GraphQLError(json.dumps(data["errors"]))
                 if "data" not in data:
-                    # Unexpected shape; treat as transient
+                    # Unexpected shape; treat as transient.  This is a
+                    # GraphQL-level fault, so it must raise the type the
+                    # loop below retries on --- raising ``RetryableError``
+                    # here bypassed the loop entirely and failed after a
+                    # single request, while still logging "retrying".
                     self.log.debug("GraphQL response missing 'data'; retrying")
-                    raise RetryableError("Malformed GraphQL response")
+                    raise _GraphQLRetry("Malformed GraphQL response")
                 return data["data"]  # type: ignore[no-any-return]
 
         # Should not be reached due to reraise=True; keep mypy happy

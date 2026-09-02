@@ -358,6 +358,29 @@ class TestRetryBoundsDoNotMultiply:
 
         assert attempts["n"] == 2
 
+    @pytest.mark.asyncio
+    async def test_a_payload_without_data_retries(self):
+        # Every branch the loop describes as transient has to raise the
+        # type the loop retries on.  This one kept raising the transport
+        # exception, so it bypassed the loop and failed after a single
+        # request while still logging "retrying".
+        attempts = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts["n"] += 1
+            body = b"{}" if attempts["n"] == 1 else b'{"data": {"ok": true}}'
+            return httpx.Response(
+                200, content=body, headers={"content-type": "application/json"}
+            )
+
+        api = _client(handler)
+        try:
+            assert await api.graphql("query { viewer { login } }") == {"ok": True}
+        finally:
+            await api._client.aclose()
+
+        assert attempts["n"] == 2
+
 
 class TestEveryVerbDecodesTheSameWay:
     """No verb keeps its own copy of this handling.
