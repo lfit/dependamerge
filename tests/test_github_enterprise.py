@@ -50,6 +50,20 @@ from dependamerge.url_parser import (
 GHE = "ghe.corp.example.com"
 
 
+def _option_names(command: str) -> set[str]:
+    """Return the option strings a command accepts.
+
+    Asks the command object rather than parsing ``--help``, which is a
+    rendering and varies with colour support and terminal width.
+    """
+    cli = typer.main.get_command(app)
+    subcommand = cli.commands[command]  # type: ignore[attr-defined]
+    names: set[str] = set()
+    for param in subcommand.params:
+        names.update(param.opts)
+    return names
+
+
 @pytest.fixture
 def declared_ghe(monkeypatch):
     """Declare a GHE host for the duration of a test."""
@@ -550,17 +564,20 @@ class TestGithubHostFlag:
         assert default_github_host() == "github.com"
 
     @pytest.mark.parametrize(
-        "argv",
-        [
-            pytest.param(["merge", "--help"], id="merge"),
-            pytest.param(["close", "--help"], id="close"),
-            pytest.param(["status", "--help"], id="status"),
-            pytest.param(["blocked", "--help"], id="blocked"),
-        ],
+        "command",
+        ["merge", "close", "status", "blocked"],
     )
-    def test_flag_is_offered_by_every_target_taking_command(self, argv):
-        result = self.runner.invoke(app, argv)
-        assert "--github-host" in result.stdout
+    def test_flag_is_offered_by_every_target_taking_command(self, command):
+        # Reads the command's parameters rather than its rendered help.
+        #
+        # Scraping ``--help`` passed locally and failed on CI, because
+        # Rich colours the flag when it detects a terminal and the
+        # escape sequences land *between* the characters --- so the
+        # literal "--github-host" is absent from output that displays
+        # it perfectly.  Width-based wrapping truncates the table for
+        # the same reason.  The option's existence is the claim; how it
+        # is drawn is not.
+        assert "--github-host" in _option_names(command)
 
     def test_flag_reaches_the_merge_path(self, no_declared_hosts, mocker):
         # End to end: without the flag this host is undeclared and the
