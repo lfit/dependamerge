@@ -450,14 +450,22 @@ class TestOwnerArgumentKeepsItsHost:
 
     @pytest.mark.parametrize(
         "value",
-        ["not a url", "has$dollar", "-leading", "trailing-", "x" * 40],
+        ["not a url", "has$dollar", "-leading", "x" * 40],
     )
     def test_bare_value_must_look_like_a_login(self, no_declared_hosts, value):
         # The bare-token shortcut used to return anything verbatim, so
         # ``status "not a url"`` started an API scan for an owner that
         # cannot exist.  Same boundary the shorthand expansion enforces.
+        #
+        # ``trailing-`` is deliberately absent: ``johan--`` is a real
+        # account, and this shortcut accepted it before the boundary
+        # existed, so refusing it here would be a regression rather
+        # than a tightening.
         with pytest.raises(UrlParseError, match="Not a valid GitHub owner name"):
             parse_owner_target(value)
+
+    def test_a_trailing_hyphen_is_accepted(self, no_declared_hosts):
+        assert parse_owner_target("johan--") == ("johan--", "github.com")
 
     @pytest.mark.parametrize("value", ["lfreleng-actions", "acme", "acme/"])
     def test_valid_logins_still_pass(self, no_declared_hosts, value):

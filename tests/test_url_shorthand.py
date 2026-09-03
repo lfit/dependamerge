@@ -21,6 +21,7 @@ from dependamerge.url_parser import (
     parse_change_url,
     parse_gerrit_topic_url,
     parse_org_url,
+    parse_owner_arg,
     parse_repo_url,
 )
 from dependamerge.url_parser.models import UrlParseError
@@ -85,7 +86,7 @@ class TestLooksLikeOwner:
     def test_valid_logins(self, segment):
         assert looks_like_owner(segment) is True
 
-    @pytest.mark.parametrize("segment", ["a--b--t", "acme--tools"])
+    @pytest.mark.parametrize("segment", ["a--b--t", "acme--tools", "johan--"])
     def test_consecutive_hyphens_are_accepted(self, segment):
         # Deliberate, and checked against the API rather than against
         # the signup form's wording.  GitHub's *user* signup rejects
@@ -102,12 +103,21 @@ class TestLooksLikeOwner:
         # over LDAP or SAML need not follow the dotcom signup grammar.
         assert looks_like_owner(segment) is True
 
+    def test_a_trailing_hyphen_does_not_regress_owner_commands(self):
+        # ``johan--`` is a real user with about two thousand
+        # repositories.  ``status`` and ``blocked`` accepted any bare
+        # token before this gate existed, so enforcing the signup form's
+        # trailing-hyphen rule *removed* an account the tool could
+        # previously reach --- a regression, not merely a limitation.
+        assert looks_like_owner("johan--") is True
+        assert parse_owner_arg("johan--") == "johan--"
+        assert normalize_target("johan--") == "https://github.com/johan--"
+
     @pytest.mark.parametrize(
         ("segment", "why"),
         [
             ("not a url", "spaces"),
             ("-leading", "leading hyphen"),
-            ("trailing-", "trailing hyphen"),
             ("has_underscore", "underscore"),
             ("has$dollar", "punctuation"),
             ("x" * 40, "too long"),

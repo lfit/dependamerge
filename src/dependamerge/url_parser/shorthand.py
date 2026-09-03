@@ -85,16 +85,23 @@ _PORT_SUFFIX_RE = re.compile(r":\d+\Z")
 # genuine rubbish still fails fast with "Invalid URL" instead of being
 # expanded into a request for a repository that cannot exist.
 #
-# Consecutive hyphens are permitted on purpose.  GitHub's *user*
-# signup form rejects them, but organisation names did not always ---
-# ``a--b--t`` is a real organisation --- and owner-wide merging is
-# mostly an organisation operation.  This gate stops obvious rubbish
-# rather than reimplementing GitHub's account policy: being too
-# permissive costs a clear 404 from the API, whereas being too strict
-# reports "Invalid URL" for an owner that exists.  Enterprise adds a
-# second reason, since accounts provisioned over LDAP or SAML need not
-# follow the dotcom grammar at all.
-_OWNER_RE = re.compile(r"\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\Z")
+# Hyphen *placement* is not policed, only structure.  GitHub's user
+# signup form forbids consecutive and trailing hyphens, but real
+# accounts sit on the wrong side of both rules: ``a--b--t`` is an
+# organisation, and ``johan--`` is a user with about two thousand
+# repositories.  This gate stops obvious rubbish rather than
+# reimplementing GitHub's account policy --- being too permissive
+# costs a clear 404 from the API, whereas being too strict reports
+# "Invalid URL" for an owner that exists, and previously *regressed*
+# ``status``/``blocked``, which accepted any bare token before this
+# gate was added.  Enterprise adds a second reason, since accounts
+# provisioned over LDAP or SAML need not follow the dotcom grammar at
+# all.
+#
+# A *leading* hyphen is still refused: no such account is known, and
+# the likelier cause is a mistyped command-line flag, which is worth
+# reporting as a bad target rather than expanding into a request.
+_OWNER_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9-]{0,38}\Z")
 
 #: First segments that GitHub reserves as URL routes, so they can never
 #: be an owner.  Expanding a shorthand beginning with one would produce
