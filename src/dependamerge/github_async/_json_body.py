@@ -29,6 +29,21 @@ _BODILESS_STATUSES = frozenset({204, 205})
 _BODY_SNIPPET_LIMIT = 200
 
 
+def _snippet(r: httpx.Response) -> str:
+    """Quote the start of a body without decoding all of it.
+
+    Slicing ``r.text`` would decode the whole payload first, which is
+    wasteful for the large HTML error pages this is most likely to be
+    looking at --- and those arrive when the server is already
+    struggling.  Decoding only the prefix keeps the cost bounded.
+
+    ``errors="replace"`` because the prefix may end mid-character, and
+    a diagnostic message must never fail on the input it describes.
+    """
+    prefix = (r.content or b"")[:_BODY_SNIPPET_LIMIT]
+    return " ".join(prefix.decode("utf-8", errors="replace").split())
+
+
 def _looks_like_json(content_type: str) -> bool:
     """Report whether a content-type declares a JSON body.
 
@@ -46,7 +61,7 @@ def _looks_like_json(content_type: str) -> bool:
 
 def decode_json_body(
     r: httpx.Response, method: str, url: str
-) -> dict[str, Any] | list[dict[str, Any]]:
+) -> dict[str, Any] | list[Any]:
     """Decode a successful response body, or say why it could not be.
 
     The single place the transport turns bytes into JSON.  Every verb
@@ -93,7 +108,7 @@ def decode_json_body(
             f"{content_type!r} and an empty body; expected JSON"
         )
     if not _looks_like_json(content_type):
-        snippet = " ".join(r.text[:_BODY_SNIPPET_LIMIT].split())
+        snippet = _snippet(r)
         raise RetryableError(
             f"{method} {url} returned {r.status_code} with content-type "
             f"{content_type!r}, expected JSON. Body began: {snippet!r}"
@@ -108,7 +123,7 @@ def decode_json_body(
     except ValueError as exc:
         # Declared JSON but is not.  Same conclusion as a wrong
         # content-type, and worth quoting the body for the same reason.
-        snippet = " ".join(r.text[:_BODY_SNIPPET_LIMIT].split())
+        snippet = _snippet(r)
         raise RetryableError(
             f"{method} {url} returned {r.status_code} with content-type "
             f"{content_type!r} and an unparsable JSON body ({exc}). "
@@ -124,10 +139,44 @@ def decode_json_body(
     # hundred-item page would cost more than it is worth, and callers
     # that care already inspect the items they use.
     if not isinstance(decoded, dict | list):
-        snippet = " ".join(r.text[:_BODY_SNIPPET_LIMIT].split())
+        snippet = _snippet(r)
         raise RetryableError(
             f"{method} {url} returned {r.status_code} with content-type "
             f"{content_type!r} and JSON that is neither an object nor an "
             f"array ({type(decoded).__name__}). Body began: {snippet!r}"
         )
-    return cast("dict[str, Any] | list[dict[str, Any]]", decoded)
+    return cast("dict[str, Any] | list[Any]", decoded)
+
+
+def require_json_object(
+    body: dict[str, Any] | list[Any], r: httpx.Response, method: str, url: str
+) -> dict[str, Any]:
+    """Narrow a decoded body to an object, or say why it is not one.
+
+    For callers whose endpoint documents an object.  Declaring
+    ``dict`` and silencing the checker would restate the mistake this
+    module exists to prevent: an unchecked promise about a shape.
+
+    Treated as transient for the same reason a non-container body is.
+    An array where the API documents an object means something other
+    than the API answered, which a later attempt may not repeat.
+
+    Args:
+        body: The decoded body.
+        r: The response it came from, for the status.
+        method: HTTP method, for the error message.
+        url: Request URL, for the error message.
+
+    Returns:
+        The body, as an object.
+
+    Raises:
+        RetryableError: The body is an array.
+    """
+    if isinstance(body, dict):
+        return body
+    content_type = r.headers.get("content-type", "")
+    raise RetryableError(
+        f"{method} {url} returned {r.status_code} with content-type "
+        f"{content_type!r} and a JSON array where an object was expected"
+    )

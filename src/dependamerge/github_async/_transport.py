@@ -45,7 +45,7 @@ from ._errors import (
     _is_retryable_status,
     _is_transient_graphql_error,
 )
-from ._json_body import decode_json_body
+from ._json_body import decode_json_body, require_json_object
 from ._responses import (
     _finish_successful_request,
     _handle_forbidden,
@@ -164,7 +164,7 @@ class _TransportMixin(_GitHubAsyncBase):
     @_transport_retry()
     async def _request_json(
         self, method: str, url: str, **kwargs
-    ) -> tuple[httpx.Response, dict[str, Any] | list[dict[str, Any]]]:
+    ) -> tuple[httpx.Response, dict[str, Any] | list[Any]]:
         """Perform a request and decode its JSON body, retrying both.
 
         Decoding sits *inside* the retried scope deliberately.  A 2xx
@@ -193,7 +193,7 @@ class _TransportMixin(_GitHubAsyncBase):
 
     async def _fetch_json(
         self, method: str, url: str, **kwargs
-    ) -> tuple[httpx.Response, dict[str, Any] | list[dict[str, Any]]]:
+    ) -> tuple[httpx.Response, dict[str, Any] | list[Any]]:
         """Restore the type the retry decorator erases.
 
         Tenacity's decorator is untyped, so awaiting :meth:`_request_json`
@@ -202,33 +202,36 @@ class _TransportMixin(_GitHubAsyncBase):
         Narrowing once here keeps all six verbs honest without six casts.
         """
         return cast(
-            "tuple[httpx.Response, dict[str, Any] | list[dict[str, Any]]]",
+            "tuple[httpx.Response, dict[str, Any] | list[Any]]",
             await self._request_json(method, url, **kwargs),
         )
 
     async def get(
         self, path: str, params: dict[str, Any] | None = None
-    ) -> dict[str, Any] | list[dict[str, Any]]:
+    ) -> dict[str, Any] | list[Any]:
         _, body = await self._fetch_json("GET", f"{self.api_url}{path}", params=params)
         return body
 
     async def post(
         self, path: str, json: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        _, body = await self._fetch_json("POST", f"{self.api_url}{path}", json=json)
-        return body  # type: ignore[return-value]
+        url = f"{self.api_url}{path}"
+        r, body = await self._fetch_json("POST", url, json=json)
+        return require_json_object(body, r, "POST", url)
 
     async def put(
         self, path: str, json: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        _, body = await self._fetch_json("PUT", f"{self.api_url}{path}", json=json)
-        return body  # type: ignore[return-value]
+        url = f"{self.api_url}{path}"
+        r, body = await self._fetch_json("PUT", url, json=json)
+        return require_json_object(body, r, "PUT", url)
 
     async def patch(
         self, path: str, json: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        _, body = await self._fetch_json("PATCH", f"{self.api_url}{path}", json=json)
-        return body  # type: ignore[return-value]
+        url = f"{self.api_url}{path}"
+        r, body = await self._fetch_json("PATCH", url, json=json)
+        return require_json_object(body, r, "PATCH", url)
 
     async def graphql(
         self, query: str, variables: dict[str, Any] | None = None
@@ -288,7 +291,7 @@ class _TransportMixin(_GitHubAsyncBase):
         params: dict[str, Any] | None = None,
         per_page: int = 100,
         max_pages: int | None = None,
-    ) -> AsyncIterator[dict[str, Any] | list[dict[str, Any]]]:
+    ) -> AsyncIterator[dict[str, Any] | list[Any]]:
         """
         Iterate through a paginated REST collection.
 

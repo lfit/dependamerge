@@ -79,7 +79,7 @@ class _GitHubAsyncBase:
 
         async def get(
             self, path: str, params: dict[str, Any] | None = None
-        ) -> dict[str, Any] | list[dict[str, Any]]: ...
+        ) -> dict[str, Any] | list[Any]: ...
 
         async def post(
             self, path: str, json: dict[str, Any] | None = None
@@ -104,7 +104,7 @@ class _GitHubAsyncBase:
             params: dict[str, Any] | None = None,
             per_page: int = 100,
             max_pages: int | None = None,
-        ) -> AsyncIterator[dict[str, Any] | list[dict[str, Any]]]: ...
+        ) -> AsyncIterator[dict[str, Any] | list[Any]]: ...
 
         def _track_error(self, error_type: str) -> None: ...
 

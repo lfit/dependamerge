@@ -382,6 +382,82 @@ class TestRetryBoundsDoNotMultiply:
         assert attempts["n"] == 2
 
 
+class TestObjectEndpointsRefuseAnArray:
+    """``post``/``put``/``patch`` promise an object, so they check.
+
+    They previously declared ``dict`` and silenced the checker with an
+    ignore comment, which is the same unchecked promise this module
+    exists to prevent --- one layer further out.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb", ["post", "put", "patch"])
+    async def test_an_array_is_refused(self, single_attempt, verb):
+        api = _client(_responder(200, b"[]", "application/json"))
+        try:
+            with pytest.raises(RetryableError) as excinfo:
+                await getattr(api, verb)("/repos/o/r")
+        finally:
+            await api._client.aclose()
+
+        message = str(excinfo.value)
+        assert "array where an object was expected" in message
+        assert verb.upper() in message
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verb", ["post", "put", "patch"])
+    async def test_an_object_is_returned(self, verb):
+        api = _client(_responder(200, b'{"ok": true}', "application/json"))
+        try:
+            assert await getattr(api, verb)("/repos/o/r") == {"ok": True}
+        finally:
+            await api._client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_get_still_accepts_an_array(self):
+        # The complement: collection endpoints legitimately return one,
+        # so the narrowing must not reach ``get``.
+        api = _client(_responder(200, b'[{"number": 1}]', "application/json"))
+        try:
+            assert await api.get("/repos/o/r/pulls") == [{"number": 1}]
+        finally:
+            await api._client.aclose()
+
+
+class TestTheSnippetDoesNotDecodeEverything:
+    """Quoting the body must not cost the size of the body.
+
+    A large HTML error page is exactly what this is most likely to be
+    looking at, and it arrives when the server is already struggling.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_large_body_is_truncated(self, single_attempt):
+        body = b"<html>" + b"x" * 500_000 + b"</html>"
+        api = _client(_responder(200, body, "text/html"))
+        try:
+            with pytest.raises(RetryableError) as excinfo:
+                await api.get("/repos/o/r")
+        finally:
+            await api._client.aclose()
+
+        # The quoted portion is bounded, whatever the body's size.
+        assert len(str(excinfo.value)) < 500
+
+    @pytest.mark.asyncio
+    async def test_an_undecodable_prefix_does_not_break_the_message(
+        self, single_attempt
+    ):
+        # The prefix may end mid-character, and a diagnostic must never
+        # fail on the input it is describing.
+        api = _client(_responder(200, b"\xff\xfe" + b"\xc3" * 400, "text/html"))
+        try:
+            with pytest.raises(RetryableError):
+                await api.get("/repos/o/r")
+        finally:
+            await api._client.aclose()
+
+
 class TestEveryVerbDecodesTheSameWay:
     """No verb keeps its own copy of this handling.
 
