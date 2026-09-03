@@ -21,16 +21,17 @@ from ..merge_manager import (
 )
 from ._app import DEFAULT_MAX_WAIT, app
 from ._context import _MergeContext
+from ._github_host import apply_github_host
 from ._merge_dispatch import (
     _dispatch_gerrit,
     _normalise_topic,
-    _parse_merge_target,
     _resolve_gerrit_target,
     _run_guarded,
     _run_single_pr_merge,
     _validate_max_wait,
 )
 from ._merge_inputs import _validate_merge_inputs
+from ._merge_target import _parse_merge_target, _resolve_target_url, _target_host
 from ._org_merge import _handle_org_merge
 from ._repo_merge import _handle_repo_merge
 
@@ -38,8 +39,13 @@ from ._repo_merge import _handle_repo_merge
 @app.command()
 def merge(
     pr_url: str = typer.Argument(
-        ...,
-        help="GitHub PR URL, repository URL, owner/org URL, or Gerrit change URL",
+        "",
+        help=(
+            "GitHub PR URL, repository URL, owner/org URL, or Gerrit "
+            "change URL. Shorthand works too: 'owner', 'owner/repo', "
+            "'owner/repo/pull/7'. Omit entirely to use the repository "
+            "you are standing in."
+        ),
     ),
     no_confirm: bool = typer.Option(
         False,
@@ -54,6 +60,15 @@ def merge(
     ),
     token: str | None = typer.Option(
         None, "--token", help="GitHub token (or set GITHUB_TOKEN env var)"
+    ),
+    github_host: str | None = typer.Option(
+        None,
+        "--github-host",
+        help=(
+            "GitHub host to address, e.g. a GitHub Enterprise Server "
+            "install. Takes priority over DEPENDAMERGE_GITHUB_HOST and "
+            "GH_HOST, and declares the host as permitted."
+        ),
     ),
     override: str | None = typer.Option(
         None,
@@ -288,6 +303,11 @@ def merge(
     .netrc search order: ./netrc, ~/.netrc, ~/_netrc (Windows)
     Use --netrc-file to specify an explicit path.
     """
+    # Applied before anything parses a target: the flag sets both
+    # the host a shorthand resolves against and the set of hosts
+    # permitted at all.
+    apply_github_host(github_host)
+
     github2gerrit_mode = _validate_merge_inputs(
         submit_gerrit_changes,
         skip_gerrit_changes,
@@ -298,6 +318,7 @@ def merge(
     _validate_max_wait(max_wait)
     topic = _normalise_topic(topic)
 
+    pr_url = _resolve_target_url(pr_url)
     target = _parse_merge_target(pr_url)
 
     ctx = _MergeContext(
@@ -323,6 +344,7 @@ def merge(
         include_human_prs=include_human_prs,
         rebase_local=rebase_local,
         dry_run=dry_run,
+        host=_target_host(target),
     )
 
     gerrit_target = _resolve_gerrit_target(target, topic)

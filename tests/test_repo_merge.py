@@ -152,17 +152,17 @@ class TestParseRepoUrl:
             parse_repo_url("   ")
 
     def test_repo_url_gerrit_style_raises(self):
-        with pytest.raises(UrlParseError, match="only supported for github.com"):
+        with pytest.raises(UrlParseError, match="not enabled for host"):
             parse_repo_url("https://gerrit.example.org/c/project/+/12345")
 
     def test_repo_url_gerrit_style_no_plus_rejected(self):
         """A non-github.com host is rejected regardless of path shape."""
-        with pytest.raises(UrlParseError, match="only supported for github.com"):
+        with pytest.raises(UrlParseError, match="not enabled for host"):
             parse_repo_url("https://gerrit.example.org/c/repo")
 
     def test_repo_url_ghe_rejected(self):
         """GHE hosts are not github.com subdomains — rejected at parse time."""
-        with pytest.raises(UrlParseError, match="only supported for github.com"):
+        with pytest.raises(UrlParseError, match="not enabled for host"):
             parse_repo_url("https://github.enterprise.com/owner/repo")
 
     def test_repo_url_github_subdomain_accepted(self):
@@ -175,7 +175,7 @@ class TestParseRepoUrl:
 
     def test_repo_url_non_github_host_rejected(self):
         # Non-github.com hosts are rejected at parse time to prevent misrouting
-        with pytest.raises(UrlParseError, match="only supported for github.com"):
+        with pytest.raises(UrlParseError, match="not enabled for host"):
             parse_repo_url("https://gitlab.com/owner/repo")
 
     def test_repo_url_extra_segments_raises(self):
@@ -521,13 +521,40 @@ class TestMergeRepoUrl:
         assert "repository url" in plain.lower() or "Repository URL" in plain
 
     def test_invalid_url_still_rejected(self):
-        """A completely invalid URL should still be rejected."""
+        """A completely invalid URL should still be rejected.
+
+        The input changed with shorthand support: ``not-a-url`` is a
+        well-formed GitHub login and is now understood as an owner, so
+        it no longer demonstrates rejection.  A string that cannot be a
+        login — spaces are not permitted in one — does.
+        """
         result = self.runner.invoke(
             app,
-            ["merge", "not-a-url", "--token", "test_token"],
+            ["merge", "not a url", "--token", "test_token"],
         )
         assert result.exit_code == 1
         assert "❌ Invalid URL:" in result.stdout
+
+    def test_owner_shaped_token_is_treated_as_shorthand(self, mocker):
+        """A bare login is an owner-wide shorthand, not an error.
+
+        The counterpart to the test above, pinning the boundary between
+        the two: anything matching the GitHub login grammar is expanded
+        rather than rejected, so this must get past URL parsing and
+        reach the owner-wide path.
+        """
+        handler = mocker.patch("dependamerge.cli._merge_cmd._handle_org_merge")
+
+        result = self.runner.invoke(
+            app,
+            ["merge", "not-a-url", "--token", "test_token", "--dry-run"],
+        )
+
+        assert "❌ Invalid URL:" not in result.stdout
+        # Asserting the owner handler ran, rather than only that no
+        # error was printed: the negative alone passes when the command
+        # fails later for network or auth reasons.
+        handler.assert_called_once()
 
     @patch("dependamerge.cli.GitHubClient")
     @patch("dependamerge.cli.asyncio.run")

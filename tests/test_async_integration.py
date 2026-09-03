@@ -177,9 +177,12 @@ class TestAsyncIntegration:
         assert result.total_repositories == 1
         assert result.total_prs == 2
 
-        # Verify service was used correctly
+        # Verify service was used correctly.  ``host`` is asserted
+        # explicitly: a service built without it addresses github.com,
+        # which is right by luck on dotcom and silently wrong against a
+        # GitHub Enterprise Server install.
         mock_service_class.assert_called_once_with(
-            token="test_token", progress_tracker=None
+            token="test_token", host="github.com", progress_tracker=None
         )
         mock_service.scan_organization.assert_called_once_with(
             "test-org", include_drafts=False
@@ -394,6 +397,13 @@ class TestAsyncIntegration:
             "https://github.com/owner/repo",  # No PR number
             "not-a-url",
             "",
+            # Too few segments for /owner/repo/pull/N.  Splitting the
+            # path and indexing backwards from "pull" wrapped around:
+            # these returned ("pull", "7", 7) and ("7", "a", 7), so
+            # close queried a repository nobody named.
+            "https://github.com/pull/7",
+            "https://github.com/a/pull/7",
+            "https://github.com/pull",
         ]
 
         for invalid_url in invalid_urls:

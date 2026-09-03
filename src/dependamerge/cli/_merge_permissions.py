@@ -26,6 +26,7 @@ from ..github_async import (
 from ..github_async import (
     PermissionError as GitHubPermissionError,
 )
+from ..url_parser import default_github_host, derive_api_urls
 from ._app import console
 from ._context import _MergeContext
 from ._merge_inputs import _source_pr_modifies_workflows
@@ -101,7 +102,14 @@ def _check_merge_permissions(ctx: _MergeContext) -> None:
     console.print("🔍 Checking token permissions...")
 
     async def _check() -> dict[str, dict[str, Any]]:
-        async with GitHubAsync(token=ctx.token) as client:
+        # The preflight has to address the same host as the merge that
+        # follows: checked against api.github.com, an Enterprise token
+        # reports every operation as missing and aborts the run before
+        # the host-aware clients are ever built.
+        api_url, graphql_url = derive_api_urls(ctx.host or default_github_host())
+        async with GitHubAsync(
+            token=ctx.token, api_url=api_url, graphql_url=graphql_url
+        ) as client:
             operations = ["approve", "merge", "branch_protection"]
             if not ctx.no_fix:
                 operations.append("update_branch")

@@ -269,6 +269,7 @@ class TestForkMeansCrossRepository:
             owner="modeseven-lfreleng-actions",
             repo="dependamerge",
             log=LOG,
+            host="github.com",
         )
 
         assert plan is not None
@@ -284,6 +285,7 @@ class TestForkMeansCrossRepository:
             owner="lfreleng-actions",
             repo="dependamerge",
             log=LOG,
+            host="github.com",
         )
 
         assert plan is not None
@@ -300,6 +302,7 @@ class TestForkMeansCrossRepository:
             owner="lfreleng-actions",
             repo="dependamerge",
             log=LOG,
+            host="github.com",
         )
 
         assert plan is not None
@@ -325,6 +328,7 @@ class TestForkMeansCrossRepository:
             owner="lfreleng-actions",
             repo="dependamerge",
             log=LOG,
+            host="github.com",
         )
 
         assert plan is not None
@@ -352,6 +356,7 @@ class TestForkMeansCrossRepository:
             owner="modeseven-lfreleng-actions",
             repo="dependamerge",
             log=LOG,
+            host="github.com",
         )
 
         assert plan is not None
@@ -369,6 +374,7 @@ class TestForkMeansCrossRepository:
                 owner="lfreleng-actions",
                 repo="some-repo",
                 log=LOG,
+                host="github.com",
             )
             is None
         )

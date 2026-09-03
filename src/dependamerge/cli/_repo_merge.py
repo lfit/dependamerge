@@ -47,18 +47,11 @@ def _init_repo_merge_client(
         parsed_repo: Parsed repository URL with owner and repo.
         ctx: Shared merge context populated with CLI parameters.
     """
-    from ..url_parser import _host_matches
-
-    if not _host_matches(parsed_repo.host, "github.com"):
-        console.print(
-            "❌ Repository-scoped merge is currently only supported "
-            f"for github.com (got host: {parsed_repo.host}).\n"
-            "   GitHub Enterprise support requires API base URL "
-            "configuration — use a direct PR URL instead."
-        )
-        raise typer.Exit(code=1)
-
-    ctx.github_client = _pkg.GitHubClient(ctx.token)
+    # No host guard here.  ``parse_repo_url`` already refused any host
+    # the operator has not declared, and repeating the check --- as this
+    # did, against github.com only --- silently overrode that decision
+    # and made Enterprise repository merges unreachable.
+    ctx.github_client = _pkg.GitHubClient(ctx.token, host=ctx.host)
     assert ctx.github_client.token is not None
     ctx.token = ctx.github_client.token
     ctx.owner = parsed_repo.owner
@@ -101,6 +94,7 @@ def _fetch_repo_prs(
     async def _fetch_prs() -> list[PullRequestInfo]:
         svc = GitHubService(
             token=ctx.token,
+            host=ctx.host,
             progress_tracker=ctx.progress_tracker,
         )
         try:

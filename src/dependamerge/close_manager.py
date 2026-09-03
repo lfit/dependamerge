@@ -16,6 +16,7 @@ from .github_async import PermissionError as GitHubPermissionError
 from .models import ComparisonResult, PullRequestInfo
 from .output_utils import log_and_print
 from .progress_tracker import MergeProgressTracker
+from .url_parser import default_github_host, derive_api_urls
 
 
 class CloseStatus(Enum):
@@ -56,12 +57,18 @@ class AsyncCloseManager:
         concurrency: int = 5,
         progress_tracker: MergeProgressTracker | None = None,
         preview_mode: bool = False,
+        host: str | None = None,
     ):
         self.token = token
         self.max_retries = max_retries
         self.concurrency = concurrency
         self.progress_tracker = progress_tracker
         self.preview_mode = preview_mode
+        # The host the closes are sent to.  Without it a run against a
+        # GitHub Enterprise Server install discovers the right pull
+        # requests through a host-aware service and then sends every
+        # close to api.github.com.
+        self.host = (host or default_github_host()).strip().lower()
         self.log = logging.getLogger(__name__)
 
         # Track close operations
@@ -76,7 +83,10 @@ class AsyncCloseManager:
 
     async def __aenter__(self):
         """Async context manager entry."""
-        self._github_client = GitHubAsync(token=self.token)
+        api_url, graphql_url = derive_api_urls(self.host)
+        self._github_client = GitHubAsync(
+            token=self.token, api_url=api_url, graphql_url=graphql_url
+        )
         await self._github_client.__aenter__()
         return self
 

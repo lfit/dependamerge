@@ -36,13 +36,14 @@ from ..resolve_conflicts import FixOptions, FixOrchestrator, PRSelection
 from ..system_utils import get_default_workers
 from ..url_parser import (
     UrlParseError,
-    parse_owner_arg,
+    parse_owner_target,
 )
 from ._app import app, console
+from ._github_host import apply_github_host
 from ._reports import _display_blocked_results
 
 
-def _resolve_blocked_owner(org_input: str) -> str:
+def _resolve_blocked_owner(org_input: str) -> tuple[str, str]:
     """Resolve the owner login the blocked report should scan.
 
     Args:
@@ -57,9 +58,13 @@ def _resolve_blocked_owner(org_input: str) -> str:
     # Parse owner login from input (handles a bare login plus every
     # GitHub owner URL form, including /orgs/owner/repositories).
     try:
-        organization = parse_owner_arg(org_input)
-    except UrlParseError:
-        organization = ""
+        organization, owner_host = parse_owner_target(org_input)
+    except UrlParseError as exc:
+        # The parser's own message carries the remedy --- which
+        # host to declare, and how.  Swallowing it left an
+        # Enterprise operator with only "invalid owner".
+        console.print(f"❌ {exc}")
+        raise typer.Exit(1) from None
     if not organization:
         console.print("❌ Invalid GitHub owner name or URL")
         console.print(
@@ -67,7 +72,7 @@ def _resolve_blocked_owner(org_input: str) -> str:
             "'owner-name' or 'https://github.com/owner-name/'"
         )
         raise typer.Exit(1)
-    return organization
+    return (organization, owner_host)
 
 
 def _scan_for_blocked_prs(
@@ -75,6 +80,7 @@ def _scan_for_blocked_prs(
     token: str | None,
     include_drafts: bool,
     progress_tracker: ProgressTracker | None,
+    host: str = "",
 ):
     """Scan every repository of an owner for unmergeable pull requests.
 
@@ -83,6 +89,9 @@ def _scan_for_blocked_prs(
         token: GitHub token, or ``None`` to fall back to the environment.
         include_drafts: Include draft pull requests in the report.
         progress_tracker: Live progress display, when one is running.
+        host: The GitHub host the owner lives on.  Carried from the
+            parsed argument, so an Enterprise owner URL scans the
+            server it named rather than github.com.
 
     Returns:
         The scan result reported by the GitHub service.
@@ -90,7 +99,11 @@ def _scan_for_blocked_prs(
     from ..github_service import GitHubService
 
     async def _run_blocked_check():
-        svc = GitHubService(token=token, progress_tracker=progress_tracker)
+        svc = GitHubService(
+            token=token,
+            host=host,
+            progress_tracker=progress_tracker,
+        )
         try:
             return await svc.scan_organization(
                 organization, include_drafts=include_drafts
@@ -138,6 +151,7 @@ def _run_blocked_fix(
     reason: str | None,
     limit: int | None,
     *,
+    host: str = "",
     workdir: str | None = None,
     keep_temp: bool = False,
     prefetch: int | None = None,
@@ -189,6 +203,7 @@ def _run_blocked_fix(
     try:
         orchestrator = FixOrchestrator(
             token_to_use,
+            host=host,
             progress_tracker=progress_tracker,
             logger=lambda m: console.print(m),
         )
@@ -221,6 +236,15 @@ def blocked(
     ),
     token: str | None = typer.Option(
         None, "--token", help="GitHub token (or set GITHUB_TOKEN env var)"
+    ),
+    github_host: str | None = typer.Option(
+        None,
+        "--github-host",
+        help=(
+            "GitHub host to address, e.g. a GitHub Enterprise Server "
+            "install. Takes priority over DEPENDAMERGE_GITHUB_HOST and "
+            "GH_HOST, and declares the host as permitted."
+        ),
     ),
     output_format: str = typer.Option(
         "table", "--format", help="Output format: table, json"
@@ -288,7 +312,12 @@ def blocked(
 
     Standard code review requirements are not considered blocking.
     """
-    organization = _resolve_blocked_owner(org_input)
+    # Applied before anything parses a target: the flag sets both
+    # the host a shorthand resolves against and the set of hosts
+    # permitted at all.
+    apply_github_host(github_host)
+
+    organization, owner_host = _resolve_blocked_owner(org_input)
 
     progress_tracker = None
 
@@ -308,7 +337,7 @@ def blocked(
 
         # Perform the scan
         scan_result = _scan_for_blocked_prs(
-            organization, token, include_drafts, progress_tracker
+            organization, token, include_drafts, progress_tracker, owner_host
         )
 
         _print_blocked_scan_summary(progress_tracker)
@@ -324,6 +353,7 @@ def blocked(
                 token,
                 reason,
                 limit,
+                host=owner_host,
                 workdir=workdir,
                 keep_temp=keep_temp,
                 prefetch=prefetch,

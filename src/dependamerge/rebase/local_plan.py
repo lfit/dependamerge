@@ -16,6 +16,7 @@ import logging
 from dataclasses import dataclass
 
 from ..models import PullRequestInfo
+from ..url_parser import clone_url_for
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ def _build_rebase_plan(
     owner: str,
     repo: str,
     log: logging.Logger,
+    host: str,
 ) -> _RebasePlan | None:
     """Resolve remotes, branches and fork status, or None to give up.
 
@@ -80,9 +82,9 @@ def _build_rebase_plan(
     # ``head_full`` is now confirmed to refer to the head repo,
     # not the base.
     if not head_clone_url:
-        head_clone_url = f"https://github.com/{head_full}.git"
+        head_clone_url = clone_url_for(host, head_full or "")
     if not base_clone_url:
-        base_clone_url = f"https://github.com/{base_full}.git"
+        base_clone_url = clone_url_for(host, base_full or "")
 
     # Decide whether the PR is from a fork *before* we collapse
     # ``head_full`` to ``base_full`` for clone-URL fallback.

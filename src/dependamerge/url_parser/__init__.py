@@ -20,6 +20,12 @@ Gerrit:
 Gerrit topic search (see parse_gerrit_topic_url):
     https://gerrit.example.org/q/topic:some-topic
     https://gerrit.onap.org/r/q/topic:some-topic
+
+Shorthand (see normalize_target):
+    lfreleng-actions                    -> owner-wide
+    acme/widget                         -> repository-wide
+    acme/widget/pull/7                  -> a single pull request
+    git@github.com:acme/widget.git      -> repository-wide
 """
 
 from __future__ import annotations
@@ -32,7 +38,17 @@ from .change import (
     detect_source,
     parse_change_url,
 )
-from .hosts import _host_matches, derive_api_urls
+from .git_suffix import has_stray_git_suffix
+from .hosts import (
+    _host_matches,
+    canonical_web_host,
+    clone_url_for,
+    derive_api_urls,
+    is_supported_github_host,
+    pull_request_url_for,
+    reject_port_bearing_host,
+    unsupported_host_message,
+)
 from .models import (
     ChangeSource,
     ParsedGerritTopicUrl,
@@ -41,10 +57,28 @@ from .models import (
     ParsedUrl,
     UrlParseError,
 )
-from .repos import parse_org_url, parse_owner_arg, parse_repo_url
+from .redaction import redact_target
+from .repos import (
+    parse_org_url,
+    parse_owner_arg,
+    parse_owner_target,
+    parse_repo_url,
+)
+from .shorthand import (
+    DEFAULT_GITHUB_HOST,
+    default_github_host,
+    enterprise_hosts,
+    github_host_override,
+    looks_like_host,
+    looks_like_owner,
+    normalize_target,
+    set_github_host,
+    strip_git_suffix,
+)
 from .topic import parse_gerrit_topic_url
 
 __all__ = [
+    "DEFAULT_GITHUB_HOST",
     "ChangeSource",
     "ParsedGerritTopicUrl",
     "ParsedOrgUrl",
@@ -52,11 +86,28 @@ __all__ = [
     "ParsedUrl",
     "UrlParseError",
     "_host_matches",
+    "canonical_web_host",
+    "clone_url_for",
+    "default_github_host",
     "derive_api_urls",
     "detect_source",
+    "enterprise_hosts",
+    "github_host_override",
+    "is_supported_github_host",
+    "looks_like_host",
+    "looks_like_owner",
+    "normalize_target",
     "parse_change_url",
     "parse_gerrit_topic_url",
     "parse_org_url",
     "parse_owner_arg",
+    "parse_owner_target",
     "parse_repo_url",
+    "pull_request_url_for",
+    "reject_port_bearing_host",
+    "set_github_host",
+    "has_stray_git_suffix",
+    "redact_target",
+    "strip_git_suffix",
+    "unsupported_host_message",
 ]

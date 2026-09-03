@@ -20,6 +20,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
+
+from ..github_async import GitHubAsync
 
 logger = logging.getLogger("dependamerge.github_client")
 
@@ -29,6 +32,12 @@ class _GitHubActionMixin:
 
     # Established by GitHubClient.__init__.
     token: str
+    host: str
+    # Provided by GitHubClient: builds a transport client aimed at
+    # ``host``, so an Enterprise run does not silently fall back to
+    # github.com.  Annotated rather than defined, to avoid shadowing
+    # the real method through the MRO.
+    _new_async: Callable[..., GitHubAsync]
 
     def approve_pull_request(
         self,
@@ -39,10 +48,9 @@ class _GitHubActionMixin:
     ) -> bool:
         """Approve a pull request using the async REST client."""
         try:
-            from ..github_async import GitHubAsync
 
             async def _run():
-                async with GitHubAsync(token=self.token) as api:
+                async with self._new_async() as api:
                     await api.approve_pull_request(owner, repo, pr_number, message)
                     return True
 
@@ -56,10 +64,9 @@ class _GitHubActionMixin:
     ) -> bool:
         """Merge a pull request using the async REST client."""
         try:
-            from ..github_async import GitHubAsync
 
             async def _run():
-                async with GitHubAsync(token=self.token) as api:
+                async with self._new_async() as api:
                     return await api.merge_pull_request(
                         owner, repo, pr_number, merge_method
                     )
@@ -72,10 +79,9 @@ class _GitHubActionMixin:
     def fix_out_of_date_pr(self, owner: str, repo: str, pr_number: int) -> bool:
         """Fix an out-of-date PR by updating the branch."""
         try:
-            from ..github_async import GitHubAsync
 
             async def _run():
-                async with GitHubAsync(token=self.token) as api:
+                async with self._new_async() as api:
                     await api.update_branch(owner, repo, pr_number)
                     return True
 

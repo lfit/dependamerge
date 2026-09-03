@@ -86,6 +86,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from dependamerge.merge_manager import AsyncMergeManager
+from dependamerge.url_parser import set_github_host
 
 _RUN_INTEGRATION_ENV = "DEPENDAMERGE_RUN_INTEGRATION"
 
@@ -133,6 +134,31 @@ def pytest_collection_modifyitems(
     for item in items:
         if "integration" in item.keywords:
             item.add_marker(skip_integration)
+
+
+@pytest.fixture(autouse=True)
+def _reset_github_host_override(monkeypatch):
+    """Detach every test from ambient GitHub host configuration.
+
+    The resolved host comes from a process-wide override *and* three
+    environment variables.  Clearing only the override leaves the rest:
+    a developer who legitimately has ``GH_HOST`` set for their
+    Enterprise installation would run the otherwise-dotcom suite
+    against that host and see failures nobody else can reproduce.
+
+    The same hazard as the ambient git configuration in
+    ``tests/test_local_repo.py``, and worth the same treatment.  Tests
+    that want a host set do so explicitly, after this has run.
+    """
+    for name in (
+        "DEPENDAMERGE_GITHUB_HOST",
+        "DEPENDAMERGE_GITHUB_HOSTS",
+        "GH_HOST",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    set_github_host(None)
+    yield
+    set_github_host(None)
 
 
 def make_merge_manager(**overrides: Any) -> tuple[AsyncMergeManager, AsyncMock]:

@@ -17,57 +17,166 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
-from ..url_parser import _host_matches
+from ..url_parser import (
+    UrlParseError,
+    _host_matches,
+    default_github_host,
+    derive_api_urls,
+    has_stray_git_suffix,
+    is_supported_github_host,
+    normalize_target,
+    redact_target,
+    reject_port_bearing_host,
+    unsupported_host_message,
+)
 from .actions import _GitHubActionMixin
 from .queries import _GitHubQueryMixin
 from .status import _GitHubStatusMixin
 
 logger = logging.getLogger("dependamerge.github_client")
 
+# The path shape a pull request URL must have before declaring its host
+# could possibly help.
+_PR_PATH_RE = re.compile(
+    r"\A/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)(?:/.*)?\Z"
+)
+
+if TYPE_CHECKING:
+    from ..github_async import GitHubAsync
+
 
 class GitHubClient(_GitHubQueryMixin, _GitHubActionMixin, _GitHubStatusMixin):
     """GitHub API client for managing pull requests."""
 
-    def __init__(self, token: str | None = None):
-        """Initialize GitHub client with token."""
+    def __init__(self, token: str | None = None, *, host: str | None = None):
+        """Initialize GitHub client with token.
+
+        Args:
+            token: GitHub token; falls back to ``GITHUB_TOKEN``.
+            host: The GitHub host to address.  Defaults to github.com,
+                or to whatever ``DEPENDAMERGE_GITHUB_HOST``/``GH_HOST``
+                names.  A GitHub Enterprise Server host changes the API
+                base URLs, which is why it has to be carried here rather
+                than assumed at the transport layer.
+        """
         resolved = token or os.getenv("GITHUB_TOKEN")
         if not resolved:
             raise ValueError(
                 "GitHub token is required. Set GITHUB_TOKEN environment variable."
             )
         self.token: str = resolved
+        self.host: str = (host or default_github_host()).strip().lower()
+        self.api_url, self.graphql_url = derive_api_urls(self.host)
+
+    def _new_async(self, **kwargs: Any) -> GitHubAsync:
+        """Build a transport client aimed at this instance's host.
+
+        Every operation opens its own client, so without a single
+        factory each new call site is another chance to silently fall
+        back to github.com on an Enterprise run.
+
+        ``GitHubAsync`` is resolved here rather than bound at import
+        time, so that tests patching
+        ``dependamerge.github_async.GitHubAsync`` still intercept it ---
+        the same convention the query and action mixins have always
+        used, and the reason their imports are function-local.
+        """
+        from ..github_async import GitHubAsync as _GitHubAsync
+
+        return _GitHubAsync(
+            token=self.token,
+            api_url=self.api_url,
+            graphql_url=self.graphql_url,
+            **kwargs,
+        )
 
     def __repr__(self) -> str:
         """Safe repr that never exposes the token value."""
         return "GitHubClient(token=***)"
 
     def parse_pr_url(self, url: str) -> tuple[str, str, int]:
-        """Parse GitHub PR URL to extract owner, repo, and PR number."""
+        """Parse GitHub PR URL to extract owner, repo, and PR number.
+
+        Accepts the same shorthand the URL parsers do, so
+        ``acme/widget/pull/7`` and a scheme-less host both work here as
+        well as in ``merge``.
+
+        Raises:
+            UrlParseError: The target is not a usable pull request URL.
+                It subclasses :class:`ValueError`, so callers catching
+                that keep working while the dispatcher can still tell a
+                URL problem from an API one.  Raising bare
+                ``ValueError`` here reported an undeclared host as a
+                missing-permissions error, sending the operator to
+                regenerate a token that was never at fault.
+        """
         # SECURITY: Use urlparse for host extraction, not substring checks.
         # See CodeQL rule py/incomplete-url-substring-sanitization.
-        parsed = urlparse(url)
+        parsed = urlparse(normalize_target(url, default_host=self.host))
+        # Same reasoning as the repository and owner parsers: a port
+        # cannot survive into the API base URL, so accepting one would
+        # send the token to the default port of a server the operator
+        # did not name.  A malformed port is refused for the same
+        # reason it is there --- it resolves to a bare hostname.
+        reject_port_bearing_host(parsed.netloc.lower(), "Pull request")
         host = (parsed.hostname or "").lower()
-        if not _host_matches(host, "github.com"):
-            raise ValueError(f"Invalid GitHub PR URL: {url}")
+        if not is_supported_github_host(host):
+            # Declaration guidance only helps when the URL is otherwise
+            # a pull request.  Offering it for something that is not
+            # one sends the operator to configure a host, only to meet
+            # the real error afterwards.
+            #
+            # A stray ``.git`` is one of those: the shape matches
+            # because the pattern allows trailing segments, but the
+            # suffix makes the URL malformed whatever host is declared.
+            # It is checked below rather than here, so it has to be
+            # excluded explicitly.
+            if (
+                host
+                and _PR_PATH_RE.match(parsed.path)
+                and not has_stray_git_suffix(parsed.path)
+            ):
+                raise UrlParseError(unsupported_host_message(host, "Pull request"))
+            raise UrlParseError(f"Invalid GitHub PR URL: {redact_target(url)}")
 
-        # Use parsed.path to ignore query strings and fragments
-        # when splitting.
-        parts = parsed.path.strip("/").split("/")
-        if "pull" not in parts:
-            raise ValueError(f"Invalid GitHub PR URL: {url}")
+        # This client's API base URLs were fixed at construction, so a
+        # URL naming a *different* permitted host would be acted on
+        # against the wrong server --- and an owner/repository pair can
+        # exist on both.  Declaring two hosts must not let one stand in
+        # for the other.
+        if not _host_matches(host, self.host, allow_subdomains=False) and not (
+            _host_matches(host, "github.com") and _host_matches(self.host, "github.com")
+        ):
+            raise UrlParseError(
+                f"Pull request URL names host {host}, but this client is "
+                f"configured for {self.host}. Acting on it here would "
+                "address the wrong server."
+            )
 
-        # Find the 'pull' segment and get the PR number
-        try:
-            pull_index = parts.index("pull")
-            if pull_index + 1 >= len(parts):
-                raise ValueError("PR number not found after 'pull'")
-
-            owner = parts[pull_index - 2]
-            repo = parts[pull_index - 1]
-            pr_number = int(parts[pull_index + 1])
-
-            return owner, repo, pr_number
-        except (ValueError, IndexError) as e:
-            raise ValueError(f"Invalid GitHub PR URL: {url}") from e
+        # The same strict shape gates every host.  Splitting the path
+        # and indexing backwards from ``pull`` let a short path wrap
+        # around: ``/pull/7`` put ``pull`` at index 0, so the negative
+        # indexes returned owner ``pull`` and repository ``7``, and
+        # ``/a/pull/7`` returned the pair transposed.  Reading the
+        # groups the pattern already captures removes the arithmetic
+        # that made that possible.
+        if has_stray_git_suffix(parsed.path):
+            # The pattern accepts trailing segments, so without this a
+            # ``/pull/7/files.git`` still matched pull request 7 and the
+            # suffix normalisation preserved achieved nothing.
+            raise UrlParseError(
+                f"Invalid GitHub PR URL: {redact_target(url)}. The trailing '.git' "
+                "belongs to a clone URL, not to a pull request."
+            )
+        match = _PR_PATH_RE.match(parsed.path)
+        if match is None:
+            raise UrlParseError(f"Invalid GitHub PR URL: {redact_target(url)}")
+        return (
+            match.group("owner"),
+            match.group("repo"),
+            int(match.group("number")),
+        )

@@ -5,6 +5,8 @@
 The ``close`` command and its options.
 """
 
+from urllib.parse import urlparse
+
 import typer
 
 # Names substituted at ``dependamerge.cli.<name>`` are read from
@@ -30,6 +32,10 @@ from ..github_async import (
     SecondaryRateLimitError,
 )
 from ..progress_tracker import MergeProgressTracker
+from ..url_parser import (
+    DEFAULT_GITHUB_HOST,
+    normalize_target,
+)
 from ._app import app, console
 from ._close import (
     _CloseContext,
@@ -41,6 +47,7 @@ from ._close import (
     _run_interactive_close,
     _validate_close_authorization,
 )
+from ._github_host import apply_github_host
 from ._pr_display import _display_pr_info
 
 
@@ -57,6 +64,15 @@ def close(
     ),
     token: str | None = typer.Option(
         None, "--token", help="GitHub token (or set GITHUB_TOKEN env var)"
+    ),
+    github_host: str | None = typer.Option(
+        None,
+        "--github-host",
+        help=(
+            "GitHub host to address, e.g. a GitHub Enterprise Server "
+            "install. Takes priority over DEPENDAMERGE_GITHUB_HOST and "
+            "GH_HOST, and declares the host as permitted."
+        ),
     ),
     override: str | None = typer.Option(
         None, "--override", help="SHA hash to override non-automation PR restriction"
@@ -98,10 +114,32 @@ def close(
 
     For user generated bulk PRs, use the --override flag with SHA hash.
     """
+    # Applied before anything parses a target: the flag sets both
+    # the host a shorthand resolves against and the set of hosts
+    # permitted at all.
+    apply_github_host(github_host)
+
     progress_tracker = None
 
     try:
-        github_client = _pkg.GitHubClient(token)
+        # Derive the host from the URL before building the client: a
+        # GitHub Enterprise Server install serves its API from
+        # different base URLs, and the client bakes those in at
+        # construction.  Normalise first, or a scheme-less target is
+        # read as a bare path and yields no host at all.
+        #
+        # Falling back to dotcom rather than None when the target names
+        # no host.  ``None`` makes the client consult the configured
+        # default, so a malformed ``GH_HOST`` reported *its* problem
+        # instead of the invalid URL the operator actually typed ---
+        # and configuring a host cannot make ``not a url`` valid.
+        # Valid shorthand has already resolved to an absolute host by
+        # this point, so nothing legitimate reaches the fallback.
+        target_host = (urlparse(normalize_target(pr_url)).hostname or "").lower()
+        github_client = _pkg.GitHubClient(
+            token,
+            host=target_host or DEFAULT_GITHUB_HOST,
+        )
         # GitHubClient resolves None -> GITHUB_TOKEN env var (raises if missing)
         assert github_client.token is not None
         token = github_client.token
@@ -129,6 +167,7 @@ def close(
         ctx = _CloseContext(
             token=token,
             github_client=github_client,
+            host=github_client.host,
             owner=owner,
             repo_name=repo_name,
             pr_number=pr_number,

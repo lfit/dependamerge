@@ -44,8 +44,20 @@ class TestGitHubClient:
 
     def test_parse_pr_url_invalid(self):
         client = GitHubClient(token="test_token")
+        # No pull-request path, so declaring the host could not help;
+        # the malformed-URL message is the right one.  See
+        # TestUndeclaredPullRequestUrlExplainsItself in
+        # tests/test_github_enterprise.py for the case that does get
+        # declaration guidance.
         with pytest.raises(ValueError, match="Invalid GitHub PR URL"):
             client.parse_pr_url("https://invalid-url.com")
+
+    def test_parse_pr_url_malformed_on_a_known_host(self):
+        client = GitHubClient(token="test_token")
+        # A permitted host with a path that is not a pull request keeps
+        # the original wording, since nothing needs declaring.
+        with pytest.raises(ValueError, match="Invalid GitHub PR URL"):
+            client.parse_pr_url("https://github.com/acme/widget")
 
     def test_parse_pr_url_with_files_path(self):
         client = GitHubClient(token="test_token")

@@ -19,8 +19,11 @@ from __future__ import annotations
 import re
 from urllib.parse import urlparse
 
+from .git_suffix import has_stray_git_suffix
 from .hosts import _host_matches
 from .models import ChangeSource, ParsedUrl, UrlParseError
+from .redaction import redact_target
+from .shorthand import normalize_target
 
 # aislop-ignore-file ai-slop/hardcoded-url -- This module parses and builds
 # GitHub/Gerrit URLs, so URL literals here are the subject matter, not
@@ -46,9 +49,10 @@ def parse_change_url(url: str) -> ParsedUrl:
     if not url:
         raise UrlParseError("URL cannot be empty")
 
-    # Ensure URL has a scheme
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
+    # Expand shorthand ("owner", "owner/repo"), git remote forms, and a
+    # missing scheme into an absolute URL.  Centralised so every parser
+    # understands the same set of abbreviations.
+    url = normalize_target(url)
 
     try:
         parsed = urlparse(url)
@@ -61,6 +65,16 @@ def parse_change_url(url: str) -> ParsedUrl:
     host = parsed.hostname.lower()
     path = parsed.path.rstrip("/")
 
+    if has_stray_git_suffix(path):
+        # A change is never a clone URL, so normalisation preserved the
+        # suffix to mark this malformed.  Refusing it here is what makes
+        # that stick: both shapes below accept trailing segments, so
+        # ``/pull/7/files.git`` matched pull request 7 regardless.
+        raise UrlParseError(
+            f"Not a change URL: {redact_target(url)}. The trailing '.git' belongs to a "
+            "clone URL, not to a pull request or change."
+        )
+
     # Detect platform based on URL characteristics
     if _is_github_url(host, path):
         return _parse_github_url(host, path, url)
@@ -68,7 +82,7 @@ def parse_change_url(url: str) -> ParsedUrl:
         return _parse_gerrit_url(host, path, url)
     else:
         raise UrlParseError(
-            f"Cannot determine platform for URL: {url}. "
+            f"Cannot determine platform for URL: {redact_target(url)}. "
             "Expected GitHub PR URL (containing /pull/) or "
             "Gerrit change URL (containing /c/.../+/)."
         )
@@ -213,9 +227,10 @@ def detect_source(url: str) -> ChangeSource:
     if not url:
         raise UrlParseError("URL cannot be empty")
 
-    # Ensure URL has a scheme for parsing
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
+    # Expand shorthand ("owner", "owner/repo"), git remote forms, and a
+    # missing scheme into an absolute URL.  Centralised so every parser
+    # understands the same set of abbreviations.
+    url = normalize_target(url)
 
     try:
         parsed = urlparse(url)

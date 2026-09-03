@@ -12,8 +12,15 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
-from .hosts import _host_matches
+from .git_suffix import has_stray_git_suffix
+from .hosts import (
+    is_supported_github_host,
+    reject_port_bearing_host,
+    unsupported_host_message,
+)
 from .models import ChangeSource, ParsedOrgUrl, ParsedRepoUrl, UrlParseError
+from .redaction import redact_target
+from .shorthand import default_github_host, looks_like_owner, normalize_target
 
 # aislop-ignore-file ai-slop/hardcoded-url -- This module parses and builds
 # GitHub/Gerrit URLs, so URL literals here are the subject matter, not
@@ -44,9 +51,10 @@ def parse_repo_url(url: str) -> ParsedRepoUrl:
     if not url:
         raise UrlParseError("URL cannot be empty")
 
-    # Ensure URL has a scheme
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
+    # Expand shorthand ("owner", "owner/repo"), git remote forms, and a
+    # missing scheme into an absolute URL.  Centralised so every parser
+    # understands the same set of abbreviations.
+    url = normalize_target(url)
 
     try:
         parsed = urlparse(url)
@@ -59,31 +67,40 @@ def parse_repo_url(url: str) -> ParsedRepoUrl:
     host = parsed.hostname.lower()
     path = parsed.path.rstrip("/")
 
-    # Only github.com and actual subdomains of github.com (e.g.
-    # foo.github.com) are accepted.  _host_matches() checks for an
-    # exact match or a *.github.com suffix, so hosts like
-    # github.enterprise.com (a subdomain of enterprise.com, NOT
-    # github.com) are correctly rejected.
-    #
-    # GitHub Enterprise Server installations use arbitrary hostnames
-    # (e.g. ghe.corp.example.com) that cannot be reliably distinguished
-    # from non-GitHub hosts without explicit configuration.  GHE support
-    # (both repo-merge and single-PR) requires host-aware API base URL
-    # configuration, which is not yet implemented.
-    if not _host_matches(host, "github.com"):
-        raise UrlParseError(
-            f"Repository URL parsing is only supported for "
-            f"github.com hosts (got host: {host}). "
-            f"Use a direct PR URL for non-GitHub hosts."
-        )
+    # github.com is always available; a GitHub Enterprise Server host is
+    # available once the operator has declared it.  Enterprise hostnames
+    # are arbitrary, so requiring a declaration is what stops a mistyped
+    # URL directing a token at an unintended host.  This is the single
+    # choke point for repository URLs --- do NOT scatter additional host
+    # checks elsewhere.
+    reject_port_bearing_host(parsed.netloc.lower(), "Repository")
+    if not is_supported_github_host(host):
+        raise UrlParseError(unsupported_host_message(host, "Repository"))
 
     # Try to extract owner/repo from the path
     # Expected: /owner/repo or /owner/repo/pulls
     # Strip the path, remove "pulls" suffix if present
     parts = [p for p in path.split("/") if p]
 
-    # Remove "pulls" suffix if present
-    if parts and parts[-1] == "pulls":
+    if parts and parts[0].lower() == "orgs":
+        # ``/orgs/<login>`` is GitHub's owner route, so its first
+        # segment is never a repository owner --- the name is reserved,
+        # and no account holds it.  Without this, an owner URL that the
+        # owner parser refuses falls through to here and is read as the
+        # repository ``acme.git`` under the owner ``orgs``, which simply
+        # moves a malformed target from one mode to another.
+        raise UrlParseError(
+            f"Not a repository URL: {redact_target(url)}. '/orgs/' introduces an owner, "
+            "so this names no repository. Drop the '/orgs/' prefix for a "
+            "repository, or give the owner URL to merge across it."
+        )
+
+    # Remove a "pulls" *page* suffix, which is what /owner/repo/pulls
+    # is.  Only when an owner and a repository remain: "pulls" is a
+    # legal repository name, and stripping it unconditionally left
+    # /owner/pulls as a single segment, so every repository actually
+    # called "pulls" was rejected as a malformed URL.
+    if len(parts) > 2 and parts[-1] == "pulls":
         parts = parts[:-1]
 
     if len(parts) < 2:
@@ -149,9 +166,10 @@ def parse_org_url(url: str) -> ParsedOrgUrl:
     if not url:
         raise UrlParseError("URL cannot be empty")
 
-    # Ensure URL has a scheme
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
+    # Expand shorthand ("owner", "owner/repo"), git remote forms, and a
+    # missing scheme into an absolute URL.  Centralised so every parser
+    # understands the same set of abbreviations.
+    url = normalize_target(url)
 
     try:
         parsed = urlparse(url)
@@ -164,18 +182,25 @@ def parse_org_url(url: str) -> ParsedOrgUrl:
     host = parsed.hostname.lower()
     path = parsed.path.rstrip("/")
 
-    # SECURITY: Only github.com and actual subdomains of github.com are
-    # accepted.  GitHub Enterprise Server (GHE) uses arbitrary hostnames
-    # that cannot be reliably distinguished from non-GitHub hosts without
-    # explicit configuration.  This github.com-only guard is the single
-    # choke point to relax when GHE owner-wide support is enabled (see
-    # derive_api_urls() and the GHE tracking issue) — do NOT scatter
-    # additional host checks elsewhere.
-    if not _host_matches(host, "github.com"):
+    # SECURITY: github.com is always available; a GitHub Enterprise
+    # Server host is available once the operator has declared it.
+    # Enterprise hostnames are arbitrary, so requiring a declaration is
+    # what stops a mistyped URL directing a token at an unintended
+    # host.  This is the single choke point for owner-wide URLs --- do
+    # NOT scatter additional host checks elsewhere.
+    reject_port_bearing_host(parsed.netloc.lower(), "Owner-wide")
+    if not is_supported_github_host(host):
+        raise UrlParseError(unsupported_host_message(host, "Owner-wide"))
+
+    if has_stray_git_suffix(path):
+        # Normalisation preserves the suffix on anything that is not a
+        # clone URL, and an owner path is never one.  Without this the
+        # marker achieved nothing: ``/acme.git`` simply became the owner
+        # ``acme.git`` and reached owner-wide dispatch anyway.
         raise UrlParseError(
-            f"Owner-wide URL parsing is only supported for github.com "
-            f"hosts (got host: {host}). GitHub Enterprise support is not "
-            f"yet enabled — use a direct PR URL for non-github.com hosts."
+            f"Not an owner URL: {redact_target(url)}. The trailing '.git' makes this a "
+            "clone URL for a repository, not an owner. Give the owner "
+            "on its own, or a repository URL."
         )
 
     parts = [p for p in path.split("/") if p]
@@ -214,6 +239,49 @@ def parse_org_url(url: str) -> ParsedOrgUrl:
         owner=owner,
         original_url=url,
     )
+
+
+def parse_owner_target(value: str) -> tuple[str, str]:
+    """Extract an owner login *and its host* from a CLI argument.
+
+    The companion to :func:`parse_owner_arg`, which returns the login
+    alone.  Dropping the host is safe only while github.com is the sole
+    possibility; with GitHub Enterprise Server hosts available, a
+    command that keeps the login and forgets the host accepts
+    ``https://ghe.example.com/acme`` and then scans ``acme`` on
+    github.com --- the wrong server, silently.
+
+    Args:
+        value: The raw CLI argument.
+
+    Returns:
+        An ``(owner, host)`` pair.  A bare login resolves against the
+        default host.
+
+    Raises:
+        UrlParseError: If ``value`` is empty or is a URL that is not a
+            recognised owner URL on a permitted host.
+    """
+    value = (value or "").strip()
+    if not value:
+        raise UrlParseError("Owner name or URL cannot be empty")
+
+    bare = value.rstrip("/")
+    if not bare:
+        raise UrlParseError("Owner name or URL cannot be empty")
+    if "/" not in bare and "://" not in bare:
+        if not looks_like_owner(bare):
+            # The same boundary the shorthand expansion enforces: text
+            # that cannot be a login is rejected rather than sent to
+            # the API as an owner that cannot exist.
+            raise UrlParseError(
+                f"Not a valid GitHub owner name: {bare!r}. Logins are "
+                "alphanumerics and hyphens, at most 39 characters."
+            )
+        return (bare, default_github_host())
+
+    parsed = parse_org_url(value)
+    return (parsed.owner, parsed.host)
 
 
 def parse_owner_arg(value: str) -> str:
@@ -269,6 +337,11 @@ def parse_owner_arg(value: str) -> str:
         # extract, so treat it the same as an empty value.
         raise UrlParseError("Owner name or URL cannot be empty")
     if "/" not in bare and "://" not in bare:
+        if not looks_like_owner(bare):
+            raise UrlParseError(
+                f"Not a valid GitHub owner name: {bare!r}. Logins are "
+                "alphanumerics and hyphens, at most 39 characters."
+            )
         return bare
 
     return parse_org_url(value).owner

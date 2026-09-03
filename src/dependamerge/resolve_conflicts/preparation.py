@@ -32,6 +32,7 @@ from ..git_ops import (
     fetch_branch,
 )
 from ..github_async import GitHubAsync
+from ..url_parser import clone_url_for, default_github_host, derive_api_urls
 from .models import FixOptions, PRContext, PRSelection
 
 _LOG = logging.getLogger("dependamerge.resolve_conflicts")
@@ -42,6 +43,7 @@ class _FixPreparationMixin:
 
     # Established by FixOrchestrator.__init__.
     _token: str
+    _host: str
     _progress: object | None
     _logger: Callable[[str], None]
 
@@ -72,7 +74,10 @@ class _FixPreparationMixin:
         """
         contexts: list[PRContext] = []
 
-        async with GitHubAsync(token=self._token) as api:
+        api_url, graphql_url = derive_api_urls(self._host or default_github_host())
+        async with GitHubAsync(
+            token=self._token, api_url=api_url, graphql_url=graphql_url
+        ) as api:
             tasks = []
             for sel in selections:
                 try:
@@ -111,7 +116,7 @@ class _FixPreparationMixin:
         head_branch = head.get("ref") or ""
         base_full = base_repo.get("full_name") or f"{owner}/{repo}"
         head_full = head_repo.get("full_name") or base_full
-        base_clone = base_repo.get("clone_url") or f"https://github.com/{base_full}.git"
+        base_clone = base_repo.get("clone_url") or clone_url_for(self._host, base_full)
         head_clone = head_repo.get("clone_url") or base_clone
         is_fork = bool(head_repo.get("fork")) if head_repo else False
         maint_mod = bool(data.get("maintainer_can_modify"))

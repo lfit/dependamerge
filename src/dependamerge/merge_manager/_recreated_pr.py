@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..github_async import PermissionError as GitHubPermissionError
 from ..models import PullRequestInfo
+from ..url_parser import pull_request_url_for
 from ._base import _MergeManagerBase
 from ._types import RecreateOutcome, RecreateResult
 
@@ -69,7 +70,7 @@ class _RecreatedPullRequestMixin(_MergeManagerBase):
 
         full_name = f"{repo_owner}/{repo_name}"
         html_url = pr_data.get(
-            "html_url", f"https://github.com/{full_name}/pull/{new_number}"
+            "html_url", pull_request_url_for(self.host, full_name, new_number)
         )
 
         self._pr_status(
@@ -160,7 +161,7 @@ class _RecreatedPullRequestMixin(_MergeManagerBase):
             files_changed=[],
             repository_full_name=full_name,
             html_url=pr_data.get(
-                "html_url", f"https://github.com/{full_name}/pull/{new_number}"
+                "html_url", pull_request_url_for(self.host, full_name, new_number)
             ),
         )
 
