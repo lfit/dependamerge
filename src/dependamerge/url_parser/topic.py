@@ -15,6 +15,7 @@ import re
 from urllib.parse import unquote, urlparse
 
 from .models import ChangeSource, ParsedGerritTopicUrl, UrlParseError
+from .redaction import redact_target
 from .shorthand import looks_like_host, normalize_target
 
 _SCHEME_RE = re.compile(r"\A[A-Za-z][A-Za-z0-9+.-]*://")
@@ -86,7 +87,7 @@ def parse_gerrit_topic_url(url: str) -> ParsedGerritTopicUrl:
     # against github.com.  A Gerrit search has to name its own host.
     if not _names_a_host(original_url):
         raise UrlParseError(
-            f"Not a Gerrit search URL (no host): {original_url}. "
+            f"Not a Gerrit search URL (no host): {redact_target(original_url)}. "
             "A topic search must name the Gerrit server, as in "
             "gerrit.example.org/q/topic:release."
         )
@@ -113,7 +114,7 @@ def parse_gerrit_topic_url(url: str) -> ParsedGerritTopicUrl:
         segments = [s for s in path.split("/") if s]
         if "q" not in segments:
             raise UrlParseError(
-                f"Not a Gerrit search URL (no /q/ segment): {original_url}"
+                f"Not a Gerrit search URL (no /q/ segment): {redact_target(original_url)}"
             )
         q_index = segments.index("q")
         base_segments = segments[:q_index]
@@ -121,7 +122,7 @@ def parse_gerrit_topic_url(url: str) -> ParsedGerritTopicUrl:
 
     if not query_expr:
         raise UrlParseError(
-            f"Gerrit search URL contains no query expression: {original_url}"
+            f"Gerrit search URL contains no query expression: {redact_target(original_url)}"
         )
 
     # Gerrit search URLs separate terms with '+' (rendered as space).

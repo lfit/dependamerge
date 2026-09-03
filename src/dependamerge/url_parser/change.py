@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 from .git_suffix import has_stray_git_suffix
 from .hosts import _host_matches
 from .models import ChangeSource, ParsedUrl, UrlParseError
+from .redaction import redact_target
 from .shorthand import normalize_target
 
 # aislop-ignore-file ai-slop/hardcoded-url -- This module parses and builds
@@ -70,7 +71,7 @@ def parse_change_url(url: str) -> ParsedUrl:
         # that stick: both shapes below accept trailing segments, so
         # ``/pull/7/files.git`` matched pull request 7 regardless.
         raise UrlParseError(
-            f"Not a change URL: {url}. The trailing '.git' belongs to a "
+            f"Not a change URL: {redact_target(url)}. The trailing '.git' belongs to a "
             "clone URL, not to a pull request or change."
         )
 
@@ -81,7 +82,7 @@ def parse_change_url(url: str) -> ParsedUrl:
         return _parse_gerrit_url(host, path, url)
     else:
         raise UrlParseError(
-            f"Cannot determine platform for URL: {url}. "
+            f"Cannot determine platform for URL: {redact_target(url)}. "
             "Expected GitHub PR URL (containing /pull/) or "
             "Gerrit change URL (containing /c/.../+/)."
         )

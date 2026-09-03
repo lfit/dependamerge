@@ -19,6 +19,7 @@ from .hosts import (
     unsupported_host_message,
 )
 from .models import ChangeSource, ParsedOrgUrl, ParsedRepoUrl, UrlParseError
+from .redaction import redact_target
 from .shorthand import default_github_host, looks_like_owner, normalize_target
 
 # aislop-ignore-file ai-slop/hardcoded-url -- This module parses and builds
@@ -89,7 +90,7 @@ def parse_repo_url(url: str) -> ParsedRepoUrl:
         # repository ``acme.git`` under the owner ``orgs``, which simply
         # moves a malformed target from one mode to another.
         raise UrlParseError(
-            f"Not a repository URL: {url}. '/orgs/' introduces an owner, "
+            f"Not a repository URL: {redact_target(url)}. '/orgs/' introduces an owner, "
             "so this names no repository. Drop the '/orgs/' prefix for a "
             "repository, or give the owner URL to merge across it."
         )
@@ -197,7 +198,7 @@ def parse_org_url(url: str) -> ParsedOrgUrl:
         # marker achieved nothing: ``/acme.git`` simply became the owner
         # ``acme.git`` and reached owner-wide dispatch anyway.
         raise UrlParseError(
-            f"Not an owner URL: {url}. The trailing '.git' makes this a "
+            f"Not an owner URL: {redact_target(url)}. The trailing '.git' makes this a "
             "clone URL for a repository, not an owner. Give the owner "
             "on its own, or a repository URL."
         )

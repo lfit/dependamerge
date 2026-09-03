@@ -29,6 +29,7 @@ from ..url_parser import (
     has_stray_git_suffix,
     is_supported_github_host,
     normalize_target,
+    redact_target,
     reject_port_bearing_host,
     unsupported_host_message,
 )
@@ -140,7 +141,7 @@ class GitHubClient(_GitHubQueryMixin, _GitHubActionMixin, _GitHubStatusMixin):
                 and not has_stray_git_suffix(parsed.path)
             ):
                 raise UrlParseError(unsupported_host_message(host, "Pull request"))
-            raise UrlParseError(f"Invalid GitHub PR URL: {url}")
+            raise UrlParseError(f"Invalid GitHub PR URL: {redact_target(url)}")
 
         # This client's API base URLs were fixed at construction, so a
         # URL naming a *different* permitted host would be acted on
@@ -168,12 +169,12 @@ class GitHubClient(_GitHubQueryMixin, _GitHubActionMixin, _GitHubStatusMixin):
             # ``/pull/7/files.git`` still matched pull request 7 and the
             # suffix normalisation preserved achieved nothing.
             raise UrlParseError(
-                f"Invalid GitHub PR URL: {url}. The trailing '.git' "
+                f"Invalid GitHub PR URL: {redact_target(url)}. The trailing '.git' "
                 "belongs to a clone URL, not to a pull request."
             )
         match = _PR_PATH_RE.match(parsed.path)
         if match is None:
-            raise UrlParseError(f"Invalid GitHub PR URL: {url}")
+            raise UrlParseError(f"Invalid GitHub PR URL: {redact_target(url)}")
         return (
             match.group("owner"),
             match.group("repo"),

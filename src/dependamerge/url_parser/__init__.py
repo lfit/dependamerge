@@ -57,6 +57,7 @@ from .models import (
     ParsedUrl,
     UrlParseError,
 )
+from .redaction import redact_target
 from .repos import (
     parse_org_url,
     parse_owner_arg,
@@ -106,6 +107,7 @@ __all__ = [
     "reject_port_bearing_host",
     "set_github_host",
     "has_stray_git_suffix",
+    "redact_target",
     "strip_git_suffix",
     "unsupported_host_message",
 ]

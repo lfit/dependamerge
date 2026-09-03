@@ -23,6 +23,7 @@ from dependamerge.url_parser import (
     parse_org_url,
     parse_owner_arg,
     parse_repo_url,
+    redact_target,
 )
 from dependamerge.url_parser.models import UrlParseError
 from dependamerge.url_parser.shorthand import (
@@ -329,6 +330,80 @@ class TestDefaultHostIsResolvedLazily:
         # is the one that must still complain.
         with pytest.raises(UrlParseError, match="names a port"):
             normalize_target("acme/widget")
+
+
+class TestNoTargetReachesOutputWithCredentials:
+    """Every parser error is sanitised, not just the ones found so far.
+
+    A credential leaked into output five separate times on this branch
+    --- a git remote logged with its password, a configuration value
+    echoed verbatim, a network-path reference that skipped stripping,
+    an API authority read from ``netloc``, and then the very errors
+    added to fix the fourth.  Each was fixed where it was found, which
+    is why there was a fifth.
+
+    This sweeps every refusal that names a target, so a message added
+    later is covered by an existing test rather than by its author
+    remembering.
+    """
+
+    SECRET = "ghp_SECRETTOKEN"
+
+    @pytest.mark.parametrize(
+        ("parser", "target"),
+        [
+            (parse_change_url, "https://github.com/acme/widget/pull/7.git?token=S"),
+            (parse_change_url, "https://github.com/nope?token=S"),
+            (parse_repo_url, "https://github.com/orgs/acme/widget?token=S"),
+            (parse_repo_url, "https://github.com/nope?token=S"),
+            (parse_org_url, "https://github.com/acme.git?token=S"),
+            (parse_gerrit_topic_url, "q/topic:x?token=S"),
+            (parse_gerrit_topic_url, "https://gerrit.example.org/nope?token=S"),
+        ],
+    )
+    def test_a_query_credential_never_reaches_the_message(self, parser, target):
+        with pytest.raises(UrlParseError) as excinfo:
+            parser(target.replace("token=S", f"token={self.SECRET}"))
+
+        assert "SECRETTOKEN" not in str(excinfo.value).upper()
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "https://github.com/a/b/pull/7/files.git?token=S",
+            "https://user:S@github.com/a/b",
+        ],
+    )
+    def test_the_client_sanitises_too(self, target):
+        with pytest.raises(ValueError) as excinfo:
+            GitHubClient("t").parse_pr_url(target.replace("S", self.SECRET))
+
+        assert "SECRETTOKEN" not in str(excinfo.value).upper()
+
+    def test_the_message_still_identifies_the_target(self):
+        # Redaction must not reduce these to unactionable complaints:
+        # asserting only the secret's absence would pass if the target
+        # were dropped altogether.
+        with pytest.raises(UrlParseError) as excinfo:
+            parse_org_url(f"https://github.com/acme.git?token={self.SECRET}")
+
+        assert "https://github.com/acme.git" in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("https://u:pw@h/a/b", "https://***@h/a/b"),
+            ("https://h/a/b?token=x", "https://h/a/b"),
+            ("https://h/a/b#token=x", "https://h/a/b"),
+            ("https://h/a/b", "https://h/a/b"),
+            ("", ""),
+            # A bare ``a@b`` is a path segment, not userinfo, so the
+            # pattern requires a scheme before it.
+            ("acme/wid@get", "acme/wid@get"),
+        ],
+    )
+    def test_the_sanitiser_itself(self, raw, expected):
+        assert redact_target(raw) == expected
 
 
 class TestTheRemedyMatchesTheFault:
