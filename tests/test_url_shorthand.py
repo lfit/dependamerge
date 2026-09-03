@@ -373,6 +373,47 @@ class TestAConfiguredHostMustBeBare:
 
         assert default_github_host() == expected
 
+    @pytest.mark.parametrize(
+        "configured",
+        [
+            # Reaches the *port* branch, because the text after the
+            # colon looks like one --- which is how a pasted URL leaks
+            # its token through an error message.
+            "https://user:ghp_SECRETTOKEN@host",
+            "ghe.example.com?token=ghp_SECRETTOKEN",
+            "ghe.example.com#ghp_SECRETTOKEN",
+        ],
+    )
+    def test_a_rejected_value_is_not_echoed_verbatim(self, configured, monkeypatch):
+        # These messages describe a value the operator got wrong, and
+        # pasting a whole URL is a plausible way to get it wrong.
+        #
+        # Credentials live in the userinfo, the query and the fragment,
+        # so those go.  The hostname itself stays: it is not a secret,
+        # and it is the part that tells the operator which setting is
+        # at fault.
+        monkeypatch.setenv("GH_HOST", configured)
+
+        with pytest.raises(UrlParseError) as excinfo:
+            default_github_host()
+
+        assert "SECRETTOKEN" not in str(excinfo.value).upper()
+
+    def test_the_message_still_identifies_the_mistake(self, monkeypatch):
+        # Redaction must not reduce this to an unactionable complaint:
+        # asserting only the secret's absence would pass if the value
+        # were dropped altogether.
+        monkeypatch.setenv("GH_HOST", "https://user:ghp_SECRETTOKEN@ghe.example.com")
+
+        with pytest.raises(UrlParseError, match=r"\*\*\*@ghe\.example\.com"):
+            default_github_host()
+
+    def test_a_value_with_no_secret_is_shown_in_full(self, monkeypatch):
+        monkeypatch.setenv("GH_HOST", "broken:8443")
+
+        with pytest.raises(UrlParseError, match="broken:8443"):
+            default_github_host()
+
 
 class TestMalformedTargetsAreRefusedEndToEnd:
     """Preserving ``.git`` only helps if a parser then refuses it.

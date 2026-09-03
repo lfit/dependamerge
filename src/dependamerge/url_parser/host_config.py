@@ -167,6 +167,32 @@ def default_github_host() -> str:
     return DEFAULT_GITHUB_HOST
 
 
+def _safe_to_show(host: str) -> str:
+    """Redact a rejected configuration value before it reaches output.
+
+    These messages describe a value the operator got *wrong*, and a
+    plausible way to get it wrong is to paste a whole URL --- which may
+    carry a token in its userinfo or query string.  An accidentally
+    pasted ``https://user:TOKEN@host`` reaches the port branch, because
+    the text after the colon looks like a port, so echoing the value
+    verbatim printed the token to the terminal and into any captured
+    log.
+
+    The shape is what makes the message actionable, not the secret, so
+    enough is kept to recognise the mistake.
+
+    Args:
+        host: The reduced configuration value.
+
+    Returns:
+        The value with any credentials removed.
+    """
+    without_query = host.split("?", 1)[0].split("#", 1)[0]
+    if "@" in without_query:
+        return f"***@{without_query.rsplit('@', 1)[-1]}"
+    return without_query
+
+
 def _clean_host(value: str) -> str:
     """Reduce a configured value to a bare lowercase hostname.
 
@@ -192,18 +218,20 @@ def _clean_host(value: str) -> str:
         return ""
     name, _, port = host.rpartition(":")
     if name and port:
+        shown = _safe_to_show(host)
         raise UrlParseError(
-            f"Configured GitHub host {host!r} names a port, which is not "
+            f"Configured GitHub host {shown!r} names a port, which is not "
             "supported: the port cannot be carried through to the API "
-            f"base URL, so requests would go to {name} on the default "
-            "port instead. Configure the host without a port."
+            f"base URL, so requests would go to {_safe_to_show(name)} on "
+            "the default port instead. Configure the host without a port."
         )
     if not _HOSTNAME_RE.match(host):
         raise UrlParseError(
-            f"Configured GitHub host {host!r} is not a bare hostname. "
-            "Credentials, paths and query strings are not accepted here, "
-            "because a value of that shape addresses a different server "
-            "than it appears to. Configure the hostname on its own."
+            f"Configured GitHub host {_safe_to_show(host)!r} is not a bare "
+            "hostname. Credentials, paths and query strings are not "
+            "accepted here, because a value of that shape addresses a "
+            "different server than it appears to. Configure the hostname "
+            "on its own."
         )
     return host
 
