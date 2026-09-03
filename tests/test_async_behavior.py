@@ -55,7 +55,7 @@ class TestGitHubAsyncCore:
             mock_response = Mock()
             mock_response.status_code = 200
             mock_response.json.return_value = {"test": "data"}
-            mock_response.headers = {}
+            mock_response.headers = {"content-type": "application/json"}
             mock_client.request.return_value = mock_response
 
             api = GitHubAsync(token="test_token", max_concurrency=2)
@@ -95,7 +95,7 @@ class TestGitHubAsyncCore:
             success_response = Mock()
             success_response.status_code = 200
             success_response.json.return_value = {"success": True}
-            success_response.headers = {}
+            success_response.headers = {"content-type": "application/json"}
 
             mock_client.request.side_effect = [rate_limit_response, success_response]
 
@@ -125,7 +125,7 @@ class TestGitHubAsyncCore:
             error_response.json.return_value = {
                 "errors": [{"message": "Field 'invalidField' doesn't exist"}]
             }
-            error_response.headers = {}
+            error_response.headers = {"content-type": "application/json"}
 
             mock_client.request.return_value = error_response
 
@@ -154,7 +154,7 @@ class TestGitHubAsyncCore:
             success_response = Mock()
             success_response.status_code = 200
             success_response.json.return_value = {"recovered": True}
-            success_response.headers = {}
+            success_response.headers = {"content-type": "application/json"}
 
             mock_client.request.side_effect = [
                 secondary_limit_response,
@@ -534,7 +534,9 @@ class TestAsyncPaginationPatterns:
             page1_response = Mock()
             page1_response.status_code = 200
             page1_response.json.return_value = [{"item": 1}, {"item": 2}]
-            page1_response.headers = {}  # No next page link
+            page1_response.headers = {
+                "content-type": "application/json"
+            }  # No next page link
 
             mock_client.request.return_value = page1_response
 
@@ -566,7 +568,7 @@ class TestAsyncPaginationPatterns:
             empty_response = Mock()
             empty_response.status_code = 200
             empty_response.json.return_value = []
-            empty_response.headers = {}
+            empty_response.headers = {"content-type": "application/json"}
 
             mock_client.request.return_value = empty_response
 
@@ -607,7 +609,7 @@ class TestAsyncConcurrencyLimits:
             response = Mock()
             response.status_code = 200
             response.json.return_value = {"done": True}
-            response.headers = {}
+            response.headers = {"content-type": "application/json"}
             return response
 
         with patch("httpx.AsyncClient") as mock_client_class:
@@ -643,12 +645,12 @@ class TestAsyncRetryPatterns:
             error_response = Mock()
             error_response.status_code = 503
             error_response.text = "Service temporarily unavailable"
-            error_response.headers = {}
+            error_response.headers = {"content-type": "application/json"}
 
             success_response = Mock()
             success_response.status_code = 200
             success_response.json.return_value = {"recovered": True}
-            success_response.headers = {}
+            success_response.headers = {"content-type": "application/json"}
 
             mock_client.request.side_effect = [
                 error_response,
@@ -680,7 +682,7 @@ class TestAsyncRetryPatterns:
             error_response = Mock()
             error_response.status_code = 404
             error_response.text = "Not found"
-            error_response.headers = {}
+            error_response.headers = {"content-type": "application/json"}
             error_response.raise_for_status.side_effect = httpx.HTTPStatusError(
                 "404 Not Found", request=Mock(), response=error_response
             )

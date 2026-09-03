@@ -131,18 +131,29 @@ class TestBodiesThatCannotBeJson:
             "application/json; charset=utf-8",
             "application/vnd.github+json",
             "application/vnd.github.v3+json; charset=utf-8",
-            None,
         ],
     )
     async def test_json_content_types_are_accepted(self, content_type):
-        # The complement.  GitHub answers with the vendor media type, so
-        # a naive "application/json" equality test would reject every
-        # real response.  An absent header is allowed too: the body then
-        # settles it, and refusing outright would reject responses that
-        # parse perfectly well.
+        # GitHub answers with the vendor media type, so a naive
+        # "application/json" equality test would reject every real
+        # response.
         api = _client(_responder(200, b'{"ok": true}', content_type))
         try:
             assert await api.get("/repos/o/r") == {"ok": True}
+        finally:
+            await api._client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_a_missing_content_type_is_refused(self, single_attempt):
+        # Silence has not said the body is JSON, and a header-stripping
+        # intermediary is indistinguishable from the API at that point.
+        # This was permitted at first, on the grounds that the body
+        # settles it --- which contradicted the rule the module works
+        # to, that nothing is parsed until something declares it JSON.
+        api = _client(_responder(200, b'{"ok": true}', None))
+        try:
+            with pytest.raises(RetryableError, match="content-type"):
+                await api.get("/repos/o/r")
         finally:
             await api._client.aclose()
 
@@ -330,6 +341,26 @@ class TestRetryBoundsDoNotMultiply:
             await api._client.aclose()
 
         assert attempts["n"] == 6
+
+    @pytest.mark.asyncio
+    async def test_an_exhausted_graphql_retry_is_still_a_retryable_error(
+        self, no_backoff
+    ):
+        # ``RetryableError`` is exported from the package, so callers
+        # may catch it.  Before the GraphQL faults were given their own
+        # type they surfaced as that, so the narrower type subclasses
+        # it rather than standing beside it.
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, content=b"{}", headers={"content-type": "application/json"}
+            )
+
+        api = _client(handler)
+        try:
+            with pytest.raises(RetryableError):
+                await api.graphql("query { viewer { login } }")
+        finally:
+            await api._client.aclose()
 
     @pytest.mark.asyncio
     async def test_a_transient_graphql_fault_still_retries(self):

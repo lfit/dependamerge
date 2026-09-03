@@ -56,13 +56,23 @@ from ._throttling import _maybe_await
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 
-class _GraphQLRetry(Exception):
+class _GraphQLRetry(RetryableError):
     """A GraphQL-level fault worth another attempt.
 
-    Distinct from :class:`RetryableError` on purpose.  Transport and
-    decode faults are retried inside ``_request_json``; if the GraphQL
-    loop caught the same type it would retry them a second time, and
-    the two bounds would multiply.
+    Distinct from a plain :class:`RetryableError` so the GraphQL loop
+    can retry its own faults without also re-retrying transport and
+    decode faults, which ``_request_json`` has already exhausted ---
+    sharing one type multiplied the two bounds.
+
+    It *subclasses* ``RetryableError`` rather than standing apart
+    because that type is exported from the package: when these retries
+    are exhausted the exception reaches callers, and before this split
+    it reached them as ``RetryableError``.  Subclassing keeps that
+    contract while still letting the loop select on the narrower type.
+
+    The direction that matters is one-way: a transport failure is not a
+    ``_GraphQLRetry``, so the loop still cannot catch one, and the
+    six-attempt bound holds.
     """
 
 

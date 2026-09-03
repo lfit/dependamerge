@@ -49,13 +49,18 @@ def _looks_like_json(content_type: str) -> bool:
 
     Accepts ``application/json`` and the ``+json`` structured-suffix
     family (``application/vnd.github+json``), ignoring parameters such
-    as ``; charset=utf-8``.  An absent content-type is treated as JSON,
-    because the body itself then settles it and refusing outright would
-    reject responses that parse perfectly well.
+    as ``; charset=utf-8``.
+
+    An absent media type is *not* accepted.  The rule this module works
+    to is that a body is parsed only once something has said it is
+    JSON, and silence has not said so --- a header-stripping proxy and
+    a genuine API response are indistinguishable at that point.  The
+    cost of being wrong is a retry and then a clear message, which is
+    the failure this branch exists to produce rather than avoid.
     """
     media_type = content_type.split(";", 1)[0].strip().lower()
     if not media_type:
-        return True
+        return False
     return media_type == "application/json" or media_type.endswith("+json")
 
 

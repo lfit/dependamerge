@@ -74,7 +74,9 @@ class TestTokenScopes:
     async def test_fine_grained_token_returns_none(self):
         api = _make_api()
         resp = Mock()
-        resp.headers = {}  # fine-grained / app tokens omit the header
+        resp.headers = {
+            "content-type": "application/json"
+        }  # fine-grained / app tokens omit the header
         api._request = AsyncMock(return_value=resp)
 
         assert await api.get_token_scopes() is None
