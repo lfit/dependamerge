@@ -320,6 +320,42 @@ class TestDefaultHostIsResolvedLazily:
             normalize_target("acme/widget")
 
 
+class TestNetworkPathReferences:
+    """``//host/path`` names a host, despite starting with a slash.
+
+    It was caught by the rooted-path exemption and returned untouched,
+    which skipped credential stripping: ``urlparse`` reads
+    ``user:SECRET@github.com`` as the authority, so the secret survived
+    into the parsed URL and into any error quoting the netloc.
+    """
+
+    def test_credentials_are_stripped(self):
+        assert (
+            normalize_target("//user:ghp_SECRETTOKEN@github.com/acme/widget")
+            == "https://github.com/acme/widget"
+        )
+
+    def test_the_plain_form_resolves(self):
+        assert (
+            normalize_target("//github.com/acme/widget")
+            == "https://github.com/acme/widget"
+        )
+
+    def test_a_port_error_does_not_echo_the_secret(self):
+        # The port check quotes the netloc, so an unstripped authority
+        # put the token straight into the message.
+        with pytest.raises(UrlParseError) as excinfo:
+            parse_repo_url("//user:ghp_SECRETTOKEN@github.com:8443/acme/widget")
+
+        assert "SECRETTOKEN" not in str(excinfo.value).upper()
+        assert "github.com:8443" in str(excinfo.value)
+
+    def test_a_rooted_path_is_still_left_alone(self):
+        # The complement: one slash names no host, and expanding it
+        # would turn a hostname error into a silent guess.
+        assert normalize_target("/acme/widget") == "/acme/widget"
+
+
 class TestAConfiguredHostMustBeBare:
     """A configured host decides where the token goes, so it is trusted.
 

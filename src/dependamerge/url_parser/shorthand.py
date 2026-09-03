@@ -197,6 +197,17 @@ def normalize_target(value: str, *, default_host: str | None = None) -> str:
     if not value:
         return value
 
+    # A network-path reference ("//host/path") names a host despite
+    # starting with a slash, so it has to be handled before the rooted
+    # exemption below.  Left to that branch it was returned untouched,
+    # which skipped credential stripping entirely: ``urlparse`` reads
+    # ``user:SECRET@github.com`` as the authority, so the secret
+    # survived into the parsed URL and into any error quoting the
+    # netloc.  Treated as the web URL it is, which strips userinfo and
+    # keeps the port for the port check to reject.
+    if value.startswith("//"):
+        return _rebuild("https://" + _strip_userinfo(value[2:], strip_port=False))
+
     # A rooted path names no host and is not a shorthand --- nobody
     # types "/owner/repo" to mean an abbreviation.  Left alone so the
     # parsers still reject it with "URL must include a hostname" rather
