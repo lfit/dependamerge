@@ -423,6 +423,43 @@ class TestObjectEndpointsRefuseAnArray:
         finally:
             await api._client.aclose()
 
+    @pytest.mark.asyncio
+    async def test_an_array_is_retried_like_any_other_bad_body(self, no_backoff):
+        # The check has to sit *inside* the retried scope.  Applied at
+        # the calling verb it ran after the retries had finished and
+        # after success was recorded, so a transient array raised once,
+        # was never retried, and still counted as healthy.
+        attempts = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts["n"] += 1
+            body = b"[]" if attempts["n"] <= 2 else b'{"recovered": true}'
+            return httpx.Response(
+                200, content=body, headers={"content-type": "application/json"}
+            )
+
+        api = _client(handler)
+        try:
+            assert await api.post("/repos/o/r") == {"recovered": True}
+        finally:
+            await api._client.aclose()
+
+        assert attempts["n"] == 3
+
+    @pytest.mark.asyncio
+    async def test_an_array_is_tracked_as_an_error(self, no_backoff):
+        # And the throttler must see it, for the same reason a
+        # malformed body must: an array where an object was documented
+        # means something other than the API answered.
+        api = _client(_responder(200, b"[]", "application/json"))
+        try:
+            with pytest.raises(RetryableError):
+                await api.post("/repos/o/r")
+        finally:
+            await api._client.aclose()
+
+        assert len(api._error_history) == 6
+
 
 class TestTheSnippetDoesNotDecodeEverything:
     """Quoting the body must not cost the size of the body.

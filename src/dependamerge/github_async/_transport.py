@@ -163,7 +163,7 @@ class _TransportMixin(_GitHubAsyncBase):
 
     @_transport_retry()
     async def _request_json(
-        self, method: str, url: str, **kwargs
+        self, method: str, url: str, *, require_object: bool = False, **kwargs
     ) -> tuple[httpx.Response, dict[str, Any] | list[Any]]:
         """Perform a request and decode its JSON body, retrying both.
 
@@ -172,12 +172,18 @@ class _TransportMixin(_GitHubAsyncBase):
         upstream trouble, so it should be retried like any other, rather
         than escaping as a decode failure that matches no predicate.
 
-        Success is recorded *after* decoding, not before.  The throttler
-        infers load from the ratio of tracked errors to tracked
-        requests, so counting a malformed body as a success would keep
-        the error rate looking healthy during precisely the upstream
-        trouble that produces malformed bodies --- and it would then
-        decline to back off.
+        ``require_object`` belongs here for the same reason, rather than
+        at the calling verb.  Applied afterwards it sat outside the
+        retried scope and after success had been recorded, so an array
+        where an object was documented raised once, was never retried,
+        and was still counted as a healthy request.
+
+        Success is recorded *after* every check, not before.  The
+        throttler infers load from the ratio of tracked errors to
+        tracked requests, so counting a malformed body as a success
+        would keep the error rate looking healthy during precisely the
+        upstream trouble that produces malformed bodies --- and it would
+        then decline to back off.
 
         Returns the response alongside the body, because a caller may
         still need the headers --- pagination reads ``Link``.
@@ -185,6 +191,8 @@ class _TransportMixin(_GitHubAsyncBase):
         r = await self._request_once(method, url, **kwargs)
         try:
             body = decode_json_body(r, method, url)
+            if require_object:
+                body = require_json_object(body, r, method, url)
         except RetryableError:
             self._track_error("transient_error")
             raise
@@ -206,6 +214,15 @@ class _TransportMixin(_GitHubAsyncBase):
             await self._request_json(method, url, **kwargs),
         )
 
+    async def _fetch_object(self, method: str, url: str, **kwargs) -> dict[str, Any]:
+        """Fetch a body the endpoint documents as an object.
+
+        The narrowing happens inside the retried scope, so the cast here
+        follows a check rather than replacing one.
+        """
+        _, body = await self._fetch_json(method, url, require_object=True, **kwargs)
+        return cast("dict[str, Any]", body)
+
     async def get(
         self, path: str, params: dict[str, Any] | None = None
     ) -> dict[str, Any] | list[Any]:
@@ -215,23 +232,17 @@ class _TransportMixin(_GitHubAsyncBase):
     async def post(
         self, path: str, json: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        url = f"{self.api_url}{path}"
-        r, body = await self._fetch_json("POST", url, json=json)
-        return require_json_object(body, r, "POST", url)
+        return await self._fetch_object("POST", f"{self.api_url}{path}", json=json)
 
     async def put(
         self, path: str, json: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        url = f"{self.api_url}{path}"
-        r, body = await self._fetch_json("PUT", url, json=json)
-        return require_json_object(body, r, "PUT", url)
+        return await self._fetch_object("PUT", f"{self.api_url}{path}", json=json)
 
     async def patch(
         self, path: str, json: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        url = f"{self.api_url}{path}"
-        r, body = await self._fetch_json("PATCH", url, json=json)
-        return require_json_object(body, r, "PATCH", url)
+        return await self._fetch_object("PATCH", f"{self.api_url}{path}", json=json)
 
     async def graphql(
         self, query: str, variables: dict[str, Any] | None = None
