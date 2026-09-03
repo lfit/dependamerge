@@ -33,6 +33,15 @@ DEFAULT_GITHUB_HOST = "github.com"
 #: shorthand behaviour here without configuring anything twice.
 _HOST_ENV_VARS = ("DEPENDAMERGE_GITHUB_HOST", "GH_HOST")
 
+#: A bare hostname: dot-separated labels of letters, digits and
+#: hyphens.  Anything else in a configured value --- userinfo above
+#: all --- makes the string address a different server than it looks
+#: like, so it is refused rather than trimmed.
+_HOSTNAME_RE = re.compile(
+    r"\A[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\Z"
+)
+
 #: Host named by ``--github-host`` on the command line, if any.
 #:
 #: Process-wide because it is process-wide configuration: the flag is a
@@ -98,13 +107,19 @@ def iter_enterprise_hosts() -> Iterator[str]:
 
     if _HOST_OVERRIDE and _fresh(_HOST_OVERRIDE):
         yield _HOST_OVERRIDE
+    # Single-host settings first, matching the order
+    # :func:`default_github_host` resolves them in.  Reading the
+    # declaration list first meant a malformed entry there raised
+    # before a valid, higher-priority default could match --- the same
+    # ineffective precedence this laziness was added to fix, just one
+    # source further along.
+    for name in _HOST_ENV_VARS:
+        host = _clean_host(os.environ.get(name) or "")
+        if _fresh(host):
+            yield host
     raw = os.environ.get("DEPENDAMERGE_GITHUB_HOSTS") or ""
     for candidate in raw.split(","):
         host = _clean_host(candidate)
-        if _fresh(host):
-            yield host
-    for name in _HOST_ENV_VARS:
-        host = _clean_host(os.environ.get(name) or "")
         if _fresh(host):
             yield host
 
@@ -161,8 +176,16 @@ def _clean_host(value: str) -> str:
     into a URL its own parser then rejects, or quietly address port
     443.
 
+    Raises anything that is not a bare hostname, for a sharper reason.
+    A configured value is *trusted*: it decides where the token goes.
+    Stripping only the scheme and path left userinfo in place, so
+    ``https://github.com@evil.example`` reduced to the "host"
+    ``github.com@evil.example`` --- which passed the declaration check
+    by looking like github.com, and then addressed ``evil.example``,
+    because that is the authority a URL of that shape actually names.
+
     Raises:
-        UrlParseError: If the configured value names a port.
+        UrlParseError: The value names a port, or is not a hostname.
     """
     host = _strip_scheme(value.strip()).strip("/").split("/", 1)[0].lower()
     if not host:
@@ -174,6 +197,13 @@ def _clean_host(value: str) -> str:
             "supported: the port cannot be carried through to the API "
             f"base URL, so requests would go to {name} on the default "
             "port instead. Configure the host without a port."
+        )
+    if not _HOSTNAME_RE.match(host):
+        raise UrlParseError(
+            f"Configured GitHub host {host!r} is not a bare hostname. "
+            "Credentials, paths and query strings are not accepted here, "
+            "because a value of that shape addresses a different server "
+            "than it appears to. Configure the hostname on its own."
         )
     return host
 

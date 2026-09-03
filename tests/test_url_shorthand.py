@@ -320,6 +320,60 @@ class TestDefaultHostIsResolvedLazily:
             normalize_target("acme/widget")
 
 
+class TestAConfiguredHostMustBeBare:
+    """A configured host decides where the token goes, so it is trusted.
+
+    Stripping only the scheme and path left userinfo in place, and a
+    URL of that shape addresses the authority *after* the ``@``. So
+    ``https://github.com@evil.example`` reduced to a "host" that passed
+    the declaration check by looking like github.com, then sent the
+    token to ``evil.example``.
+    """
+
+    @pytest.mark.parametrize(
+        "configured",
+        [
+            "https://github.com@evil.example",
+            "github.com@evil.example",
+            "user:pw@evil.example",
+            "github.com?x=1",
+            "github.com#frag",
+        ],
+    )
+    def test_a_value_that_is_not_a_hostname_is_refused(self, configured, monkeypatch):
+        monkeypatch.setenv("GH_HOST", configured)
+
+        with pytest.raises(UrlParseError):
+            default_github_host()
+
+    def test_the_declaration_check_cannot_be_fooled(self, monkeypatch):
+        # The sharpest part: the crafted value did not merely slip
+        # through, it *passed* ``is_supported_github_host`` by looking
+        # like github.com, so the guard reported the token as safe to
+        # send to a host the operator never named.
+        monkeypatch.setenv("GH_HOST", "https://github.com@evil.example")
+
+        with pytest.raises(UrlParseError):
+            is_supported_github_host("github.com@evil.example")
+
+    @pytest.mark.parametrize(
+        ("configured", "expected"),
+        [
+            ("github.com", "github.com"),
+            ("ghe.corp.example.com", "ghe.corp.example.com"),
+            ("localhost", "localhost"),
+            # A scheme and a trailing slash are still tolerated: those
+            # are shapes an operator plausibly pastes, and neither
+            # changes which server is addressed.
+            ("https://ghe.example.com/", "ghe.example.com"),
+        ],
+    )
+    def test_ordinary_hosts_are_unaffected(self, configured, expected, monkeypatch):
+        monkeypatch.setenv("GH_HOST", configured)
+
+        assert default_github_host() == expected
+
+
 class TestMalformedTargetsAreRefusedEndToEnd:
     """Preserving ``.git`` only helps if a parser then refuses it.
 
@@ -580,6 +634,17 @@ class TestDeclarationPrecedenceShortCircuits:
 
         assert is_supported_github_host("ghe.example.com") is True
         assert is_supported_github_host("github.com") is True
+
+    def test_a_malformed_list_does_not_block_a_single_host(self, monkeypatch):
+        # The single-host settings are what ``default_github_host``
+        # resolves, so they are yielded first.  Reading the declaration
+        # list before them let a malformed entry there raise before a
+        # valid default could match --- the same ineffective precedence,
+        # one source further along.
+        monkeypatch.setenv("DEPENDAMERGE_GITHUB_HOST", "ghe.example.com")
+        monkeypatch.setenv("DEPENDAMERGE_GITHUB_HOSTS", "broken:8443")
+
+        assert is_supported_github_host("ghe.example.com") is True
 
     def test_the_malformed_value_is_still_reported(self, monkeypatch):
         # It is not swallowed: a caller that genuinely has to read
