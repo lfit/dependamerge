@@ -15,6 +15,7 @@ reasoning sits next to the failure reporting that depends on it.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import NoReturn
 from urllib.parse import urlparse
@@ -37,6 +38,11 @@ from ..url_parser import (
     parse_repo_url,
 )
 from ._app import console
+
+#: A path that is *shaped* like a pull request, whether or not it is a
+#: valid one.  Used to pick the right remedy: a fault in this shape is
+#: the shape's, so declaring a host cannot repair it.
+_PR_SHAPED_PATH_RE = re.compile(r"\A/[^/]+/[^/]+/pull(?:/.*)?\Z")
 
 
 @dataclass
@@ -194,6 +200,13 @@ def _report_unparsable_url(
             console.print(f"❌ Invalid URL: {change_err}")
         elif segs and (segs[0] == "orgs" or len(segs) == 1):
             console.print(f"❌ Invalid URL: {org_err}")
+        elif _PR_SHAPED_PATH_RE.match(path):
+            # PR-shaped but rejected, so the fault is the shape rather
+            # than the host --- a non-numeric number, or a stray
+            # ``.git``.  Declaring the host cannot repair either, and
+            # on an *already* declared Enterprise host the
+            # repository-mode guidance is doubly misleading.
+            console.print(f"❌ Invalid URL: {change_err}")
         elif len(segs) >= 2:
             # An ordinary owner/repo shape on an undeclared host.  Its
             # rejection carries the instructions for declaring that

@@ -33,6 +33,7 @@ from ..github_async import (
 )
 from ..progress_tracker import MergeProgressTracker
 from ..url_parser import (
+    DEFAULT_GITHUB_HOST,
     normalize_target,
 )
 from ._app import app, console
@@ -126,9 +127,18 @@ def close(
         # different base URLs, and the client bakes those in at
         # construction.  Normalise first, or a scheme-less target is
         # read as a bare path and yields no host at all.
+        #
+        # Falling back to dotcom rather than None when the target names
+        # no host.  ``None`` makes the client consult the configured
+        # default, so a malformed ``GH_HOST`` reported *its* problem
+        # instead of the invalid URL the operator actually typed ---
+        # and configuring a host cannot make ``not a url`` valid.
+        # Valid shorthand has already resolved to an absolute host by
+        # this point, so nothing legitimate reaches the fallback.
+        target_host = (urlparse(normalize_target(pr_url)).hostname or "").lower()
         github_client = _pkg.GitHubClient(
             token,
-            host=(urlparse(normalize_target(pr_url)).hostname or "").lower() or None,
+            host=target_host or DEFAULT_GITHUB_HOST,
         )
         # GitHubClient resolves None -> GITHUB_TOKEN env var (raises if missing)
         assert github_client.token is not None

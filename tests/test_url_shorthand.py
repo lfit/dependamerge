@@ -15,6 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from dependamerge.cli import app
+from dependamerge.github_client import GitHubClient
 from dependamerge.url_parser import (
     is_supported_github_host,
     parse_change_url,
@@ -318,6 +319,80 @@ class TestDefaultHostIsResolvedLazily:
         # is the one that must still complain.
         with pytest.raises(UrlParseError, match="names a port"):
             normalize_target("acme/widget")
+
+
+class TestTheRemedyMatchesTheFault:
+    """An error must not send the operator after the wrong problem.
+
+    Three paths offered a remedy that could not work: declaring a host
+    for a URL no declaration can repair, and reporting a configuration
+    problem for a target the operator had plainly mistyped.
+    """
+
+    def test_a_malformed_target_is_not_reported_as_bad_configuration(self, monkeypatch):
+        # ``close`` passed no host, so the client consulted the default
+        # and a malformed ``GH_HOST`` reported *its* problem instead of
+        # the invalid URL --- and configuring a host cannot make
+        # "not a url" valid.
+        monkeypatch.setenv("GH_HOST", "broken:8443")
+
+        result = CliRunner().invoke(
+            app, ["close", "not a url", "--token", "t", "--dry-run"]
+        )
+
+        assert result.exit_code != 0
+        assert "Invalid GitHub PR URL" in result.stdout
+        assert "broken:8443" not in result.stdout
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://ghe.corp.example.com/acme/widget/pull/abc",
+            "https://ghe.corp.example.com/acme/widget/pull/7/files.git",
+        ],
+    )
+    def test_a_pr_shaped_fault_does_not_advise_declaring_a_host(self, url):
+        # The shape is the fault, not the host: a non-numeric number and
+        # a stray suffix are wrong on any host, declared or not.
+        result = CliRunner().invoke(app, ["merge", url, "--token", "t", "--dry-run"])
+
+        assert result.exit_code != 0
+        assert "DEPENDAMERGE_GITHUB_HOSTS" not in result.stdout
+
+    def test_an_undeclared_host_is_still_told_to_declare_it(self):
+        # The complement, and the reason this is a narrowing rather
+        # than a removal: a well-formed PR URL on an undeclared host
+        # *is* fixed by declaring it.
+        result = CliRunner().invoke(
+            app,
+            [
+                "merge",
+                "https://ghe.corp.example.com/acme/widget/pull/7",
+                "--token",
+                "t",
+                "--dry-run",
+            ],
+        )
+
+        assert result.exit_code != 0
+        assert "DEPENDAMERGE_GITHUB_HOSTS" in result.stdout
+
+    def test_the_client_makes_the_same_distinction(self):
+        # ``merge`` reports through ``_merge_target``, so its guidance
+        # is chosen before the client is reached.  ``close`` and any
+        # direct caller go through here instead, and reverting this
+        # guard failed no test until it was pinned separately.
+        client = GitHubClient("t")
+
+        with pytest.raises(ValueError) as suffix:
+            client.parse_pr_url(
+                "https://ghe.corp.example.com/acme/widget/pull/7/files.git"
+            )
+        assert "DEPENDAMERGE_GITHUB_HOSTS" not in str(suffix.value)
+
+        with pytest.raises(ValueError) as declarable:
+            client.parse_pr_url("https://ghe.corp.example.com/acme/widget/pull/7")
+        assert "DEPENDAMERGE_GITHUB_HOSTS" in str(declarable.value)
 
 
 class TestNetworkPathReferences:

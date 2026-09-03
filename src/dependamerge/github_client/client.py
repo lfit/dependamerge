@@ -128,7 +128,17 @@ class GitHubClient(_GitHubQueryMixin, _GitHubActionMixin, _GitHubStatusMixin):
             # a pull request.  Offering it for something that is not
             # one sends the operator to configure a host, only to meet
             # the real error afterwards.
-            if host and _PR_PATH_RE.match(parsed.path):
+            #
+            # A stray ``.git`` is one of those: the shape matches
+            # because the pattern allows trailing segments, but the
+            # suffix makes the URL malformed whatever host is declared.
+            # It is checked below rather than here, so it has to be
+            # excluded explicitly.
+            if (
+                host
+                and _PR_PATH_RE.match(parsed.path)
+                and not has_stray_git_suffix(parsed.path)
+            ):
                 raise UrlParseError(unsupported_host_message(host, "Pull request"))
             raise UrlParseError(f"Invalid GitHub PR URL: {url}")
 
