@@ -23,10 +23,11 @@ import re
 
 __all__ = ["redact_target"]
 
-#: ``scheme://`` followed by anything up to an ``@`` --- the userinfo a
-#: URL may carry.  Matched with a scheme so a bare ``a@b`` path segment
-#: is left alone.
-_USERINFO_RE = re.compile(r"\A([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]+@")
+#: The userinfo a URL may carry, in both the ``scheme://`` and the
+#: scheme-less ``//host/path`` forms.  Both name an authority, so both
+#: can hide a credential in front of it; requiring an authority marker
+#: is what leaves a bare ``a@b`` *path* segment alone.
+_USERINFO_RE = re.compile(r"\A((?:[A-Za-z][A-Za-z0-9+.-]*:)?//)[^/@\s]+@")
 
 
 def redact_target(value: str) -> str:

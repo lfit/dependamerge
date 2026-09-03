@@ -128,21 +128,36 @@ def repository_root(cwd: Path | None = None) -> Path | None:
 def remote_url(
     root: Path, *, preference: tuple[str, ...] = _REMOTE_PREFERENCE
 ) -> tuple[str, str] | None:
-    """Return the first configured remote from ``preference``.
+    """Return the first *usable* remote from ``preference``.
+
+    Usable, not merely configured.  A checkout may have ``upstream``
+    pointing at a local mirror or an unsupported transport while
+    ``origin`` is a perfectly good hosted remote; stopping at the first
+    name configured then reported that the repository had no usable
+    remote at all, when the answer was one line further down.
 
     Args:
         root: The repository root.
         preference: Remote names to try, most preferred first.
 
     Returns:
-        A ``(remote_name, url)`` pair, or None when the repository has
-        none of them configured.
+        A ``(remote_name, url)`` pair whose URL yields a target, or
+        None when no configured remote does.
     """
+    fallback: tuple[str, str] | None = None
     for name in preference:
         url = _git(["git", "remote", "get-url", name], root)
-        if url:
+        if not url:
+            continue
+        if _remote_web_url(url) is not None:
             return (name, url)
-    return None
+        if fallback is None:
+            # Remember the first configured-but-unusable remote so the
+            # caller can still name it when nothing resolves --- a
+            # Gerrit checkout is identified from the remote even when
+            # no web URL can be derived from it.
+            fallback = (name, url)
+    return fallback
 
 
 def host_suggests_gerrit(host: str) -> bool:

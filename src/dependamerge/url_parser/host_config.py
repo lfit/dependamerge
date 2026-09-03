@@ -107,21 +107,40 @@ def iter_enterprise_hosts() -> Iterator[str]:
 
     if _HOST_OVERRIDE and _fresh(_HOST_OVERRIDE):
         yield _HOST_OVERRIDE
+
+    # A malformed declaration is *deferred*, not raised in place.
+    # Ordering alone was not enough: a broken ``GH_HOST`` still stopped
+    # iteration before a perfectly good ``DEPENDAMERGE_GITHUB_HOSTS``
+    # entry could match, so an explicitly declared host was refused
+    # over configuration the target never needed.  The error is kept
+    # and re-raised only once every candidate has been offered, so
+    # ``enterprise_hosts()`` --- which drains the iterator --- still
+    # reports it.
+    deferred: UrlParseError | None = None
+
+    def _clean(value: str) -> str:
+        nonlocal deferred
+        try:
+            return _clean_host(value)
+        except UrlParseError as exc:
+            if deferred is None:
+                deferred = exc
+            return ""
+
     # Single-host settings first, matching the order
-    # :func:`default_github_host` resolves them in.  Reading the
-    # declaration list first meant a malformed entry there raised
-    # before a valid, higher-priority default could match --- the same
-    # ineffective precedence this laziness was added to fix, just one
-    # source further along.
+    # :func:`default_github_host` resolves them in.
     for name in _HOST_ENV_VARS:
-        host = _clean_host(os.environ.get(name) or "")
+        host = _clean(os.environ.get(name) or "")
         if _fresh(host):
             yield host
     raw = os.environ.get("DEPENDAMERGE_GITHUB_HOSTS") or ""
     for candidate in raw.split(","):
-        host = _clean_host(candidate)
+        host = _clean(candidate)
         if _fresh(host):
             yield host
+
+    if deferred is not None:
+        raise deferred
 
 
 def enterprise_hosts() -> tuple[str, ...]:

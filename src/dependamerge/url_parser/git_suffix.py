@@ -253,8 +253,14 @@ def has_stray_git_suffix(path: str) -> bool:
     segments = [s for s in path.split("/") if s]
     if not segments:
         return False
-    last = segments[-1]
-    return last.endswith(".git") and len(last) > len(".git")
+    last = segments[-1].lower()
+    # Any case-insensitive ``.git`` ending counts, including a segment
+    # that is *exactly* ``.git``.  This helper is consulted only by the
+    # owner and change parsers, where a repository name can never be
+    # the last segment, so there is nothing to protect: requiring a
+    # name in front let ``/pull/7/.git`` through, and matching case
+    # let ``/pull/7/files.GIT`` through, both acting on pull request 7.
+    return last.endswith(".git")
 
 
 def strip_git_suffix(path: str) -> str:

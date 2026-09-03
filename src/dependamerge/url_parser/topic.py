@@ -38,6 +38,12 @@ def _names_a_host(value: str) -> bool:
     raw = value.strip()
     if _SCHEME_RE.match(raw):
         return True
+    # ``//host/path`` names an authority without a scheme, and
+    # ``normalize_target`` recognises it as a web URL, so refusing it
+    # here made this parser disagree with every other one about the
+    # same input.
+    if raw.startswith("//"):
+        return True
     return looks_like_host(raw.split("/", 1)[0])
 
 

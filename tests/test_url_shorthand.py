@@ -25,6 +25,7 @@ from dependamerge.url_parser import (
     parse_repo_url,
     redact_target,
 )
+from dependamerge.url_parser.git_suffix import has_stray_git_suffix
 from dependamerge.url_parser.models import UrlParseError
 from dependamerge.url_parser.shorthand import (
     DEFAULT_GITHUB_HOST,
@@ -393,17 +394,27 @@ class TestNoTargetReachesOutputWithCredentials:
         ("raw", "expected"),
         [
             ("https://u:pw@h/a/b", "https://***@h/a/b"),
+            # A network-path reference has an authority but no scheme,
+            # so a scheme-anchored pattern left its userinfo intact ---
+            # in the very helper written to stop that happening.
+            ("//u:pw@h/a/b", "//***@h/a/b"),
             ("https://h/a/b?token=x", "https://h/a/b"),
             ("https://h/a/b#token=x", "https://h/a/b"),
             ("https://h/a/b", "https://h/a/b"),
             ("", ""),
-            # A bare ``a@b`` is a path segment, not userinfo, so the
-            # pattern requires a scheme before it.
+            # A bare ``a@b`` is a path segment, not userinfo, so an
+            # authority marker is required before it.
             ("acme/wid@get", "acme/wid@get"),
         ],
     )
     def test_the_sanitiser_itself(self, raw, expected):
         assert redact_target(raw) == expected
+
+    def test_a_network_path_target_is_sanitised_end_to_end(self):
+        with pytest.raises(ValueError) as excinfo:
+            GitHubClient("t").parse_pr_url(f"//user:{self.SECRET}@github.com/a/b/nope")
+
+        assert "SECRETTOKEN" not in str(excinfo.value).upper()
 
 
 class TestTheRemedyMatchesTheFault:
@@ -702,6 +713,20 @@ class TestPageRoutesKeepTheirGitSuffix:
         assert normalize_target(url) == url
 
     @pytest.mark.parametrize(
+        "path",
+        [
+            "/acme/widget/pull/7.git",
+            # A segment that is exactly ``.git``, and an uppercase
+            # variant: both slipped past a rule that required a name in
+            # front and matched case, and were acted on as PR 7.
+            "/acme/widget/pull/7/.git",
+            "/acme/widget/pull/7/files.GIT",
+        ],
+    )
+    def test_any_git_ending_counts_as_stray(self, path):
+        assert has_stray_git_suffix(path) is True
+
+    @pytest.mark.parametrize(
         ("url", "expected"),
         [
             # The route words are ordinary names in any other position,
@@ -799,6 +824,12 @@ class TestGerritTopicNeedsItsOwnHost:
     accepted, dispatching a Gerrit topic run against github.com.
     """
 
+    def test_a_network_path_topic_url_is_accepted(self):
+        # ``normalize_target`` recognises ``//host/path`` as a web URL,
+        # so refusing it here made this parser disagree with every
+        # other one about the same input.
+        assert parse_gerrit_topic_url("//gerrit.example.org/q/topic:x").topic == "x"
+
     def test_owner_shorthand_is_refused(self):
         with pytest.raises(UrlParseError, match="no host"):
             parse_gerrit_topic_url("q/topic:x")
@@ -882,6 +913,25 @@ class TestDeclarationPrecedenceShortCircuits:
         monkeypatch.setenv("DEPENDAMERGE_GITHUB_HOSTS", "broken:8443")
 
         assert is_supported_github_host("ghe.example.com") is True
+
+    def test_a_malformed_value_does_not_block_a_later_declaration(self, monkeypatch):
+        # Ordering alone was not enough.  A broken value still stopped
+        # iteration before a *later* declaration could match, so an
+        # explicitly declared host was refused over configuration the
+        # target never needed.  The error is deferred, not skipped.
+        monkeypatch.setenv("GH_HOST", "broken:8443")
+        monkeypatch.setenv("DEPENDAMERGE_GITHUB_HOSTS", "ghe.example.com")
+
+        assert is_supported_github_host("ghe.example.com") is True
+
+    def test_the_deferred_error_still_surfaces(self, monkeypatch):
+        # Deferring must not become swallowing: a caller that reads
+        # every declaration still meets the configuration error.
+        monkeypatch.setenv("GH_HOST", "broken:8443")
+        monkeypatch.setenv("DEPENDAMERGE_GITHUB_HOSTS", "ghe.example.com")
+
+        with pytest.raises(UrlParseError, match="broken:8443"):
+            enterprise_hosts()
 
     def test_the_malformed_value_is_still_reported(self, monkeypatch):
         # It is not swallowed: a caller that genuinely has to read
