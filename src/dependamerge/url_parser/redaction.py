@@ -6,8 +6,8 @@ Making a target safe to show before it reaches a message.
 
 Every parser reports the target it refused, which is what makes the
 message actionable --- and a target is operator input that may carry a
-credential.  This branch has now leaked one four separate times: a git
-remote logged with its password, a configuration value echoed verbatim,
+credential.  A credential has now escaped four separate times on this branch: a
+git remote logged with its password, a configuration value echoed verbatim,
 a network-path reference that skipped stripping, and an API authority
 read from ``netloc``.  Each was fixed where it was found, and a fifth
 set appeared in the errors added to fix the fourth.

@@ -536,6 +536,10 @@ class TestCredentialsNeverReachTheLog:
                 "ftp://user:pw@host/repo.git?token=SECRET",
                 "ftp://***@host/repo.git",
             ),
+            # A scheme-relative remote names an authority too, and this
+            # module's own copy of the rule missed it --- which is why
+            # there is no longer a second copy.
+            ("//user:pw@host/repo.git", "//***@host/repo.git"),
         ],
     )
     def test_userinfo_is_redacted(self, raw, expected):

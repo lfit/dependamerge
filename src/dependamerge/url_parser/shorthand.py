@@ -36,6 +36,7 @@ from .host_config import (
     set_github_host,
 )
 from .models import UrlParseError
+from .redaction import redact_target
 
 # Re-exported so the long-standing ``url_parser.shorthand`` import path
 # keeps working now that host declaration lives in its own module.
@@ -293,10 +294,10 @@ def normalize_target(value: str, *, default_host: str | None = None) -> str:
         # known.
         if remainder:
             raise UrlParseError(
-                f"{value!r} is ambiguous: {first!r} is a path segment in a "
-                "GitHub URL, not an owner. For every repository owned by "
-                f"{remainder!r}, give the owner on its own; "
-                "for a single repository, give the full URL."
+                f"{redact_target(value)!r} is ambiguous: {first!r} is a path "
+                "segment in a GitHub URL, not an owner. For every repository "
+                f"owned by {redact_target(remainder)!r}, give the owner on "
+                "its own; for a single repository, give the full URL."
             )
         raise UrlParseError(
             f"{first!r} is a path segment in a GitHub URL, not an owner, "

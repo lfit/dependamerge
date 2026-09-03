@@ -779,6 +779,16 @@ class TestReservedRouteShorthand:
         assert "orgs" in message
         assert "acme" in message
 
+    def test_the_ambiguity_message_is_sanitised(self):
+        # This branch composes its message from the raw target *and*
+        # the remainder, so both needed redacting --- it was reached
+        # before the shared path and bypassed it.
+        with pytest.raises(UrlParseError) as excinfo:
+            normalize_target("orgs/acme?token=ghp_SECRETTOKEN")
+
+        assert "SECRETTOKEN" not in str(excinfo.value).upper()
+        assert "orgs/acme" in str(excinfo.value)
+
     def test_the_explicit_url_still_means_owner_wide(self):
         # Only the *shorthand* is ambiguous.  Typed in full, this is
         # GitHub's own owner URL and keeps its meaning.

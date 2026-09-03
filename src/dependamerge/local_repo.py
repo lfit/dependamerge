@@ -34,6 +34,7 @@ from .url_parser import (
     UrlParseError,
     is_supported_github_host,
     normalize_target,
+    redact_target,
 )
 
 log = logging.getLogger("dependamerge.local_repo")
@@ -53,8 +54,6 @@ _GIT_TIMEOUT = 10.0
 _REMOTE_PREFERENCE = ("upstream", "origin")
 
 #: Credentials in a URL, for any scheme.
-_USERINFO_RE = re.compile(r"\A([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s]+@")
-
 #: Any ``scheme://`` prefix.
 _SCHEME_RE = re.compile(r"\A[A-Za-z][A-Za-z0-9+.-]*://")
 
@@ -274,25 +273,24 @@ def _names_a_server(url: str) -> bool:
 def _safe_for_log(url: str) -> str:
     """Redact any credentials from a remote before it reaches a log.
 
-    The module contract is that no credential survives into output, and
-    a log is output.  ``git_ops.redact_text`` only recognises http(s)
-    URLs, but a remote this module *declines* may use any scheme ---
-    ``ftp://user:password@host/repo.git`` among them --- so the
-    userinfo is removed regardless of scheme.
+    Delegates to :func:`~dependamerge.url_parser.redact_target` rather
+    than keeping a second implementation.  This module had its own,
+    which then needed the *same* correction independently: both
+    anchored on ``scheme://`` and so left ``//user:pw@host`` untouched.
+    Two copies of one rule means fixing it twice and discovering that
+    fact the hard way.
 
-    A token hides in three places, not one.  The query and fragment go
-    too, because this runs on remotes that normalisation has *not*
-    accepted, so it cannot rely on ``_remote_web_url`` having dropped
-    them, and a git remote needs neither.
+    ``git_ops.redact_text`` is not the shared one to use here: it only
+    recognises http(s), and a remote this module *declines* may carry
+    any scheme.
 
     Args:
         url: The remote URL as git reports it.
 
     Returns:
-        The URL with any credentials removed from every position.
+        The URL with credentials removed from every position.
     """
-    redacted = _USERINFO_RE.sub(r"\1***@", url)
-    return redacted.split("?", 1)[0].split("#", 1)[0]
+    return redact_target(url)
 
 
 def _remote_web_url(url: str) -> str | None:
