@@ -26,6 +26,7 @@ from ..url_parser import (
     _host_matches,
     default_github_host,
     derive_api_urls,
+    has_stray_git_suffix,
     is_supported_github_host,
     normalize_target,
     reject_port_bearing_host,
@@ -152,6 +153,14 @@ class GitHubClient(_GitHubQueryMixin, _GitHubActionMixin, _GitHubStatusMixin):
         # ``/a/pull/7`` returned the pair transposed.  Reading the
         # groups the pattern already captures removes the arithmetic
         # that made that possible.
+        if has_stray_git_suffix(parsed.path):
+            # The pattern accepts trailing segments, so without this a
+            # ``/pull/7/files.git`` still matched pull request 7 and the
+            # suffix normalisation preserved achieved nothing.
+            raise UrlParseError(
+                f"Invalid GitHub PR URL: {url}. The trailing '.git' "
+                "belongs to a clone URL, not to a pull request."
+            )
         match = _PR_PATH_RE.match(parsed.path)
         if match is None:
             raise UrlParseError(f"Invalid GitHub PR URL: {url}")

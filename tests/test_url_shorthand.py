@@ -320,6 +320,72 @@ class TestDefaultHostIsResolvedLazily:
             normalize_target("acme/widget")
 
 
+class TestMalformedTargetsAreRefusedEndToEnd:
+    """Preserving ``.git`` only helps if a parser then refuses it.
+
+    Normalisation leaving these unchanged was asserted as "stays
+    invalid", which was not true: ``/acme.git`` became the owner
+    ``acme.git`` and reached owner-wide dispatch, and the change shapes
+    accept trailing segments so ``/pull/7/files.git`` matched pull
+    request 7. The suffix is a marker; honouring it is the parsers' job.
+
+    Driven through the command, because asserting normalisation is what
+    let the false claim look verified.
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://github.com/acme.git",
+            "https://github.com/orgs/acme.git",
+            "https://github.com/acme/widget/pull/7.git",
+            "https://github.com/acme/widget/pull/7/files.git",
+            "https://gerrit.example.org/c/p/+/123/files.git",
+        ],
+    )
+    def test_the_command_refuses_them(self, url):
+        result = CliRunner().invoke(app, ["merge", url, "--token", "t", "--dry-run"])
+
+        assert result.exit_code != 0, result.stdout
+        assert "Invalid URL" in result.stdout
+        # Neither dispatch mode may be reached: the earlier fix moved
+        # ``/orgs/acme.git`` from owner-wide into *repository* mode
+        # rather than refusing it, which the parser test did not catch.
+        assert "Owner mode" not in result.stdout
+        assert "Repository mode" not in result.stdout
+
+    @pytest.mark.parametrize(
+        ("url", "parser", "attribute", "expected"),
+        [
+            # A repository may genuinely be called ``widget.git``; its
+            # clone URL then ends ``.git.git``.
+            (
+                "https://github.com/acme/widget.git.git",
+                parse_repo_url,
+                "project",
+                "acme/widget.git",
+            ),
+            # A Gerrit topic may end in ``.git`` too.
+            (
+                "https://gerrit.example.org/q/topic:release.git",
+                parse_gerrit_topic_url,
+                "topic",
+                "release.git",
+            ),
+            # And the ordinary shapes are untouched.
+            ("https://github.com/orgs/acme", parse_org_url, "owner", "acme"),
+            (
+                "https://github.com/acme/widget/pull/7/files",
+                parse_change_url,
+                "change_number",
+                7,
+            ),
+        ],
+    )
+    def test_legitimate_targets_are_untouched(self, url, parser, attribute, expected):
+        assert getattr(parser(url), attribute) == expected
+
+
 class TestPageRoutesKeepTheirGitSuffix:
     """No clone URL ends in a GitHub page route.
 
@@ -720,22 +786,19 @@ class TestNormalizeTarget:
         )
 
     @pytest.mark.parametrize(
-        "url, expected",
+        "url",
         [
-            (
-                "https://github.com/acme/widget/pull/7.git",
-                "Invalid GitHub PR URL format",
-            ),
-            (
-                "https://gerrit.example.org/c/acme/widget/+/123.git",
-                "Invalid Gerrit change URL format",
-            ),
+            "https://github.com/acme/widget/pull/7.git",
+            "https://gerrit.example.org/c/acme/widget/+/123.git",
         ],
     )
-    def test_change_urls_with_a_git_suffix_are_refused(self, url, expected):
+    def test_change_urls_with_a_git_suffix_are_refused(self, url):
         # The unstripped suffix is only the mechanism; what matters is
-        # that no operation is reachable through it.
-        with pytest.raises(UrlParseError, match=expected):
+        # that no operation is reachable through it.  The message moved
+        # from the shape mismatch to the stray suffix, which is the more
+        # specific reason and now fires first --- the refusal these
+        # assert is unchanged.
+        with pytest.raises(UrlParseError, match="trailing '.git'"):
             parse_change_url(url)
 
     def test_a_project_named_pull_still_gets_clone_handling(self):

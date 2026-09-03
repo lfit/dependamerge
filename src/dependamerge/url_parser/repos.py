@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
+from .git_suffix import has_stray_git_suffix
 from .hosts import (
     is_supported_github_host,
     reject_port_bearing_host,
@@ -79,6 +80,19 @@ def parse_repo_url(url: str) -> ParsedRepoUrl:
     # Expected: /owner/repo or /owner/repo/pulls
     # Strip the path, remove "pulls" suffix if present
     parts = [p for p in path.split("/") if p]
+
+    if parts and parts[0].lower() == "orgs":
+        # ``/orgs/<login>`` is GitHub's owner route, so its first
+        # segment is never a repository owner --- the name is reserved,
+        # and no account holds it.  Without this, an owner URL that the
+        # owner parser refuses falls through to here and is read as the
+        # repository ``acme.git`` under the owner ``orgs``, which simply
+        # moves a malformed target from one mode to another.
+        raise UrlParseError(
+            f"Not a repository URL: {url}. '/orgs/' introduces an owner, "
+            "so this names no repository. Drop the '/orgs/' prefix for a "
+            "repository, or give the owner URL to merge across it."
+        )
 
     # Remove a "pulls" *page* suffix, which is what /owner/repo/pulls
     # is.  Only when an owner and a repository remain: "pulls" is a
@@ -176,6 +190,17 @@ def parse_org_url(url: str) -> ParsedOrgUrl:
     reject_port_bearing_host(parsed.netloc.lower(), "Owner-wide")
     if not is_supported_github_host(host):
         raise UrlParseError(unsupported_host_message(host, "Owner-wide"))
+
+    if has_stray_git_suffix(path):
+        # Normalisation preserves the suffix on anything that is not a
+        # clone URL, and an owner path is never one.  Without this the
+        # marker achieved nothing: ``/acme.git`` simply became the owner
+        # ``acme.git`` and reached owner-wide dispatch anyway.
+        raise UrlParseError(
+            f"Not an owner URL: {url}. The trailing '.git' makes this a "
+            "clone URL for a repository, not an owner. Give the owner "
+            "on its own, or a repository URL."
+        )
 
     parts = [p for p in path.split("/") if p]
 

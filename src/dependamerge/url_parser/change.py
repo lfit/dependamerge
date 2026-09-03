@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 from urllib.parse import urlparse
 
+from .git_suffix import has_stray_git_suffix
 from .hosts import _host_matches
 from .models import ChangeSource, ParsedUrl, UrlParseError
 from .shorthand import normalize_target
@@ -62,6 +63,16 @@ def parse_change_url(url: str) -> ParsedUrl:
 
     host = parsed.hostname.lower()
     path = parsed.path.rstrip("/")
+
+    if has_stray_git_suffix(path):
+        # A change is never a clone URL, so normalisation preserved the
+        # suffix to mark this malformed.  Refusing it here is what makes
+        # that stick: both shapes below accept trailing segments, so
+        # ``/pull/7/files.git`` matched pull request 7 regardless.
+        raise UrlParseError(
+            f"Not a change URL: {url}. The trailing '.git' belongs to a "
+            "clone URL, not to a pull request or change."
+        )
 
     # Detect platform based on URL characteristics
     if _is_github_url(host, path):

@@ -38,6 +38,7 @@ from .change import (
     detect_source,
     parse_change_url,
 )
+from .git_suffix import has_stray_git_suffix
 from .hosts import (
     _host_matches,
     canonical_web_host,
@@ -104,6 +105,7 @@ __all__ = [
     "pull_request_url_for",
     "reject_port_bearing_host",
     "set_github_host",
+    "has_stray_git_suffix",
     "strip_git_suffix",
     "unsupported_host_message",
 ]

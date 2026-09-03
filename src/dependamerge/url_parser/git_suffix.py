@@ -225,6 +225,38 @@ def strips_git_suffix(path: str, host: str) -> bool:
     return not _names_a_change(segments, host)
 
 
+def has_stray_git_suffix(path: str) -> bool:
+    """Report whether a path's final segment still ends in ``.git``.
+
+    Normalisation removes the suffix where it is a clone-URL artefact
+    and *preserves* it everywhere else, as a marker that the target is
+    not a clone URL.  A parser that reaches a preserved suffix is
+    therefore looking at a malformed target.
+
+    Honouring the marker here is what turns "left unchanged" into
+    "refused".  Leaving it to normalisation alone was not enough:
+    ``/acme.git`` merely became the owner ``acme.git``, and
+    ``/pull/7/files.git`` still matched the pull request shape, because
+    both parsers accept trailing segments.
+
+    Not for every parser.  A repository *may* be called ``widget.git``,
+    reached through the clone URL ``widget.git.git``, and a Gerrit topic
+    may end in ``.git`` too --- in both the suffix is part of a name
+    rather than a leftover.
+
+    Args:
+        path: The URL path, without query or fragment.
+
+    Returns:
+        True when the last segment carries a leftover ``.git``.
+    """
+    segments = [s for s in path.split("/") if s]
+    if not segments:
+        return False
+    last = segments[-1]
+    return last.endswith(".git") and len(last) > len(".git")
+
+
 def strip_git_suffix(path: str) -> str:
     """Remove a trailing ``.git`` from a URL path.
 
