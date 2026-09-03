@@ -7,9 +7,11 @@ Repository listing queries.
 These are the lightweight "just the repositories" queries: no pull
 request nodes, so a single page reveals the owner-wide repository total
 and the archived/fork flags needed to decide what to scan.  The
-``Organization`` and ``User`` variants are separated only by their root
-field; see :mod:`dependamerge.github_graphql.pull_requests` for the
-heavier queries that carry PR payloads.
+``Organization`` and ``User`` variants are similar, but the user query
+pins ``ownerAffiliations: OWNER`` so GitHub does not include repositories
+from other owners where the user is a direct collaborator.  See
+:mod:`dependamerge.github_graphql.pull_requests` for the heavier queries
+that carry PR payloads.
 """
 
 from __future__ import annotations
@@ -42,16 +44,16 @@ query($org: String!, $reposCursor: String) {
 """
 
 # User-account counterpart of ORG_REPOS_ONLY.  The ``repositories``
-# connection exists on both ``Organization`` and ``User``, so this query
-# is structurally identical apart from the ``user(login:)`` root.  It is
-# used as a runtime fallback when an owner login is not an organization
-# (the ``organization`` field returns null).  The ``$org`` variable name
-# is retained for call-site uniformity even though it carries a user
-# login here.
+# connection exists on both ``Organization`` and ``User``, but GitHub's
+# default User.repositories ownerAffiliations is [OWNER, COLLABORATOR].
+# Pinning OWNER prevents owner-wide scans from including direct-collaborator
+# repositories that belong to other owners, and keeps totalCount aligned
+# with the user's own repositories.  The ``$org`` variable name is retained
+# for call-site uniformity even though it carries a user login here.
 USER_REPOS_ONLY = """
 query($org: String!, $reposCursor: String) {
   user(login: $org) {
-    repositories(first: 100, after: $reposCursor, orderBy: { field: NAME, direction: ASC }) {
+    repositories(first: 100, after: $reposCursor, ownerAffiliations: OWNER, orderBy: { field: NAME, direction: ASC }) {
       totalCount
       pageInfo {
         hasNextPage

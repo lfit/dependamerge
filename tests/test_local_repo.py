@@ -48,13 +48,26 @@ def isolated_git_config(monkeypatch, tmp_path):
     Without this the tests are not hermetic.  ``git remote get-url``
     applies ``url.<base>.insteadOf`` rewrites, so a developer whose
     global config rewrites https to ssh sees different URLs from CI ---
-    which is exactly what happened while writing these.
+    which is exactly what happened while writing these.  Git also exports
+    local-repository environment variables while running hooks; clear
+    them so subprocesses operate on the fixture repositories, not the
+    checkout that is being committed.
     """
     empty = tmp_path / "empty-gitconfig"
     empty.write_text("", encoding="utf-8")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(empty))
     monkeypatch.delenv("GIT_CONFIG_NOSYSTEM", raising=False)
+    for name in (
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_PREFIX",
+        "GIT_SUPER_PREFIX",
+        "GIT_WORK_TREE",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def _git(repo: Path, *args: str) -> None:

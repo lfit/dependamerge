@@ -84,6 +84,26 @@ def _make_user_account_graphql(login: str, repo_nodes: list[dict[str, Any]]):
     return _graphql
 
 
+def _make_affiliation_sensitive_user_graphql(
+    login: str,
+    owned_nodes: list[dict[str, Any]],
+    collaborator_nodes: list[dict[str, Any]],
+):
+    """Return collaborator repositories unless the query asks for OWNER only."""
+
+    async def _graphql(query: str, variables: dict[str, Any] | None = None):
+        if "organization(login:" in query:
+            raise _not_an_org_error(login)
+        if "user(login:" in query:
+            nodes = list(owned_nodes)
+            if "ownerAffiliations: OWNER" not in query:
+                nodes.extend(collaborator_nodes)
+            return {"user": {"repositories": _repos_connection(nodes)}}
+        return {}
+
+    return _graphql
+
+
 class TestIterReposUserFallback:
     """Direct tests for the owner-aware repository iterators."""
 
@@ -156,6 +176,49 @@ class TestIterReposUserFallback:
             ]
             # Both archived and fork skipped for the bulk-merge path.
             assert merge_repos == ["auser/own"]
+        finally:
+            await service.close()
+
+    @pytest.mark.asyncio
+    async def test_iter_owner_repositories_limits_user_scan_to_owned_repos(
+        self, mocker
+    ):
+        """User scans must not include repositories owned by other accounts."""
+        service = GitHubService(token="test_token")
+        try:
+            totals: list[int] = []
+
+            class _Progress:
+                def update_total_repositories(self, total: int) -> None:
+                    totals.append(total)
+
+            service._progress = _Progress()  # type: ignore[assignment]
+            owned_nodes = [
+                {"nameWithOwner": "auser/repo-a", "isArchived": False, "isFork": False},
+                {"nameWithOwner": "auser/repo-b", "isArchived": False, "isFork": False},
+            ]
+            collaborator_nodes = [
+                {
+                    "nameWithOwner": "other-owner/collab",
+                    "isArchived": False,
+                    "isFork": False,
+                },
+            ]
+            mocker.patch.object(
+                service._api,
+                "graphql",
+                side_effect=_make_affiliation_sensitive_user_graphql(
+                    "auser", owned_nodes, collaborator_nodes
+                ),
+            )
+
+            seen = [repo async for repo in service._iter_owner_repositories("auser")]
+
+            assert [r["nameWithOwner"] for r in seen] == [
+                "auser/repo-a",
+                "auser/repo-b",
+            ]
+            assert totals == [2]
         finally:
             await service.close()
 
