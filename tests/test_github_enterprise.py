@@ -269,6 +269,44 @@ class TestPermissionGuidanceFollowsTheHost:
     def test_missing_api_url_falls_back_to_dotcom(self):
         assert web_host_for("") == "github.com"
 
+    @pytest.mark.parametrize(
+        "api_url",
+        [
+            f"https://user:ghp_SECRETTOKEN@{GHE}/api/v3",
+            f"https://ghp_SECRETTOKEN@{GHE}/api/v3",
+        ],
+    )
+    def test_credentials_never_reach_the_guidance(self, api_url):
+        # The authority includes userinfo, so reading ``netloc`` put a
+        # caller-supplied credential into the settings URL and the
+        # ``gh -h`` argument --- both printed to the terminal.
+        assert web_host_for(api_url) == GHE
+
+    def test_the_rendered_guidance_is_clean(self):
+        # Asserting on the helper alone would pass if the credential
+        # reached the message by another route, so this drives the
+        # error the operator actually sees.
+        api = GitHubAsync(
+            token="t",
+            api_url=f"https://user:ghp_SECRETTOKEN@{GHE}/api/v3",
+            graphql_url=f"https://{GHE}/api/graphql",
+        )
+        error = api._parse_permission_error(
+            Exception("403 Forbidden"), "merge", "acme", "widget"
+        )
+
+        # A 403 must be recognised as a permission problem; if it were
+        # not, the assertions below would vacuously pass on ``None``.
+        assert error is not None
+        guidance = " ".join(error.token_type_guidance.values())
+        assert "SECRETTOKEN" not in guidance.upper()
+        # And the host is still named: dropping it entirely would also
+        # satisfy the assertion above while making the guidance useless.
+        assert GHE in guidance
+
+    def test_the_host_is_lowercased(self):
+        assert web_host_for("https://GHE.Example.COM/api/v3") == "ghe.example.com"
+
     def test_unauthorised_guidance_names_the_enterprise_host(self):
         error = _unauthorized_permission_error("merge", GHE)
         guidance = " ".join(error.token_type_guidance.values())

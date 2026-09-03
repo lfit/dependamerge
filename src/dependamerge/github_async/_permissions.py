@@ -76,14 +76,20 @@ def web_host_for(api_url: str) -> str:
     Returns:
         The hostname to build settings URLs from.
     """
-    netloc = urlparse(api_url or "").netloc.lower()
-    if not netloc:
+    # ``hostname`` rather than ``netloc``: the authority includes any
+    # userinfo, so a caller-supplied
+    # ``https://user:TOKEN@ghe.example.com/api/v3`` put that credential
+    # into the settings URL and the ``gh -h`` argument this builds ---
+    # both of which are printed to the terminal.  ``hostname`` excludes
+    # userinfo by construction, and lowercases for free.
+    host = (urlparse(api_url or "").hostname or "").lower()
+    if not host:
         return "github.com"
     # Dotcom splits its API onto api.github.com; everywhere else the
     # API and the web UI share a host.
-    if netloc == "api.github.com":
+    if host == "api.github.com":
         return "github.com"
-    return netloc
+    return host
 
 
 def _unauthorized_permission_error(
