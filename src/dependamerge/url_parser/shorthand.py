@@ -79,10 +79,10 @@ _GIT_TRANSPORT_SCHEMES = frozenset({"ssh", "git", "git+ssh", "ssh+git", "rsync"}
 # A path segment that names a host rather than an owner.
 _PORT_SUFFIX_RE = re.compile(r":\d+\Z")
 
-# GitHub login grammar: alphanumerics and hyphens, no leading or
-# trailing hyphen, at most 39 characters.  Used to decide whether a
-# bare token is plausibly an owner before treating it as one, so that
-# genuine rubbish still fails fast with "Invalid URL" instead of being
+# GitHub login grammar: alphanumerics and hyphens, no *leading*
+# hyphen, at most 39 characters.  Used to decide whether a bare token
+# is plausibly an owner before treating it as one, so that genuine
+# rubbish still fails fast with "Invalid URL" instead of being
 # expanded into a request for a repository that cannot exist.
 #
 # Hyphen *placement* is not policed, only structure.  GitHub's user
@@ -139,10 +139,17 @@ def looks_like_host(segment: str) -> bool:
 def looks_like_owner(segment: str) -> bool:
     """Report whether a segment is a plausible GitHub owner login.
 
-    Logins are alphanumerics and hyphens, no leading or trailing
-    hyphen, at most 39 characters.  Checking the shape keeps the
-    shorthand from swallowing arbitrary text: ``lfreleng-actions`` is an
-    owner, ``not a url`` is not.
+    Logins are alphanumerics and hyphens, at most 39 characters, and do
+    not begin with a hyphen.  Checking the shape keeps the shorthand
+    from swallowing arbitrary text: ``lfreleng-actions`` is an owner,
+    ``not a url`` is not.
+
+    Hyphen *placement* is deliberately not policed beyond the first
+    character.  ``johan--`` and ``a--b--t`` are real accounts that
+    GitHub's signup form would refuse today, so rejecting them here
+    would make a resolvable owner unreachable --- see ``_OWNER_RE`` for
+    the reasoning.  A leading hyphen stays refused because no such
+    account is known and the likelier cause is a mistyped flag.
 
     Args:
         segment: The first segment of a schemeless target.
