@@ -151,6 +151,9 @@ class _RepositoriesMixin(_GitHubServiceBase):
         Works for both organizations and personal user accounts: the
         correct GraphQL root is resolved once via
         :meth:`_resolve_owner_root` and reused for every page.
+        User-account enumeration pins GitHub's ``ownerAffiliations`` to
+        ``OWNER`` so collaborator repositories owned by someone else are
+        not swept into owner-wide operations.
 
         Archived repositories are always skipped.  Fork repositories are
         skipped by default (``skip_forks=True``): owner-wide bulk merges
