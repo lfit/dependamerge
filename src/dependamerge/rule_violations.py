@@ -30,6 +30,7 @@ __all__ = [
     "is_rule_violation",
     "required_workflow_names",
     "required_status_check_names",
+    "status_check_violation_verb",
     "violation_verb",
     "workflow_name_fragments",
 ]
@@ -122,12 +123,19 @@ def _verb_clause(reason: str) -> str:
     be mistaken for it.  For a status-check violation the names are
     individually quoted, so the text after the final quote is used.
     Falls back to the whole string when neither shape is recognised.
+
+    One rejection can name *both* kinds, in which case the workflow
+    clause runs on into the status-check one.  The tail is therefore cut
+    at the status-check marker, so a status context that has already
+    failed cannot report the workflows as failed when they are merely
+    unfinished --- the exact pair that arises while required workflows
+    are still queued.
     """
     if not reason:
         return ""
     workflow = _split_workflow_names(reason)
     if workflow is not None:
-        return workflow[1]
+        return workflow[1].split(_STATUS_CHECK_MARKER, 1)[0]
     if _STATUS_CHECK_MARKER in reason:
         # ``Required status check "X" is failing.`` --- take everything
         # after the last quoted name.
@@ -172,3 +180,31 @@ def required_status_check_names(reason: str) -> list[str]:
         return []
     names = [c.strip() for c in re.findall(r'"([^"]+)"', reason) if c.strip()]
     return list(dict.fromkeys(names))
+
+
+def status_check_violation_verb(reason: str) -> str:
+    """The outcome stated for the ``Required status check`` clause.
+
+    :func:`violation_verb` answers for the rejection as a whole and
+    resolves a *workflow* clause in preference, so on a rejection naming
+    both kinds it reports the workflows' outcome.  Applying that to the
+    status checks is wrong whenever the two differ, which is the usual
+    case: workflows that have not finished sit alongside a status
+    context that has already failed.
+
+    Status-check names are wrapped in double quotes and workflow names
+    in single ones, so the last double quote closes the final context
+    name.  The clause is cut at the workflow marker for the same reason
+    :func:`_verb_clause` cuts at the status-check one --- either clause
+    may come first, and neither may borrow the other's outcome.
+    """
+    if not reason or _STATUS_CHECK_MARKER not in reason:
+        return "not satisfied"
+    closing = reason.rfind('"')
+    clause = (
+        reason[closing + 1 :]
+        if closing != -1
+        else reason[reason.find(_STATUS_CHECK_MARKER) :]
+    )
+    clause = clause.split(_WORKFLOW_MARKER, 1)[0]
+    return "failed" if "fail" in clause.lower() else "not satisfied"

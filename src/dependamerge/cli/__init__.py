@@ -84,6 +84,7 @@ from ..rule_violations import (
     is_rule_violation,
     required_status_check_names,
     required_workflow_names,
+    status_check_violation_verb,
     violation_verb,
 )
 from ..system_utils import get_default_workers
@@ -368,6 +369,7 @@ __all__ = [
     "required_workflow_names",
     "resolve_gerrit_credentials",
     "status",
+    "status_check_violation_verb",
     "sys",
     "typer",
     "urllib3",

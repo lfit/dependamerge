@@ -1555,6 +1555,47 @@ class TestFormatFailureReason:
             "• build",
         ]
 
+    def test_both_kinds_are_listed_not_just_the_workflows(self):
+        # Reproduces lfreleng-actions/dependamerge#482: a rejection
+        # naming a workflow *and* a status check reported the workflows
+        # only, so the failing ``pre-commit.ci - pr`` context that was
+        # actually blocking the merge never appeared.
+        reason = (
+            "Repository rule violations found Required workflows "
+            "'Package Hardening Audit, SHA Pinned Actions 📌' are not "
+            'satisfied Required status check "pre-commit.ci - pr" is failing.'
+        )
+        assert _format_failure_reason(reason) == [
+            "Repository rule violations found / Required workflows not satisfied"
+            " / Required status checks failed",
+            "• Required workflow: Package Hardening Audit",
+            "• Required workflow: SHA Pinned Actions 📌",
+            "• Required status check: pre-commit.ci - pr",
+        ]
+
+    def test_each_kind_keeps_its_own_verb_when_they_differ(self):
+        # The status check has failed while the workflows have merely not
+        # finished.  One shared verb would report the workflows as failed
+        # (the outcome word nearest the end of the string), which is the
+        # opposite of what waiting can fix.
+        reason = (
+            "Repository rule violations found Required status check "
+            '"pre-commit.ci - pr" is failing. Required workflows '
+            "'Zizmor Scan 🌈' are not satisfied"
+        )
+        assert _format_failure_reason(reason) == [
+            "Repository rule violations found / Required workflows not satisfied"
+            " / Required status checks failed",
+            "• Required workflow: Zizmor Scan 🌈",
+            "• Required status check: pre-commit.ci - pr",
+        ]
+
+    def test_ruleset_marker_without_names_is_left_alone(self):
+        # The marker alone carries no condition names, so there is
+        # nothing to expand into bullets and the prose is all we have.
+        reason = "Repository rule violations found"
+        assert _format_failure_reason(reason) == [reason]
+
 
 def _make_merge_context(show_progress: bool) -> _MergeContext:
     """Build a minimal ``_MergeContext`` for tracker-lifecycle tests."""

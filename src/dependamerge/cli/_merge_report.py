@@ -17,6 +17,7 @@ from ..rule_violations import (
     is_rule_violation,
     required_status_check_names,
     required_workflow_names,
+    status_check_violation_verb,
     violation_verb,
 )
 from ._app import console
@@ -78,23 +79,37 @@ def _format_failure_reason(reason: str) -> list[str]:
     plus a bullet per name for both the ``Required workflows`` and
     ``Required status check(s)`` variants.  Reasons we do not recognise
     are returned unchanged as a single line.
+
+    One rejection can name **both** kinds, and each is reported: a
+    failing status context such as ``pre-commit.ci - pr`` used to be
+    dropped whenever a workflow was named alongside it, leaving the
+    summary listing conditions that pass and omitting the one that
+    blocks.  Each kind also carries its own verb, because workflows that
+    have not finished routinely accompany a context that has failed.
     """
-    if is_rule_violation(reason):
-        ruleset = RULE_VIOLATION_MARKER
-        verb = violation_verb(reason)
-        workflows = required_workflow_names(reason)
-        if workflows:
-            return [
-                f"{ruleset} / Required workflows {verb}",
-                *(f"• {name}" for name in workflows),
-            ]
-        checks = required_status_check_names(reason)
-        if checks:
-            return [
-                f"{ruleset} / Required status checks {verb}",
-                *(f"• {name}" for name in checks),
-            ]
-    return [reason]
+    if not is_rule_violation(reason):
+        return [reason]
+
+    workflows = required_workflow_names(reason)
+    checks = required_status_check_names(reason)
+    if not workflows and not checks:
+        return [reason]
+
+    headings = [RULE_VIOLATION_MARKER]
+    if workflows:
+        headings.append(f"Required workflows {violation_verb(reason)}")
+    if checks:
+        headings.append(f"Required status checks {status_check_violation_verb(reason)}")
+
+    # Bullets are labelled only when both kinds are present.  With one
+    # kind the heading already says which, so labelling would add noise
+    # to every existing report; with both, an unlabelled name does not
+    # say which heading it belongs under.
+    both = bool(workflows and checks)
+    bullets = [
+        f"• Required workflow: {name}" if both else f"• {name}" for name in workflows
+    ] + [f"• Required status check: {name}" if both else f"• {name}" for name in checks]
+    return [" / ".join(headings), *bullets]
 
 
 def _print_failed_pr_details(
