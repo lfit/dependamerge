@@ -11,6 +11,7 @@ question without touching the repository.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from ..models import PullRequestInfo
 from ._base import _MergeManagerBase
@@ -20,15 +21,28 @@ from ._types import MergeResult, MergeStatus, _merged_from_payload
 class _NotMergeableMixin(_MergeManagerBase):
     """Reacting to a pull request that is not mergeable."""
 
+    #: ``mergeable_state`` values that mean GitHub would accept a merge
+    #: as things stand.  ``unstable`` qualifies because only *optional*
+    #: checks are failing, which does not block a merge, and
+    #: ``has_hooks`` because pre-receive hooks do not either.  Both are
+    #: already treated as mergeable by ``_should_attempt_merge``, so
+    #: reading them as blocking here would contradict the gate that
+    #: decides whether to try in the first place.
+    _MERGEABLE_NOW_STATES = frozenset({"clean", "has_hooks", "unstable"})
+
     async def _confirm_failure(
         self, pr_info: PullRequestInfo, result: MergeResult
     ) -> MergeResult:
-        """Re-read a failed PR once and correct the outcome if it landed.
+        """Re-read a failed PR once and correct the outcome if it moved on.
 
         Costs a single GET, and only for PRs that are about to be
         reported as failures --- a rounding error against the run's
         total API budget, in exchange for not telling the user a merged
         PR failed.
+
+        The same payload settles all three corrections --- merged,
+        closed unmerged, and a rejection whose stated cause has since
+        cleared --- so the extra accuracy costs no extra request.
 
         Best-effort by construction: any error here leaves the original
         result untouched, because the verification must never be able to
@@ -98,9 +112,65 @@ class _NotMergeableMixin(_MergeManagerBase):
             pr_info.state = "closed"
             return result
 
-        # Either still open, or closed with merged-ness unknown.  Keep the
-        # original failure: reporting CLOSED here would assert "did not
-        # merge" from a value that never said so.
+        # Either still open, or closed with merged-ness unknown.
+        # Reporting CLOSED here would assert "did not merge" from a value
+        # that never said so, but an open PR may still have outlived the
+        # reason recorded against it.
+        return self._settle_stale_failure(pr_info, result, refreshed)
+
+    def _settle_stale_failure(
+        self,
+        pr_info: PullRequestInfo,
+        result: MergeResult,
+        refreshed: dict[str, Any],
+    ) -> MergeResult:
+        """Withdraw a failure whose stated cause has stopped being true.
+
+        The recorded reason describes what was unsatisfied at the instant
+        the merge was refused, which routinely includes required checks
+        that had merely not finished.  Nothing re-read that between the
+        rejection and the report, so a pull request that went green
+        moments later was still printed as failed, under a cause that no
+        longer held --- and an operator sent to investigate it found
+        nothing wrong.
+
+        Reads ``mergeable_state`` from the payload :meth:`_confirm_failure`
+        has already fetched, so settling this costs no further request.
+
+        ``unknown`` stays a failure.  GitHub computes mergeability in the
+        background and reports ``unknown`` until it has, so the value is
+        an absence of evidence rather than evidence of a block --- but it
+        is equally not evidence that the PR would merge, and only that
+        would justify withdrawing a reported failure.
+        """
+        state = refreshed.get("mergeable_state")
+        if not isinstance(state, str) or state not in self._MERGEABLE_NOW_STATES:
+            return result
+        if refreshed.get("mergeable") is False:
+            # A payload asserting both "clean" and "not mergeable"
+            # contradicts itself.  Keep the failure rather than choose a
+            # side: under-reporting a success is recoverable by re-running,
+            # while withdrawing a real failure loses it silently.
+            return result
+
+        self.log.info(
+            "Reported failure for %s is stale; the PR is now %s and would merge",
+            pr_info.html_url,
+            state,
+        )
+        self._pr_status(
+            f"⏱️ Unsettled: {pr_info.html_url} [{state}]",
+            level="debug",
+        )
+        result.status = MergeStatus.UNSETTLED
+        if result.error:
+            # Kept as a note, the way a stale reason is kept on a PR that
+            # turned out to have merged: it describes a state that no
+            # longer holds, so the summary must not show it as the cause.
+            result.warning = f"the merge was refused as: {result.error}"
+        result.error = (
+            f"not settled during the run; now {state} and expected to merge on a re-run"
+        )
         return result
 
     async def _handle_not_mergeable_pr(

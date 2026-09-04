@@ -34,6 +34,7 @@ class DummyProgressTracker(ProgressTracker):
         self.prs_skipped = 0
         self.prs_blocked = 0
         self.prs_pending = 0
+        self.prs_unsettled = 0
         self.prs_closed = 0
         self.rebases_triggered = 0
         self.retriggers_issued = 0
@@ -107,6 +108,9 @@ class DummyProgressTracker(ProgressTracker):
         pass
 
     def merge_pending(self, pr_key: str | None = None) -> None:
+        pass
+
+    def merge_unsettled(self, pr_key: str | None = None) -> None:
         pass
 
     def increment_closed(self, pr_key: str | None = None) -> None:

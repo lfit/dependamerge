@@ -35,6 +35,7 @@ def _print_final_merge_summary(real_results: list[MergeResult]) -> None:
     final_skipped = sum(1 for r in real_results if r.status.value == "skipped")
     final_blocked = sum(1 for r in real_results if r.status.value == "blocked")
     final_closed = sum(1 for r in real_results if r.status.value == "closed")
+    final_unsettled = sum(1 for r in real_results if r.status.value == "unsettled")
     final_auto_merge = sum(
         1 for r in real_results if r.status.value == "auto_merge_pending"
     )
@@ -46,6 +47,8 @@ def _print_final_merge_summary(real_results: list[MergeResult]) -> None:
         parts.append(f"{final_skipped} skipped")
     if final_blocked > 0:
         parts.append(f"{final_blocked} blocked")
+    if final_unsettled > 0:
+        parts.append(f"{final_unsettled} unsettled")
     if final_closed > 0:
         parts.append(f"{final_closed} closed")
     console.print(f"\n🚀 Final Results: {', '.join(parts)}")
@@ -53,6 +56,11 @@ def _print_final_merge_summary(real_results: list[MergeResult]) -> None:
         console.print(f"⏭️ Skipped {final_skipped} PRs")
     if final_blocked > 0:
         console.print(f"🛑 Blocked {final_blocked} PRs")
+    if final_unsettled > 0:
+        console.print(
+            f"⏱️ Unsettled {final_unsettled} PRs "
+            "(judged before their checks finished; re-run to merge)"
+        )
     if final_closed > 0:
         console.print(f"🚪 Closed without merging: {final_closed} PRs")
     if final_auto_merge > 0:
@@ -123,12 +131,13 @@ def _print_failed_pr_details(
     no longer printed to the console at all (progress is conveyed
     by the live tracker counters), so this end-of-run report is
     the *only* place reasons appear.  It therefore covers every
-    non-merged terminal outcome — failed, blocked, skipped, closed
-    and auto-merge pending — one section per outcome.
+    non-merged terminal outcome — failed, blocked, unsettled, skipped,
+    closed and auto-merge pending — one section per outcome.
     """
     sections: list[tuple[str, str]] = [
         ("failed", "\n❌ Failed PRs:"),
         ("blocked", "\n🛑 Blocked PRs:"),
+        ("unsettled", "\n⏱️ Unsettled PRs (re-run to merge):"),
         ("skipped", "\n⏭️ Skipped PRs:"),
         ("closed", "\n🚪 Closed PRs:"),
         ("auto_merge_pending", "\n🤖 Auto-merge pending PRs:"),
@@ -155,6 +164,7 @@ def _display_merge_results(
     failed_count = sum(1 for r in merge_results if r.status.value == "failed")
     skipped_count = sum(1 for r in merge_results if r.status.value == "skipped")
     blocked_count = sum(1 for r in merge_results if r.status.value == "blocked")
+    unsettled_count = sum(1 for r in merge_results if r.status.value == "unsettled")
     closed_count = sum(1 for r in merge_results if r.status.value == "closed")
     auto_merge_count = sum(
         1 for r in merge_results if r.status.value == "auto_merge_pending"
@@ -169,6 +179,11 @@ def _display_merge_results(
         console.print(f"⏭️ Skipped {skipped_count} PRs")
     if blocked_count > 0:
         console.print(f"🛑 Blocked {blocked_count} PRs")
+    if unsettled_count > 0:
+        console.print(
+            f"⏱️ Unsettled {unsettled_count} PRs "
+            "(judged before their checks finished; re-run to merge)"
+        )
     if closed_count > 0:
         console.print(f"🚪 Closed without merging: {closed_count} PRs")
     if auto_merge_count > 0:
@@ -183,6 +198,8 @@ def _display_merge_results(
             parts.append(f"{skipped_count} skipped")
         if blocked_count > 0:
             parts.append(f"{blocked_count} blocked")
+        if unsettled_count > 0:
+            parts.append(f"{unsettled_count} unsettled")
         if closed_count > 0:
             parts.append(f"{closed_count} closed")
         console.print(f"📈 Final Results: {', '.join(parts)}")

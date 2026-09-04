@@ -35,6 +35,18 @@ class MergeStatus(Enum):
     # superseded, or a human closed it mid-run).  Distinct from FAILED
     # because there is nothing for the operator to follow up on.
     CLOSED = "closed"
+    # Terminal: the run did not merge the PR, and nothing about it needs
+    # a human either.  The conditions named when the merge was refused
+    # have since settled, so re-running is expected to merge it.
+    #
+    # Deliberately not ``PENDING``, which is the *initial* non-terminal
+    # state every result starts in, nor ``AUTO_MERGE_PENDING``, where
+    # GitHub finishes the merge server-side without another run.  The
+    # distinction this carries is the one the counts were missing:
+    # "could not merge" and "had not finished yet" call for different
+    # responses, and reporting both as FAILED sent operators looking for
+    # a cause on PRs that had none.
+    UNSETTLED = "unsettled"
 
 
 @dataclass

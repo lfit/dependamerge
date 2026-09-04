@@ -34,7 +34,7 @@ class MergeProgressTracker(ProgressTracker):
       rebases and comment macros the run issued even after every PR
       has reached ``Merged`` / ``Failed``.
     - **Terminal counters** (merged / failed / skipped / blocked /
-      pending / closed) — one per PR, recorded exactly once.
+      pending / unsettled / closed) — one per PR, recorded exactly once.
     """
 
     # Transitory display states in pipeline order.  Each entry is
@@ -97,6 +97,9 @@ class MergeProgressTracker(ProgressTracker):
         self.prs_pending = 0
         # PRs that are blocked and cannot be merged by this run.
         self.prs_blocked = 0
+        # PRs the run judged before their required checks settled, and
+        # that would merge on another run.
+        self.prs_unsettled = 0
         # Cumulative activity counters.  These count *operations*, not
         # PRs: a single PR can contribute more than one (e.g. a
         # ``@dependabot rebase`` macro counts as both a rebase and a
@@ -259,6 +262,21 @@ class MergeProgressTracker(ProgressTracker):
             self.prs_pending += 1
         self._refresh_display()
 
+    def merge_unsettled(self, pr_key: str | None = None) -> None:
+        """Record a PR whose blocking conditions cleared too late.
+
+        Nothing merged it and nothing is wrong with it: the run judged
+        it before its required checks finished.  Counted apart from
+        ``merge_failure`` so the display does not send an operator
+        looking for a cause that no longer exists, and apart from
+        ``merge_pending`` because no auto-merge is armed --- this one
+        needs another run.
+        """
+        with self._state_lock:
+            self._finish_pr(pr_key)
+            self.prs_unsettled += 1
+        self._refresh_display()
+
     def increment_closed(self, pr_key: str | None = None) -> None:
         """Record a successful close."""
         with self._state_lock:
@@ -295,6 +313,7 @@ class MergeProgressTracker(ProgressTracker):
                 "prs_skipped": self.prs_skipped,
                 "prs_blocked": self.prs_blocked,
                 "prs_pending": self.prs_pending,
+                "prs_unsettled": self.prs_unsettled,
                 "prs_closed": self.prs_closed,
                 "rebases_triggered": self.rebases_triggered,
                 "retriggers_issued": self.retriggers_issued,

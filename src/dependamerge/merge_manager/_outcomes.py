@@ -74,7 +74,7 @@ class _OutcomeTrackingMixin(_MergeManagerBase):
 
         This is the **single** place terminal outcomes reach the
         tracker: every PR ends in exactly one counter (merged /
-        failed / skipped / blocked / closed / pending), its
+        failed / skipped / blocked / closed / pending / unsettled), its
         transitory
         display state (rebasing, waiting, …) is cleared, and the
         PR-level completion percentage advances.  Centralising the
@@ -97,6 +97,8 @@ class _OutcomeTrackingMixin(_MergeManagerBase):
             tracker.increment_closed(pr_key)
         elif status == MergeStatus.AUTO_MERGE_PENDING:
             tracker.merge_pending(pr_key)
+        elif status == MergeStatus.UNSETTLED:
+            tracker.merge_unsettled(pr_key)
         else:
             # Defensive: an unexpected terminal status still counts
             # toward completion so the percentage reaches 100%.  Clear
