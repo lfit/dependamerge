@@ -14,11 +14,11 @@ import asyncio
 from typing import Any
 
 from ..models import PullRequestInfo
-from ._base import _MergeManagerBase
+from ._live_blockers import _LiveBlockerMixin
 from ._types import MergeResult, MergeStatus, _merged_from_payload
 
 
-class _NotMergeableMixin(_MergeManagerBase):
+class _NotMergeableMixin(_LiveBlockerMixin):
     """Reacting to a pull request that is not mergeable."""
 
     #: ``mergeable_state`` values that mean GitHub would accept a merge
@@ -116,9 +116,9 @@ class _NotMergeableMixin(_MergeManagerBase):
         # Reporting CLOSED here would assert "did not merge" from a value
         # that never said so, but an open PR may still have outlived the
         # reason recorded against it.
-        return self._settle_stale_failure(pr_info, result, refreshed)
+        return await self._settle_stale_failure(pr_info, result, refreshed)
 
-    def _settle_stale_failure(
+    async def _settle_stale_failure(
         self,
         pr_info: PullRequestInfo,
         result: MergeResult,
@@ -144,8 +144,10 @@ class _NotMergeableMixin(_MergeManagerBase):
         would justify withdrawing a reported failure.
         """
         state = refreshed.get("mergeable_state")
-        if not isinstance(state, str) or state not in self._MERGEABLE_NOW_STATES:
+        if not isinstance(state, str):
             return result
+        if state not in self._MERGEABLE_NOW_STATES:
+            return await self._name_the_live_blocker(pr_info, result, state)
         if refreshed.get("mergeable") is False:
             # A payload asserting both "clean" and "not mergeable"
             # contradicts itself.  Keep the failure rather than choose a
@@ -171,6 +173,44 @@ class _NotMergeableMixin(_MergeManagerBase):
         result.error = (
             f"not settled during the run; now {state} and expected to merge on a re-run"
         )
+        return result
+
+    async def _name_the_live_blocker(
+        self,
+        pr_info: PullRequestInfo,
+        result: MergeResult,
+        state: str,
+    ) -> MergeResult:
+        """Replace a rejection's prose with what is blocking the PR now.
+
+        The recorded reason is GitHub's own rejection message, preferred
+        over state-based inference because it usually carries the
+        actionable cause.  On a ruleset rejection it frequently does not:
+        it lists the rules that were evaluated, including ones that had
+        merely not finished, and it can omit the condition actually
+        holding the merge.  python-workflows#84 was reported against
+        three workflows that had all passed, while ``pre-commit.ci - pr``
+        --- a status context, invisible to any check-runs-only view ---
+        was the sole blocker.
+
+        Only ``blocked`` is re-examined.  A conflicted, behind or draft
+        PR is already described accurately by its state, so reading its
+        checks would spend requests without adding anything.
+
+        The rejection is kept as a note.  It records what GitHub said at
+        the time, which is worth having when the live reading and the
+        message disagree, but it is no longer offered as the cause.
+        """
+        if state != "blocked":
+            return result
+        blockers = await self._live_blocking_conditions(pr_info)
+        if not blockers:
+            # Nothing could be established.  An empty reading is not an
+            # all-clear, so the reason already recorded stands.
+            return result
+        if result.error:
+            result.warning = f"the merge was refused as: {result.error}"
+        result.error = "blocked by " + "; ".join(blockers)
         return result
 
     async def _handle_not_mergeable_pr(

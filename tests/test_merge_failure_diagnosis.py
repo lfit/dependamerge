@@ -247,6 +247,193 @@ class TestAStillBlockedPullRequestStaysFailed:
         assert out.status is MergeStatus.FAILED
 
 
+class TestTheRealBlockerIsNamed:
+    """python-workflows#84: the rejection named everything but the cause.
+
+    All three workflows the message listed had passed.  The sole blocker
+    was the ``pre-commit.ci - pr`` status context, which reports through
+    the commit status API and is therefore invisible to any view built
+    from check runs alone.
+    """
+
+    @staticmethod
+    def _blocked_manager(
+        *,
+        required: list[dict[str, str]] | None = None,
+        failing_contexts: list[str] | None = None,
+        check_runs: list[dict[str, object]] | None = None,
+    ):
+        mgr, client = make_merge_manager()
+        client.get = AsyncMock(
+            return_value={
+                "state": "open",
+                "merged": False,
+                "mergeable": True,
+                "mergeable_state": "blocked",
+            }
+        )
+        client.get_required_status_checks = AsyncMock(return_value=required or [])
+        client.get_failing_status_contexts = AsyncMock(
+            return_value=failing_contexts or []
+        )
+        client.get_check_runs_for_ref = AsyncMock(return_value=check_runs or [])
+        return mgr, client
+
+    @pytest.mark.asyncio
+    async def test_a_failing_required_context_is_named(self) -> None:
+        mgr, _ = self._blocked_manager(
+            required=[{"context": "DCO"}, {"context": "pre-commit.ci - pr"}],
+            failing_contexts=["pre-commit.ci - pr"],
+        )
+        pr = _pr("python-workflows", 84)
+        result = MergeResult(
+            pr_info=pr, status=MergeStatus.FAILED, error=SAMPLED_REJECTION
+        )
+
+        out = await mgr._confirm_failure(pr, result)
+
+        assert out.status is MergeStatus.FAILED
+        assert out.error == "blocked by required status check: pre-commit.ci - pr"
+
+    @pytest.mark.asyncio
+    async def test_the_passing_workflows_stop_being_the_cause(self) -> None:
+        """The misdiagnosis itself: naming conditions that pass."""
+        mgr, _ = self._blocked_manager(
+            required=[{"context": "pre-commit.ci - pr"}],
+            failing_contexts=["pre-commit.ci - pr"],
+        )
+        pr = _pr("python-workflows", 84)
+        result = MergeResult(
+            pr_info=pr, status=MergeStatus.FAILED, error=SAMPLED_REJECTION
+        )
+
+        out = await mgr._confirm_failure(pr, result)
+
+        assert out.error is not None
+        assert "Package Hardening Audit" not in out.error
+        assert out.warning is not None
+        assert SAMPLED_REJECTION in out.warning
+
+    @pytest.mark.asyncio
+    async def test_an_advisory_context_is_not_presented_as_the_reason(self) -> None:
+        """A failing context the branch does not require blocks nothing."""
+        mgr, _ = self._blocked_manager(
+            required=[{"context": "DCO"}],
+            failing_contexts=["some-advisory-bot"],
+        )
+        pr = _pr("python-workflows", 84)
+        result = MergeResult(pr_info=pr, status=MergeStatus.FAILED, error="original")
+
+        out = await mgr._confirm_failure(pr, result)
+
+        assert out.error == "original"
+
+    @pytest.mark.asyncio
+    async def test_a_failing_check_run_is_named_too(self) -> None:
+        """Ruleset-required workflows report as check runs, not contexts.
+
+        They never appear among the required status contexts, so
+        filtering check runs on that list would discard the very names a
+        ruleset rejection is about.
+        """
+        mgr, _ = self._blocked_manager(
+            check_runs=[
+                {"name": "Zizmor Scan 🌈", "conclusion": "failure"},
+                {"name": "AI Slop Scan 🧹", "conclusion": "success"},
+            ],
+        )
+        pr = _pr("workflows-template", 55)
+        result = MergeResult(pr_info=pr, status=MergeStatus.FAILED, error="original")
+
+        out = await mgr._confirm_failure(pr, result)
+
+        assert out.error == "blocked by failing check: Zizmor Scan 🌈"
+
+    @pytest.mark.asyncio
+    async def test_a_superseded_run_is_not_a_blocker(self) -> None:
+        """A cancelled run beside a successful one of the same name."""
+        mgr, _ = self._blocked_manager(
+            check_runs=[
+                {
+                    "name": "Package Hardening Audit",
+                    "conclusion": "cancelled",
+                    "completed_at": "2026-09-03T10:00:00Z",
+                },
+                {
+                    "name": "Package Hardening Audit",
+                    "conclusion": "success",
+                    "completed_at": "2026-09-03T10:05:00Z",
+                },
+            ],
+        )
+        pr = _pr("python-workflows", 84)
+        result = MergeResult(pr_info=pr, status=MergeStatus.FAILED, error="original")
+
+        out = await mgr._confirm_failure(pr, result)
+
+        assert out.error == "original"
+
+    @pytest.mark.asyncio
+    async def test_both_kinds_are_reported_together(self) -> None:
+        mgr, _ = self._blocked_manager(
+            required=[{"context": "pre-commit.ci - pr"}],
+            failing_contexts=["pre-commit.ci - pr"],
+            check_runs=[{"name": "Zizmor Scan 🌈", "conclusion": "failure"}],
+        )
+        pr = _pr("python-workflows", 84)
+        result = MergeResult(pr_info=pr, status=MergeStatus.FAILED, error="original")
+
+        out = await mgr._confirm_failure(pr, result)
+
+        assert out.error == (
+            "blocked by required status check: pre-commit.ci - pr; "
+            "failing check: Zizmor Scan 🌈"
+        )
+
+    @pytest.mark.asyncio
+    async def test_nothing_established_keeps_the_original_reason(self) -> None:
+        """An empty reading is not an all-clear.
+
+        The token may be unable to read rulesets, or the requests may
+        have failed.  Discarding the recorded reason would leave the
+        operator with less than they had before.
+        """
+        mgr, client = self._blocked_manager()
+        client.get_required_status_checks = AsyncMock(side_effect=RuntimeError("403"))
+        client.get_failing_status_contexts = AsyncMock(side_effect=RuntimeError("403"))
+        client.get_check_runs_for_ref = AsyncMock(side_effect=RuntimeError("403"))
+        pr = _pr("python-workflows", 84)
+        result = MergeResult(
+            pr_info=pr, status=MergeStatus.FAILED, error=SAMPLED_REJECTION
+        )
+
+        out = await mgr._confirm_failure(pr, result)
+
+        assert out.status is MergeStatus.FAILED
+        assert out.error == SAMPLED_REJECTION
+
+    @pytest.mark.asyncio
+    async def test_a_conflicted_pr_is_not_re_examined(self) -> None:
+        """Its state already describes it; reading checks adds only cost."""
+        mgr, client = self._blocked_manager()
+        client.get = AsyncMock(
+            return_value={
+                "state": "open",
+                "merged": False,
+                "mergeable_state": "dirty",
+            }
+        )
+        pr = _pr("python-workflows", 84)
+        result = MergeResult(
+            pr_info=pr, status=MergeStatus.FAILED, error="merge conflicts"
+        )
+
+        out = await mgr._confirm_failure(pr, result)
+
+        assert out.error == "merge conflicts"
+        client.get_check_runs_for_ref.assert_not_called()
+
+
 class TestUnsettledIsReportedApartFromFailed:
     """A re-runnable outcome and one needing a human are different news."""
 
