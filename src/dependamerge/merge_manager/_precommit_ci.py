@@ -3,90 +3,41 @@
 
 """
 Re-triggering a stalled pre-commit.ci run.
+
+Reading the status is :mod:`_precommit_status`; deciding whether that
+reading means the run has stalled, and nudging it when it has, is here.
 """
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
 from ..models import PullRequestInfo
-from ._base import _MergeManagerBase
+from ._precommit_status import (
+    PRECOMMIT_CONTEXT,
+    find_precommit_status,
+    has_precommit_trigger_comment,
+    parse_timestamp,
+    pending_age,
+)
+from ._precommit_wait import _PrecommitWaitMixin
 
-_PRECOMMIT_CONTEXT = "pre-commit.ci - pr"
+#: Comments fetched per request when looking for an existing nudge.
+_COMMENTS_PER_PAGE = 100
 
-
-def _find_precommit_status(status_data: Any) -> dict[str, Any] | None:
-    """Pick the pre-commit.ci entry out of a combined status response."""
-    if not isinstance(status_data, dict):
-        return None
-    for s in status_data.get("statuses", []):
-        if isinstance(s, dict) and s.get("context") == _PRECOMMIT_CONTEXT:
-            return s
-    return None
-
-
-def _pending_age(precommit_status: dict[str, Any], now: datetime) -> float | None:
-    """Seconds the status has been pending, or None when unknowable.
-
-    Uses ``updated_at`` (when pre-commit.ci set the pending status),
-    falling back to ``created_at``.
-    """
-    raw_ts = precommit_status.get("updated_at") or precommit_status.get("created_at")
-    if not isinstance(raw_ts, str) or not raw_ts:
-        return None
-    try:
-        ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
-        return (now - ts).total_seconds()
-    except (ValueError, TypeError):
-        # ``ValueError``: unparsable timestamp.
-        # ``TypeError``: a timestamp lacking tz info parses to a naive
-        # datetime, which cannot be subtracted from the tz-aware
-        # ``now``.  Either way, degrade to ``None`` (fail closed)
-        # rather than abort the run.
-        return None
+#: How many pages to read.  A cap keeps a pathological thread from
+#: costing the run unbounded requests; a trigger comment beyond a
+#: thousand is not worth the search.
+_MAX_COMMENT_PAGES = 10
 
 
-def _precommit_outcome(status_data: Any) -> bool | None:
-    """Report a settled pre-commit.ci result, or None while pending.
-
-    Scans past pending entries rather than stopping at the first match,
-    so a later context with a final state is still honoured.
-    """
-    if not isinstance(status_data, dict):
-        return None
-    for s in status_data.get("statuses", []):
-        if not isinstance(s, dict):
-            continue
-        if s.get("context") != _PRECOMMIT_CONTEXT:
-            continue
-        state = s.get("state")
-        if state == "success":
-            return True
-        if state in ("failure", "error"):
-            return False
-        # state == "pending" — keep polling
-    return None
-
-
-def _has_precommit_trigger_comment(comments: Any) -> bool:
-    """Report whether a ``pre-commit.ci run`` comment already exists."""
-    if not isinstance(comments, list):
-        return False
-    for c in comments:
-        if not isinstance(c, dict):
-            continue
-        body = c.get("body")
-        if isinstance(body, str) and body.strip() == "pre-commit.ci run":
-            return True
-    return False
-
-
-class _PrecommitCiMixin(_MergeManagerBase):
+class _PrecommitCiMixin(_PrecommitWaitMixin):
     """Nudging pre-commit.ci when its check has gone stale."""
 
-    async def _trigger_stale_precommit_ci(self, pr_info: PullRequestInfo) -> bool:
+    async def _trigger_stale_precommit_ci(
+        self, pr_info: PullRequestInfo, *, treat_missing_as_stuck: bool = True
+    ) -> bool:
         """Detect and retrigger a stuck pre-commit.ci run by posting a comment.
 
         pre-commit.ci uses the commit status API and sometimes gets
@@ -105,6 +56,12 @@ class _PrecommitCiMixin(_MergeManagerBase):
 
         Args:
             pr_info: Pull request information
+            treat_missing_as_stuck: Whether a status pre-commit.ci has
+                not reported at all counts as stuck.  True only when
+                GitHub has settled the PR's mergeable state: an absent
+                status is indistinguishable from one that has not
+                propagated yet, so on a PR GitHub is still working out
+                it means "too early to tell" rather than "stalled".
 
         Returns:
             True if a retrigger comment was posted and the status check
@@ -130,16 +87,34 @@ class _PrecommitCiMixin(_MergeManagerBase):
         )
         if not fetched:
             return False
-        if precommit_status is not None and not self._precommit_run_is_stuck(
-            precommit_status, now, pr_info
-        ):
+        reported_at = parse_timestamp(
+            (precommit_status or {}).get("updated_at")
+            or (precommit_status or {}).get("created_at")
+        )
+        if precommit_status is None:
+            if not treat_missing_as_stuck:
+                self.log.debug(
+                    "pre-commit.ci has not reported on %s#%s and GitHub has "
+                    "not settled the PR yet; too early to call it stuck.",
+                    pr_info.repository_full_name,
+                    pr_info.number,
+                )
+                return False
+        elif not self._precommit_run_is_stuck(precommit_status, now, pr_info):
             return False
 
-        # 3. The run is stale (missing, or stuck pending) — check for
-        # an existing trigger comment before posting a duplicate
-        # (avoids spam if dependamerge runs repeatedly while the
-        # status is still not progressing).
-        if await self._precommit_already_triggered(repo_owner, repo_name, pr_info):
+        # 3. The run is stale (missing, errored, or stuck pending) ---
+        # check for an existing trigger comment before posting a
+        # duplicate (avoids spam if dependamerge runs repeatedly while
+        # the status is still not progressing).  Scoped to the current
+        # incident where the status carries a timestamp, so a nudge for
+        # an episode that has since resolved cannot silence this one.
+        if await self._precommit_already_triggered(
+            repo_owner,
+            repo_name,
+            pr_info,
+            since=reported_at,
+        ):
             return False
 
         self._pr_status(
@@ -150,8 +125,15 @@ class _PrecommitCiMixin(_MergeManagerBase):
         if not await self._post_precommit_trigger(repo_owner, repo_name, pr_info):
             return False
 
-        # 4. Poll for the status to appear (up to ~5 minutes)
-        return await self._await_precommit_ci(repo_owner, repo_name, pr_info)
+        # 4. Poll for the status to appear (up to ~5 minutes).  The
+        # reading that prompted the nudge is passed along so the poll
+        # cannot mistake it for the answer: an ``error`` sits on the
+        # commit until pre-commit.ci replaces it, and the first poll
+        # would otherwise return that same error and end the wait on the
+        # very failure being retried.
+        return await self._await_precommit_ci(
+            repo_owner, repo_name, pr_info, since=reported_at
+        )
 
     async def _precommit_ci_required(
         self, repo_owner: str, repo_name: str, pr_info: PullRequestInfo
@@ -171,7 +153,7 @@ class _PrecommitCiMixin(_MergeManagerBase):
             required_contexts = [
                 c.get("context", "") for c in required_checks if isinstance(c, dict)
             ]
-            if _PRECOMMIT_CONTEXT not in required_contexts:
+            if PRECOMMIT_CONTEXT not in required_contexts:
                 return False
         except Exception:
             return False
@@ -187,23 +169,12 @@ class _PrecommitCiMixin(_MergeManagerBase):
         retrigger; a True with a ``None`` status means pre-commit.ci has
         reported nothing yet.
         """
-        if not self._github_client:
+        fetched, statuses = await self._combined_statuses(
+            repo_owner, repo_name, pr_info
+        )
+        if not fetched:
             return False, None
-        try:
-            status_data = await self._github_client.get(
-                f"/repos/{repo_owner}/{repo_name}/commits/{pr_info.head_sha}/status"
-            )
-        except Exception as e:
-            self.log.debug(
-                "Failed to fetch commit status for pre-commit.ci check on %s#%s "
-                "(sha=%s); skipping retrigger: %s",
-                pr_info.repository_full_name,
-                pr_info.number,
-                pr_info.head_sha,
-                e,
-            )
-            return False, None
-        return True, _find_precommit_status(status_data)
+        return True, find_precommit_status({"statuses": statuses})
 
     def _precommit_run_is_stuck(
         self,
@@ -244,40 +215,66 @@ class _PrecommitCiMixin(_MergeManagerBase):
             return False
         # Pending: only stuck once it has been pending longer than
         # the threshold.
-        pending_age = _pending_age(precommit_status, now)
-        if pending_age is None or pending_age < _mm.PRECOMMIT_CI_STUCK_PENDING_SECONDS:
+        age = pending_age(precommit_status, now)
+        if age is None or age < _mm.PRECOMMIT_CI_STUCK_PENDING_SECONDS:
             # Still within the normal window (or no timestamp to
-            # judge by) — leave the run to finish.
+            # judge by) --- leave the run to finish.
             return False
         self.log.info(
             "pre-commit.ci on %s#%s pending for %.0fs; treating as stuck.",
             pr_info.repository_full_name,
             pr_info.number,
-            pending_age,
+            age,
         )
         return True
 
     async def _precommit_already_triggered(
-        self, repo_owner: str, repo_name: str, pr_info: PullRequestInfo
+        self,
+        repo_owner: str,
+        repo_name: str,
+        pr_info: PullRequestInfo,
+        since: datetime | None = None,
     ) -> bool:
-        """Report whether a trigger comment has already been posted."""
+        """Report whether this incident has already been nudged.
+
+        *since* is the moment the status being reacted to was reported.
+        A trigger comment older than that belongs to an earlier episode
+        --- pre-commit.ci can error again on a later head after an
+        intervening success --- and must not suppress a fresh nudge.
+        Without a timestamp to compare against, any comment suppresses,
+        which is the previous behaviour and the safe direction for a
+        status that has never reported at all.
+
+        Every page of comments is read.  A single page would let a PR
+        with a long discussion hide the nudge already posted for this
+        incident, and then post a second one --- the one guarantee this
+        check exists to make.
+        """
         if not self._github_client:
             return False
-        try:
-            comments = await self._github_client.get(
-                f"/repos/{repo_owner}/{repo_name}/issues/{pr_info.number}/comments?per_page=100"
-            )
-            if _has_precommit_trigger_comment(comments):
+        page = 1
+        while page <= _MAX_COMMENT_PAGES:
+            try:
+                comments = await self._github_client.get(
+                    f"/repos/{repo_owner}/{repo_name}/issues/{pr_info.number}"
+                    f"/comments?per_page={_COMMENTS_PER_PAGE}&page={page}"
+                )
+            except Exception:
+                # If we fail to list comments, continue and attempt to
+                # post the trigger anyway.
+                return False
+            if not isinstance(comments, list) or not comments:
+                return False
+            if has_precommit_trigger_comment(comments, since):
                 self.log.info(
                     "Found existing pre-commit.ci trigger comment on "
                     f"{pr_info.repository_full_name}#{pr_info.number}; "
                     "skipping duplicate comment."
                 )
                 return True
-        except Exception:
-            # If we fail to list comments, continue and attempt to post the
-            # trigger anyway.
-            pass
+            if len(comments) < _COMMENTS_PER_PAGE:
+                return False
+            page += 1
         return False
 
     async def _post_precommit_trigger(
@@ -298,99 +295,3 @@ class _PrecommitCiMixin(_MergeManagerBase):
             )
             return False
         return True
-
-    async def _await_precommit_ci(
-        self, repo_owner: str, repo_name: str, pr_info: PullRequestInfo
-    ) -> bool:
-        """Poll the head commit until pre-commit.ci reports a result.
-
-        pre-commit.ci can take up to five minutes to run and report
-        back, so we need a generous timeout to avoid prematurely marking
-        PRs as unmergeable when the check simply hasn't finished yet.
-        The whole poll is a wait on an external service, so the worker's
-        concurrency slot is released for its duration (``parked()``).
-
-        The poll honours the run-wide ceiling ``--max-wait`` sets, in
-        the same way as the auto-merge and required-workflow waits: a
-        stale pre-commit status previously parked the worker for the
-        full ``merge_timeout`` even under ``--max-wait 0``, which
-        promises never to block.
-        """
-        # Resolved through the package at call time rather than bound at
-        # import time, so that a test rebinding the constant on
-        # ``dependamerge.merge_manager`` is observed here.
-        from dependamerge import merge_manager as _mm
-
-        if self._no_wait:
-            self.log.debug(
-                "Not waiting for pre-commit.ci on %s#%s (--max-wait 0)",
-                pr_info.repository_full_name,
-                pr_info.number,
-            )
-            return False
-
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._merge_timeout
-        if self._run_deadline is not None:
-            deadline = min(deadline, self._run_deadline)
-
-        max_polls = self._merge_poll_max_attempts
-        async with _mm.parked():
-            for attempt in range(max_polls):
-                # Sleep no longer than the time remaining, matching
-                # ``_wait_for_auto_merge`` and the required-workflow
-                # wait.  Checking the deadline without clamping would
-                # still overshoot the ceiling by up to a full interval.
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    break
-                await asyncio.sleep(min(self._merge_recheck_interval, remaining))
-                outcome = await self._poll_precommit_status(
-                    repo_owner, repo_name, pr_info
-                )
-                if outcome is not None:
-                    return outcome
-
-                if attempt == max_polls - 1:
-                    self.log.debug(
-                        f"Still waiting for pre-commit.ci on "
-                        f"{pr_info.repository_full_name}#{pr_info.number} "
-                        f"({(attempt + 1) * self._merge_recheck_interval:.0f}s elapsed)"
-                    )
-
-        self.log.warning(
-            f"Timed out waiting for pre-commit.ci on "
-            f"{pr_info.repository_full_name}#{pr_info.number}"
-        )
-        return False
-
-    async def _poll_precommit_status(
-        self, repo_owner: str, repo_name: str, pr_info: PullRequestInfo
-    ) -> bool | None:
-        """Take one reading of pre-commit.ci, or None while still pending."""
-        if not self._github_client:
-            return None
-        try:
-            status_data = await self._github_client.get(
-                f"/repos/{repo_owner}/{repo_name}/commits/{pr_info.head_sha}/status"
-            )
-            outcome = _precommit_outcome(status_data)
-            if outcome is True:
-                self._pr_status(
-                    f"✅ pre-commit.ci passed: {pr_info.html_url}",
-                    level="info",
-                )
-                return True
-            if outcome is False:
-                self._pr_status(
-                    f"❌ pre-commit.ci failed: {pr_info.html_url}",
-                    level="warning",
-                )
-                return False
-        except Exception as e:
-            self.log.debug(
-                "Failed to poll pre-commit.ci status for %s: %s",
-                f"{pr_info.repository_full_name}#{pr_info.number}",
-                e,
-            )
-        return None

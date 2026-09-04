@@ -186,6 +186,17 @@ class _SinglePrGatesMixin(_MergeManagerBase):
         mergeable state: it fires only when pre-commit.ci is a required
         check and its status is missing or stalled, and the title repair
         only when the subject genuinely disagrees with the title.
+
+        One precondition does have to weaken for ``unknown``.  A status
+        pre-commit.ci has not reported at all normally counts as stuck,
+        but on a PR GitHub has not settled it is indistinguishable from
+        one that has not propagated yet --- so treating it as stalled
+        would post ``pre-commit.ci run`` during an ordinary propagation
+        window, and then wait five minutes for a run nothing was wrong
+        with.  A missing status is therefore only stuck once GitHub has
+        settled the PR and still reports it ``blocked``; ``error`` and
+        aged-``pending`` remain stuck in both states, because each is a
+        reading rather than an absence.
         """
         pr_info = flow.pr_info
         if not (
@@ -195,7 +206,10 @@ class _SinglePrGatesMixin(_MergeManagerBase):
         ):
             return
 
-        precommit_fixed = await self._trigger_stale_precommit_ci(pr_info)
+        precommit_fixed = await self._trigger_stale_precommit_ci(
+            pr_info,
+            treat_missing_as_stuck=pr_info.mergeable_state == "blocked",
+        )
         if precommit_fixed:
             # Re-fetch PR state now that pre-commit.ci has passed
             try:

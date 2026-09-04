@@ -1054,3 +1054,419 @@ class TestTheRepairGateReachesUnsettledPrs:
             await mgr._repair_blocked_pr(self._flow(pr))
 
         trigger.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 10. A status that has not appeared yet is not the same as a stalled one
+# ---------------------------------------------------------------------------
+class TestMissingStatusNeedsASettledPr:
+    """An absent status is ambiguous while GitHub is still deciding.
+
+    On a PR reported ``unknown``, pre-commit.ci not having reported is
+    indistinguishable from it not having propagated yet, so treating the
+    absence as a stall would post ``pre-commit.ci run`` during an
+    ordinary propagation window and then wait five minutes for a run
+    nothing was wrong with. Once GitHub settles the PR as ``blocked``,
+    the same absence is real.
+    """
+
+    @staticmethod
+    def _client_with_no_status(client):
+        client.get_required_status_checks = AsyncMock(
+            return_value=[{"context": "pre-commit.ci - pr"}]
+        )
+        client.get.side_effect = [
+            {"statuses": []},  # step 2: nothing reported
+            [],  # step 3: duplicate-comment check
+            {"statuses": [{"context": "pre-commit.ci - pr", "state": "success"}]},
+        ]
+        client.post_issue_comment = AsyncMock()
+
+    @pytest.mark.asyncio
+    async def test_an_unsettled_pr_is_left_alone(self):
+        mgr, client = _make_manager()
+        self._client_with_no_status(client)
+
+        result = await mgr._trigger_stale_precommit_ci(
+            _make_pr_info(), treat_missing_as_stuck=False
+        )
+
+        assert result is False
+        client.post_issue_comment.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_settled_pr_is_retriggered(self):
+        """The control: the same absence, once GitHub has decided."""
+        mgr, client = _make_manager()
+        self._client_with_no_status(client)
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await mgr._trigger_stale_precommit_ci(
+                _make_pr_info(), treat_missing_as_stuck=True
+            )
+
+        assert result is True
+        client.post_issue_comment.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("state", "expected"), [("blocked", True), ("unknown", False)]
+    )
+    async def test_the_repair_passes_the_right_answer(self, state, expected):
+        """Only a settled PR lets a missing status count as stuck."""
+        from dependamerge.merge_manager import MergeResult
+        from dependamerge.merge_manager._single_pr_context import _MergeFlow
+
+        mgr, _client = _make_manager()
+        pr = _make_pr_info(mergeable_state=state)
+        flow = _MergeFlow(
+            pr_info=pr,
+            repo_owner="owner",
+            repo_name="repo",
+            result=MergeResult(pr_info=pr, status=MergeStatus.PENDING),
+        )
+
+        trigger = AsyncMock(return_value=False)
+        with (
+            patch.object(mgr, "_trigger_stale_precommit_ci", trigger),
+            patch.object(mgr, "_align_semantic_title", AsyncMock()),
+        ):
+            await mgr._repair_blocked_pr(flow)
+
+        assert trigger.await_args is not None
+        assert trigger.await_args.kwargs["treat_missing_as_stuck"] is expected
+
+    @pytest.mark.asyncio
+    async def test_an_error_still_retriggers_on_an_unsettled_pr(self):
+        """A reading is not an absence, so it needs no grace period."""
+        mgr, client = _make_manager()
+        client.get_required_status_checks = AsyncMock(
+            return_value=[{"context": "pre-commit.ci - pr"}]
+        )
+        client.get.side_effect = [
+            {"statuses": [{"context": "pre-commit.ci - pr", "state": "error"}]},
+            [],
+            {"statuses": [{"context": "pre-commit.ci - pr", "state": "success"}]},
+        ]
+        client.post_issue_comment = AsyncMock()
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await mgr._trigger_stale_precommit_ci(
+                _make_pr_info(), treat_missing_as_stuck=False
+            )
+
+        assert result is True
+        client.post_issue_comment.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 11. Duplicate suppression is scoped to the incident, not the PR's lifetime
+# ---------------------------------------------------------------------------
+class TestSuppressionIsScopedToTheIncident:
+    """A nudge silences a second nudge for the *same* stall, not forever.
+
+    pre-commit.ci can error again on a later head, after an intervening
+    run succeeded. Treating any historical ``pre-commit.ci run`` comment
+    as a duplicate would leave that second stall permanently unnudged --
+    a gap the ``error`` path makes reachable, since an error can recur
+    where a missing status could only persist.
+    """
+
+    @staticmethod
+    def _iso(seconds_ago: float) -> str:
+        ts = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+        return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _errored_status(self, age_seconds: float):
+        return {
+            "statuses": [
+                {
+                    "context": "pre-commit.ci - pr",
+                    "state": "error",
+                    "updated_at": self._iso(age_seconds),
+                }
+            ]
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_comment_from_an_earlier_episode_does_not_suppress(self):
+        mgr, client = _make_manager()
+        client.get_required_status_checks = AsyncMock(
+            return_value=[{"context": "pre-commit.ci - pr"}]
+        )
+        client.get.side_effect = [
+            self._errored_status(60),  # this error appeared a minute ago
+            [{"body": "pre-commit.ci run", "created_at": self._iso(7200)}],
+            {"statuses": [{"context": "pre-commit.ci - pr", "state": "success"}]},
+        ]
+        client.post_issue_comment = AsyncMock()
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await mgr._trigger_stale_precommit_ci(_make_pr_info())
+
+        assert result is True
+        client.post_issue_comment.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_a_comment_for_this_episode_still_suppresses(self):
+        """The control: one nudge per stall, however often we look."""
+        mgr, client = _make_manager()
+        client.get_required_status_checks = AsyncMock(
+            return_value=[{"context": "pre-commit.ci - pr"}]
+        )
+        client.get.side_effect = [
+            self._errored_status(3600),  # the error predates the comment
+            [{"body": "pre-commit.ci run", "created_at": self._iso(60)}],
+        ]
+        client.post_issue_comment = AsyncMock()
+
+        result = await mgr._trigger_stale_precommit_ci(_make_pr_info())
+
+        assert result is False
+        client.post_issue_comment.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_undated_comment_suppresses(self):
+        """An unreadable timestamp keeps us on the side of not spamming."""
+        mgr, client = _make_manager()
+        client.get_required_status_checks = AsyncMock(
+            return_value=[{"context": "pre-commit.ci - pr"}]
+        )
+        client.get.side_effect = [
+            self._errored_status(60),
+            [{"body": "pre-commit.ci run"}],
+        ]
+        client.post_issue_comment = AsyncMock()
+
+        result = await mgr._trigger_stale_precommit_ci(_make_pr_info())
+
+        assert result is False
+        client.post_issue_comment.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_missing_status_still_suppresses_on_any_comment(self):
+        """With no status there is no timestamp to scope against.
+
+        A status that has never reported cannot be told apart from the
+        one the earlier comment was about, so the previous behaviour is
+        kept for that case.
+        """
+        mgr, client = _make_manager()
+        client.get_required_status_checks = AsyncMock(
+            return_value=[{"context": "pre-commit.ci - pr"}]
+        )
+        client.get.side_effect = [
+            {"statuses": []},
+            [{"body": "pre-commit.ci run", "created_at": self._iso(7200)}],
+        ]
+        client.post_issue_comment = AsyncMock()
+
+        result = await mgr._trigger_stale_precommit_ci(_make_pr_info())
+
+        assert result is False
+        client.post_issue_comment.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 12. The poll must not mistake the pre-trigger reading for the answer
+# ---------------------------------------------------------------------------
+class TestThePollWaitsForANewReading:
+    """An ``error`` sits on the commit until pre-commit.ci replaces it.
+
+    So the first poll after a nudge sees the very failure being retried.
+    Reporting it ends the wait immediately and makes the retrigger
+    pointless -- the comment is posted, but the run is judged before
+    pre-commit.ci has had a chance to react.
+    """
+
+    @staticmethod
+    def _iso(seconds_ago: float) -> str:
+        ts = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+        return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    @pytest.mark.asyncio
+    async def test_the_unchanged_error_does_not_end_the_wait(self):
+        mgr, client = _make_manager()
+        errored = {
+            "statuses": [
+                {
+                    "context": "pre-commit.ci - pr",
+                    "state": "error",
+                    "updated_at": self._iso(300),
+                }
+            ]
+        }
+        replaced = {
+            "statuses": [
+                {
+                    "context": "pre-commit.ci - pr",
+                    "state": "success",
+                    "updated_at": self._iso(1),
+                }
+            ]
+        }
+        client.get_required_status_checks = AsyncMock(
+            return_value=[{"context": "pre-commit.ci - pr"}]
+        )
+        client.get.side_effect = [
+            errored,  # step 2: the reading that prompts the nudge
+            [],  # step 3: duplicate-comment check
+            errored,  # first poll: unchanged, must not end the wait
+            replaced,  # second poll: a genuinely new result
+        ]
+        client.post_issue_comment = AsyncMock()
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await mgr._trigger_stale_precommit_ci(_make_pr_info())
+
+        assert result is True
+
+    def test_an_older_terminal_status_reads_as_pending(self):
+        from dependamerge.merge_manager._precommit_status import (
+            parse_timestamp,
+            precommit_outcome,
+        )
+
+        since = parse_timestamp(self._iso(60))
+        payload = {
+            "statuses": [
+                {
+                    "context": "pre-commit.ci - pr",
+                    "state": "error",
+                    "updated_at": self._iso(300),
+                }
+            ]
+        }
+
+        assert precommit_outcome(payload, since) is None
+
+    def test_a_newer_terminal_status_is_the_answer(self):
+        """The control: only staleness suppresses, not the state itself."""
+        from dependamerge.merge_manager._precommit_status import (
+            parse_timestamp,
+            precommit_outcome,
+        )
+
+        since = parse_timestamp(self._iso(300))
+        payload = {
+            "statuses": [
+                {
+                    "context": "pre-commit.ci - pr",
+                    "state": "error",
+                    "updated_at": self._iso(10),
+                }
+            ]
+        }
+
+        assert precommit_outcome(payload, since) is False
+
+    def test_without_a_baseline_every_terminal_status_counts(self):
+        """The missing-status path has no timestamp to compare against."""
+        from dependamerge.merge_manager._precommit_status import precommit_outcome
+
+        payload = {"statuses": [{"context": "pre-commit.ci - pr", "state": "success"}]}
+
+        assert precommit_outcome(payload) is True
+
+
+# ---------------------------------------------------------------------------
+# 13. The duplicate check reads every page of comments
+# ---------------------------------------------------------------------------
+class TestTheDuplicateCheckReadsEveryPage:
+    """One nudge per incident is the guarantee; a long thread broke it.
+
+    A trigger comment for the current incident sitting on page two read
+    as absent, so a second ``pre-commit.ci run`` was posted.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_trigger_on_a_later_page_is_found(self):
+        mgr, client = _make_manager()
+        client.get_required_status_checks = AsyncMock(
+            return_value=[{"context": "pre-commit.ci - pr"}]
+        )
+        full_page = [{"body": f"comment {i}"} for i in range(100)]
+        client.get.side_effect = [
+            {"statuses": []},  # step 2: nothing reported
+            full_page,  # comments page 1 -- full, so keep looking
+            [{"body": "pre-commit.ci run"}],  # page 2 holds the nudge
+        ]
+        client.post_issue_comment = AsyncMock()
+
+        result = await mgr._trigger_stale_precommit_ci(_make_pr_info())
+
+        assert result is False
+        client.post_issue_comment.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_short_page_ends_the_search(self):
+        """A partial page is the last one; asking for another is waste."""
+        mgr, client = _make_manager()
+        client.get_required_status_checks = AsyncMock(
+            return_value=[{"context": "pre-commit.ci - pr"}]
+        )
+        client.get.side_effect = [
+            {"statuses": []},
+            [{"body": "just chatting"}],  # one comment: the only page
+            {"statuses": [{"context": "pre-commit.ci - pr", "state": "success"}]},
+        ]
+        client.post_issue_comment = AsyncMock()
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await mgr._trigger_stale_precommit_ci(_make_pr_info())
+
+        assert result is True
+        client.post_issue_comment.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 14. The status read spans every page
+# ---------------------------------------------------------------------------
+class TestTheStatusReadIsNotTruncated:
+    """The combined-status endpoint defaults to 30 entries a page.
+
+    A repository with more integrations than that can push
+    ``pre-commit.ci - pr`` onto a later page, where a single-page read
+    misreads an errored run as one that never reported -- leaving an
+    ``unknown`` PR unrepaired and a ``blocked`` one nudged without the
+    incident timestamp that scopes suppression.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_status_on_a_later_page_is_found(self):
+        mgr, client = _make_manager()
+        client.get_required_status_checks = AsyncMock(
+            return_value=[{"context": "pre-commit.ci - pr"}]
+        )
+        full = {
+            "statuses": [
+                {"context": f"other-{i}", "state": "success"} for i in range(100)
+            ]
+        }
+        later = {"statuses": [{"context": "pre-commit.ci - pr", "state": "failure"}]}
+        client.get.side_effect = [full, later]
+        client.post_issue_comment = AsyncMock()
+
+        result = await mgr._trigger_stale_precommit_ci(_make_pr_info())
+
+        # A genuine hook failure, found on page two: left alone rather
+        # than mistaken for a status that never reported.
+        assert result is False
+        client.post_issue_comment.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_short_page_ends_the_read(self):
+        """A partial page is the last one; asking for another is waste."""
+        mgr, client = _make_manager()
+        client.get_required_status_checks = AsyncMock(
+            return_value=[{"context": "pre-commit.ci - pr"}]
+        )
+        client.get.side_effect = [
+            {"statuses": [{"context": "pre-commit.ci - pr", "state": "success"}]},
+        ]
+        client.post_issue_comment = AsyncMock()
+
+        result = await mgr._trigger_stale_precommit_ci(_make_pr_info())
+
+        assert result is False
+        assert client.get.await_count == 1

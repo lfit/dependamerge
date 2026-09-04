@@ -113,6 +113,9 @@ class DummyProgressTracker(ProgressTracker):
     def merge_unsettled(self, pr_key: str | None = None) -> None:
         pass
 
+    def reclassify_outcome(self, from_value: str, to_value: str) -> None:
+        pass
+
     def increment_closed(self, pr_key: str | None = None) -> None:
         pass
 

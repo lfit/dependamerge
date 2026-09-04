@@ -263,10 +263,10 @@ class MergeProgressTracker(ProgressTracker):
         self._refresh_display()
 
     def merge_unsettled(self, pr_key: str | None = None) -> None:
-        """Record a PR whose blocking conditions cleared too late.
+        """Record a PR whose refusal stopped applying too late.
 
-        Nothing merged it and nothing is wrong with it: the run judged
-        it before its required checks finished.  Counted apart from
+        Nothing merged it and nothing is wrong with it: whatever GitHub
+        refused the merge over has since cleared.  Counted apart from
         ``merge_failure`` so the display does not send an operator
         looking for a cause that no longer exists, and apart from
         ``merge_pending`` because no auto-merge is armed --- this one
@@ -282,6 +282,40 @@ class MergeProgressTracker(ProgressTracker):
         with self._state_lock:
             self._finish_pr(pr_key)
             self.prs_closed += 1
+        self._refresh_display()
+
+    #: Terminal status value -> the counter that records it.  Used to
+    #: move a PR between counters when a late reconciliation changes its
+    #: outcome after the per-PR accounting has already run.
+    _COUNTER_FIELDS = {
+        "merged": "prs_merged",
+        "failed": "prs_failed",
+        "skipped": "prs_skipped",
+        "blocked": "prs_blocked",
+        "auto_merge_pending": "prs_pending",
+        "unsettled": "prs_unsettled",
+        "closed": "prs_closed",
+    }
+
+    def reclassify_outcome(self, from_value: str, to_value: str) -> None:
+        """Move one PR between terminal counters.
+
+        The end-of-run reconciliation can find that a failure recorded
+        early in the run has since cleared.  Its counter was incremented
+        when the PR finished, so correcting the outcome means correcting
+        the tally too --- otherwise the live display and the closing
+        summary disagree about the same run.
+
+        ``completed_prs`` is deliberately untouched: the PR finished
+        once, and only *which* counter holds it has changed.
+        """
+        source = self._COUNTER_FIELDS.get(from_value)
+        target = self._COUNTER_FIELDS.get(to_value)
+        with self._state_lock:
+            if source is not None and getattr(self, source, 0) > 0:
+                setattr(self, source, getattr(self, source) - 1)
+            if target is not None:
+                setattr(self, target, getattr(self, target) + 1)
         self._refresh_display()
 
     def pr_completed(self) -> None:

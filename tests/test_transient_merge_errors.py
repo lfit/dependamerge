@@ -147,7 +147,7 @@ class TestFailureSummaryHTTPErrors:
         exc = _make_405_exception()
         mgr._last_merge_exception["org/repo#39"] = exc
 
-        summary = await mgr._get_failure_summary(pr)
+        summary, _refused = await mgr._get_failure_summary(pr)
 
         assert "transient 405" in summary.lower()
         assert "githubstatus.com" in summary
@@ -163,7 +163,7 @@ class TestFailureSummaryHTTPErrors:
         exc = _make_405_exception()
         mgr._last_merge_exception["org/repo#39"] = exc
 
-        summary = await mgr._get_failure_summary(pr)
+        summary, _refused = await mgr._get_failure_summary(pr)
 
         assert "transient 405" in summary.lower()
         assert "githubstatus.com" in summary
@@ -177,7 +177,7 @@ class TestFailureSummaryHTTPErrors:
         exc = _make_405_exception()
         mgr._last_merge_exception["org/repo#39"] = exc
 
-        summary = await mgr._get_failure_summary(pr)
+        summary, _refused = await mgr._get_failure_summary(pr)
 
         # Should NOT report transient — should fall through to
         # state-based analysis for blocked PRs
@@ -204,7 +204,7 @@ class TestFailureSummaryHTTPErrors:
             "(PR state: open, mergeable: True, mergeable_state: blocked)"
         )
 
-        summary = await mgr._get_failure_summary(pr)
+        summary, _refused = await mgr._get_failure_summary(pr)
 
         assert "Required workflows" in summary
         assert "are not satisfied" in summary
@@ -222,7 +222,7 @@ class TestFailureSummaryHTTPErrors:
         exc = _make_502_exception()
         mgr._last_merge_exception["org/repo#39"] = exc
 
-        summary = await mgr._get_failure_summary(pr)
+        summary, _refused = await mgr._get_failure_summary(pr)
 
         assert "502" in summary
         assert "bad gateway" in summary.lower()
@@ -238,7 +238,7 @@ class TestFailureSummaryHTTPErrors:
             "Missing 'workflow' scope for merge"
         )
 
-        summary = await mgr._get_failure_summary(pr)
+        summary, _refused = await mgr._get_failure_summary(pr)
 
         assert "workflow" in summary.lower()
 
@@ -248,7 +248,7 @@ class TestFailureSummaryHTTPErrors:
         mgr = self._make_manager()
         pr = _make_pr_info(mergeable_state="behind", mergeable=True)
 
-        summary = await mgr._get_failure_summary(pr)
+        summary, _refused = await mgr._get_failure_summary(pr)
 
         assert "behind" in summary.lower()
 
@@ -747,7 +747,7 @@ class TestFailureSummarySurfacesGitHubDetail:
         )
         mgr._last_merge_exception["org/repo#39"] = exc
 
-        summary = await mgr._get_failure_summary(pr)
+        summary, _refused = await mgr._get_failure_summary(pr)
 
         # The actionable GitHub message is returned, trimmed of the
         # appended PR-state context.
@@ -1128,7 +1128,7 @@ class TestBlockedReasonUsesDetailedAnalysis:
             return_value="Blocked by failing check: Zizmor Scan"
         )
 
-        summary = await mgr._get_failure_summary(pr)
+        summary, _refused = await mgr._get_failure_summary(pr)
 
         assert summary == "failing check: Zizmor Scan"
         client.analyze_block_reason.assert_awaited_once()
@@ -1141,7 +1141,9 @@ class TestBlockedReasonUsesDetailedAnalysis:
             return_value="Human reviewer requested changes"
         )
 
-        assert await mgr._get_failure_summary(pr) == "human reviewer requested changes"
+        assert (await mgr._get_failure_summary(pr))[
+            0
+        ] == "human reviewer requested changes"
 
     @pytest.mark.asyncio
     async def test_ruleset_is_distinguished(self):
@@ -1151,7 +1153,9 @@ class TestBlockedReasonUsesDetailedAnalysis:
             return_value="Blocked by repository ruleset"
         )
 
-        assert await mgr._get_failure_summary(pr) == "repository ruleset prevents merge"
+        assert (await mgr._get_failure_summary(pr))[
+            0
+        ] == "repository ruleset prevents merge"
 
     @pytest.mark.asyncio
     async def test_branch_protection_still_reported_when_that_is_the_cause(self):
@@ -1161,10 +1165,9 @@ class TestBlockedReasonUsesDetailedAnalysis:
             return_value="Blocked by branch protection (requires approval)"
         )
 
-        assert (
-            await mgr._get_failure_summary(pr)
-            == "branch protection rules prevent merge"
-        )
+        assert (await mgr._get_failure_summary(pr))[
+            0
+        ] == "branch protection rules prevent merge"
 
     @pytest.mark.asyncio
     async def test_analysis_failure_falls_back_without_raising(self):
@@ -1172,7 +1175,6 @@ class TestBlockedReasonUsesDetailedAnalysis:
         pr = _make_pr_info(mergeable_state="blocked", mergeable=True)
         client.analyze_block_reason = AsyncMock(side_effect=RuntimeError("boom"))
 
-        assert (
-            await mgr._get_failure_summary(pr)
-            == "branch protection rules prevent merge"
-        )
+        assert (await mgr._get_failure_summary(pr))[
+            0
+        ] == "branch protection rules prevent merge"

@@ -141,14 +141,38 @@ class _RequiredChecksMixin(_GitHubAsyncBase):
     async def get_required_status_checks(
         self, owner: str, repo: str, branch: str
     ) -> list[dict[str, Any]]:
+        """Required status checks for *branch*, or an empty list.
+
+        Errors read as "nothing required", which suits the callers that
+        only want to know whether a particular context is enforced.  A
+        caller that must tell "nothing is required" from "could not ask"
+        wants :meth:`get_required_status_checks_reliable` instead.
+        """
+        checks, _reliable = await self.get_required_status_checks_reliable(
+            owner, repo, branch
+        )
+        return checks
+
+    async def get_required_status_checks_reliable(
+        self, owner: str, repo: str, branch: str
+    ) -> tuple[list[dict[str, Any]], bool]:
         """
         Get required status checks for a branch by inspecting rulesets.
 
         Only rulesets whose ``conditions.ref_name`` patterns match *branch*
         are considered.  Falls back to branch protection rules if rulesets
         are not available.
-        Returns a list of dicts with 'context' and optionally 'integration_id'.
-        Results are deduplicated by ``context``.
+        Returns ``(checks, reliable)``, where each check is a dict with
+        'context' and optionally 'integration_id', deduplicated by
+        ``context``.
+
+        ``reliable`` is False when any lookup failed, which is what makes
+        the empty list interpretable.  A token that cannot read rulesets
+        --- ``GET /orgs/{org}/rulesets`` returned 403 throughout the
+        503-PR run in ``docs/BULK_RUN_PERFORMANCE_AUDIT.md`` --- produces
+        exactly the same empty list as a branch with no requirements, and
+        a caller reasoning about *absence* must be able to tell them
+        apart.
 
         Results are cached per ``owner/repo@branch`` for the session:
         required-check configuration is repo/branch-level state that does
@@ -165,7 +189,8 @@ class _RequiredChecksMixin(_GitHubAsyncBase):
         cache_key = f"{owner}/{repo}@{branch}"
         cached = self._required_checks_cache.get(cache_key)
         if cached is not None:
-            return list(cached)
+            # Only reliable results are cached, so a hit is reliable.
+            return list(cached), True
 
         required_checks: list[dict[str, Any]] = []
         seen_contexts: set[str] = set()
@@ -181,13 +206,19 @@ class _RequiredChecksMixin(_GitHubAsyncBase):
 
         # Resolve the repo's actual default branch so that ~DEFAULT_BRANCH
         # ruleset conditions are evaluated correctly (not hardcoded to
-        # main/master).
+        # main/master).  A branch that could not be resolved makes the
+        # verdict unreliable rather than merely approximate: the ruleset
+        # filter then treats ~DEFAULT_BRANCH conditions as applicable on
+        # any branch, so on a non-default base the checks collected may
+        # belong to a branch this pull request is not targeting.
         default_branch = await self._resolve_default_branch(owner, repo)
 
         # Try rulesets first (org-level and repo-level)
         ruleset_checks, reliable = await self._fetch_ruleset_required_checks(
             owner, repo, branch, default_branch
         )
+        if default_branch is None:
+            reliable = False
         _add(ruleset_checks)
 
         # Fall back to branch protection if no ruleset checks found
@@ -202,7 +233,7 @@ class _RequiredChecksMixin(_GitHubAsyncBase):
 
         if reliable:
             self._required_checks_cache[cache_key] = list(required_checks)
-        return required_checks
+        return required_checks, reliable
 
     async def get_branch_protection(
         self, owner: str, repo: str, branch: str

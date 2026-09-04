@@ -222,7 +222,7 @@ class _MergeManagerBase:
     ) -> tuple[str | None, bool | None]:
         raise NotImplementedError
 
-    async def _get_failure_summary(self, pr_info: PullRequestInfo) -> str:
+    async def _get_failure_summary(self, pr_info: PullRequestInfo) -> tuple[str, bool]:
         raise NotImplementedError
 
     async def _get_merge_dispatch_lock(self, owner: str, repo: str) -> asyncio.Lock:
@@ -339,6 +339,7 @@ class _MergeManagerBase:
         repo: str,
         result: MergeResult,
         failure_reason: str,
+        refused: bool = False,
     ) -> MergeResult:
         raise NotImplementedError
 
@@ -388,7 +389,14 @@ class _MergeManagerBase:
     ) -> RecreateResult:
         raise NotImplementedError
 
-    async def _trigger_stale_precommit_ci(self, pr_info: PullRequestInfo) -> bool:
+    async def _reconcile_reported_failures(
+        self, results: list[MergeResult]
+    ) -> list[MergeResult]:
+        raise NotImplementedError
+
+    async def _trigger_stale_precommit_ci(
+        self, pr_info: PullRequestInfo, *, treat_missing_as_stuck: bool = True
+    ) -> bool:
         raise NotImplementedError
 
     async def _wait_for_auto_merge(

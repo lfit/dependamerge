@@ -142,17 +142,38 @@ class _NotMergeableMixin(_LiveBlockerMixin):
         an absence of evidence rather than evidence of a block --- but it
         is equally not evidence that the PR would merge, and only that
         would justify withdrawing a reported failure.
+
+        A closed pull request never qualifies, whatever its mergeable
+        state says.  :meth:`_confirm_failure` reaches here for one that
+        is closed with merged-ness unknown --- a trimmed payload carrying
+        neither ``merged`` nor ``merged_at`` --- and such a payload can
+        still report ``clean``.  Telling an operator to re-run and merge
+        a closed PR would be advice they cannot act on.
+
+        Only a failure GitHub itself produced by *refusing the merge* is
+        eligible.  The run reports ``FAILED`` for its own troubles too
+        --- an unhandled exception, a rebase that did not complete --- and
+        those say nothing about mergeability.  Rewriting one because the
+        PR happens to read ``clean`` would bury the actionable error in a
+        note the summary never prints, and advise a re-run that would
+        fail identically.
         """
+        if not result.merge_refused:
+            return result
+        if refreshed.get("state") == "closed":
+            return result
         state = refreshed.get("mergeable_state")
         if not isinstance(state, str):
             return result
         if state not in self._MERGEABLE_NOW_STATES:
-            return await self._name_the_live_blocker(pr_info, result, state)
-        if refreshed.get("mergeable") is False:
-            # A payload asserting both "clean" and "not mergeable"
-            # contradicts itself.  Keep the failure rather than choose a
-            # side: under-reporting a success is recoverable by re-running,
-            # while withdrawing a real failure loses it silently.
+            return await self._name_the_live_blocker(pr_info, result, state, refreshed)
+        if refreshed.get("mergeable") is not True:
+            # Only affirmative mergeability withdraws a failure.  A
+            # ``null`` means GitHub is still computing --- the same
+            # absence of evidence that keeps ``unknown`` a failure, and
+            # the reason ``_state_is_waitable`` waits unless it sees
+            # ``True``.  A payload asserting both ``clean`` and ``False``
+            # contradicts itself, and is refused by the same rule.
             return result
 
         self.log.info(
@@ -165,10 +186,15 @@ class _NotMergeableMixin(_LiveBlockerMixin):
             level="debug",
         )
         result.status = MergeStatus.UNSETTLED
-        if result.error:
+        if result.error and result.warning is None:
             # Kept as a note, the way a stale reason is kept on a PR that
             # turned out to have merged: it describes a state that no
             # longer holds, so the summary must not show it as the cause.
+            #
+            # Only when nothing is noted yet.  The end-of-run pass calls
+            # this a second time, by which point ``error`` may already be
+            # a live reading --- and overwriting the note with that would
+            # discard the rejection this is meant to preserve.
             result.warning = f"the merge was refused as: {result.error}"
         result.error = (
             f"not settled during the run; now {state} and expected to merge on a re-run"
@@ -180,6 +206,7 @@ class _NotMergeableMixin(_LiveBlockerMixin):
         pr_info: PullRequestInfo,
         result: MergeResult,
         state: str,
+        refreshed: dict[str, Any],
     ) -> MergeResult:
         """Replace a rejection's prose with what is blocking the PR now.
 
@@ -193,6 +220,13 @@ class _NotMergeableMixin(_LiveBlockerMixin):
         --- a status context, invisible to any check-runs-only view ---
         was the sole blocker.
 
+        The head and base come from *refreshed* rather than from the
+        snapshot taken before the merge was attempted.  A dependabot
+        rebase moves the head, and this tool requests those rebases, so
+        reading the snapshot's commit would report conditions belonging
+        to a commit nobody is trying to merge.  The same reasoning keeps
+        the head current during the wait (``_wait.py``).
+
         Only ``blocked`` is re-examined.  A conflicted, behind or draft
         PR is already described accurately by its state, so reading its
         checks would spend requests without adding anything.
@@ -203,15 +237,64 @@ class _NotMergeableMixin(_LiveBlockerMixin):
         """
         if state != "blocked":
             return result
-        blockers = await self._live_blocking_conditions(pr_info)
-        if not blockers:
+        head = (refreshed.get("head") or {}).get("sha")
+        head_sha = head if isinstance(head, str) and head else pr_info.head_sha
+        base = (refreshed.get("base") or {}).get("ref")
+        base_branch = (
+            base if isinstance(base, str) and base else (pr_info.base_branch or "main")
+        )
+        rejection = result.error or ""
+
+        blocking, also_failing, complete = await self._live_blocking_conditions(
+            pr_info,
+            head_sha=head_sha,
+            base_branch=base_branch,
+            rejection=rejection,
+        )
+        reason = self._compose_blocker_reason(blocking, also_failing, complete)
+        if reason is None:
             # Nothing could be established.  An empty reading is not an
             # all-clear, so the reason already recorded stands.
             return result
-        if result.error:
+        if result.error and result.warning is None:
+            # See :meth:`_settle_stale_failure`: the note records what
+            # GitHub said, and the end-of-run pass must not replace it
+            # with the live reading this pass is about to supersede.
             result.warning = f"the merge was refused as: {result.error}"
-        result.error = "blocked by " + "; ".join(blockers)
+        result.error = reason
         return result
+
+    @staticmethod
+    def _compose_blocker_reason(
+        blocking: list[str], also_failing: list[str], complete: bool
+    ) -> str | None:
+        """Word the live reading without over-claiming what it proves.
+
+        Only conditions a rule shows to be required are presented as
+        blocking.  A check that is merely failing is still worth naming
+        --- it is very often the cause --- but calling it the blocker
+        would repeat the mistake this whole change exists to correct,
+        in the opposite direction.
+
+        A proven blocker stands on its own evidence, so it is reported
+        whether or not every probe answered.  An unproven one is not:
+        with a probe missing, "these are failing" may be the visible
+        half of a picture whose other half held the real cause, and
+        replacing the rejection with it would trade a stale reason for a
+        confidently wrong one.
+        """
+        if blocking and also_failing:
+            return (
+                "blocked by "
+                + "; ".join(blocking)
+                + "; also failing: "
+                + ", ".join(also_failing)
+            )
+        if blocking:
+            return "blocked by " + "; ".join(blocking)
+        if also_failing and complete:
+            return "failing checks: " + ", ".join(also_failing)
+        return None
 
     async def _handle_not_mergeable_pr(
         self, pr_info: PullRequestInfo, result: MergeResult

@@ -14,7 +14,7 @@ import asyncio
 
 from ..bot_identity import is_dependabot
 from ..models import PullRequestInfo
-from ._failure_summary import _FailureSummaryFromExceptionMixin
+from ._failure_summary import _FailureSummaryFromExceptionMixin, _is_state_verdict
 from ._types import MergeResult, MergeStatus
 
 
@@ -28,6 +28,7 @@ class _FailureReportingMixin(_FailureSummaryFromExceptionMixin):
         repo: str,
         result: MergeResult,
         failure_reason: str,
+        refused: bool = False,
     ) -> MergeResult:
         """Report a failed merge, upgrading to a stuck-check cause if found.
 
@@ -40,6 +41,14 @@ class _FailureReportingMixin(_FailureSummaryFromExceptionMixin):
         self-merge rule.  Otherwise emit the generic failure line.
 
         Sets ``result`` to ``FAILED`` and returns it.
+
+        *refused* marks the result as GitHub declining the merge on the
+        pull request's state, which is what lets the confirmation step
+        re-judge it later: such a reason is a snapshot of one instant and
+        may have expired by the time the summary prints.  A stuck check
+        is also a state, so that branch qualifies too.  A missing token
+        scope, a 403 or a 502 does not, and passing them through here
+        unmarked keeps the message that explains what to fix.
         """
         stuck_reported = False
         if not is_dependabot(pr_info.author) and not self.preview_mode:
@@ -71,6 +80,9 @@ class _FailureReportingMixin(_FailureSummaryFromExceptionMixin):
                 stuck_reported = True
 
         result.status = MergeStatus.FAILED
+        # A stuck check is a reading of the PR's state, so it expires the
+        # same way a rejection does.
+        result.merge_refused = refused or stuck_reported
         if not stuck_reported:
             # Use the (now informative) failure reason as the result
             # error too, so the end-of-run summary surfaces the real
@@ -119,7 +131,7 @@ class _FailureReportingMixin(_FailureSummaryFromExceptionMixin):
         # as a silently truthy value.
         return reason if isinstance(reason, str) else ""
 
-    async def _get_failure_summary(self, pr_info: PullRequestInfo) -> str:
+    async def _get_failure_summary(self, pr_info: PullRequestInfo) -> tuple[str, bool]:
         """
         Generate a detailed failure summary based on PR state.
 
@@ -127,7 +139,20 @@ class _FailureReportingMixin(_FailureSummaryFromExceptionMixin):
             pr_info: Pull request information
 
         Returns:
-            Detailed description of why the merge failed
+            A ``(reason, refused)`` pair.  ``refused`` says the reason
+            describes GitHub declining the merge on the pull request's
+            *state*, which is the only kind of reason a later reading may
+            withdraw.
+
+            With no exception to explain the failure, every branch below
+            reads the PR's own state, so the answer is a snapshot of it
+            by construction.  With an exception this code could not
+            classify --- a retry-exhausted network timeout carries no
+            ``GitHub:`` body and no recognisable status --- the state
+            summary is still the best description available, but nothing
+            about the failure says the pull request was judged, so it is
+            not withdrawable.  Only a status GitHub uses for a verdict
+            makes it so.
         """
         # Check if we have a stored exception for this PR
         pr_key = f"{pr_info.repository_full_name}#{pr_info.number}"
@@ -141,8 +166,12 @@ class _FailureReportingMixin(_FailureSummaryFromExceptionMixin):
             )
             if from_exception is not None:
                 return from_exception
+            return (
+                await self._failure_summary_from_state(pr_info),
+                _is_state_verdict(str(last_exception)),
+            )
 
-        return await self._failure_summary_from_state(pr_info)
+        return await self._failure_summary_from_state(pr_info), True
 
     async def _failure_summary_from_state(self, pr_info: PullRequestInfo) -> str:
         """Infer why a merge failed from the PR's reported state."""

@@ -564,7 +564,7 @@ class TestTheFlowActsOnTheOutcome:
         """``MERGED`` records the success without a second merge call."""
         mgr, _ = _mgr()
         replacement = _pr(number=107)
-        mgr._get_failure_summary = AsyncMock(return_value="blocked")  # type: ignore[method-assign]
+        mgr._get_failure_summary = AsyncMock(return_value=("blocked", True))  # type: ignore[method-assign]
         mgr._external_closure_result = AsyncMock(return_value=None)  # type: ignore[method-assign]
         mgr._behind_auto_merge_result = lambda flow: None  # type: ignore[method-assign]
         mgr._maybe_recreate_dependabot_pr = AsyncMock(  # type: ignore[method-assign]
@@ -585,7 +585,7 @@ class TestTheFlowActsOnTheOutcome:
     async def test_a_ready_replacement_is_merged(self) -> None:
         mgr, _ = _mgr()
         replacement = _pr(number=107)
-        mgr._get_failure_summary = AsyncMock(return_value="blocked")  # type: ignore[method-assign]
+        mgr._get_failure_summary = AsyncMock(return_value=("blocked", True))  # type: ignore[method-assign]
         mgr._external_closure_result = AsyncMock(return_value=None)  # type: ignore[method-assign]
         mgr._behind_auto_merge_result = lambda flow: None  # type: ignore[method-assign]
         mgr._maybe_recreate_dependabot_pr = AsyncMock(  # type: ignore[method-assign]
@@ -612,7 +612,7 @@ class TestTheFlowActsOnTheOutcome:
         """
         mgr, _ = _mgr()
         replacement = _pr(number=107)
-        mgr._get_failure_summary = AsyncMock(return_value="blocked")  # type: ignore[method-assign]
+        mgr._get_failure_summary = AsyncMock(return_value=("blocked", True))  # type: ignore[method-assign]
         mgr._external_closure_result = AsyncMock(return_value=None)  # type: ignore[method-assign]
         mgr._behind_auto_merge_result = lambda flow: None  # type: ignore[method-assign]
         mgr._maybe_recreate_dependabot_pr = AsyncMock(  # type: ignore[method-assign]
@@ -640,7 +640,7 @@ class TestTheFlowActsOnTheOutcome:
         """
         mgr, client = _mgr()
         replacement = _pr(number=107)
-        mgr._get_failure_summary = AsyncMock(return_value="blocked")  # type: ignore[method-assign]
+        mgr._get_failure_summary = AsyncMock(return_value=("blocked", True))  # type: ignore[method-assign]
         mgr._external_closure_result = AsyncMock(return_value=None)  # type: ignore[method-assign]
         mgr._behind_auto_merge_result = lambda flow: None  # type: ignore[method-assign]
         mgr._maybe_recreate_dependabot_pr = AsyncMock(  # type: ignore[method-assign]
@@ -681,7 +681,7 @@ class TestTheFlowActsOnTheOutcome:
         """Not merged again, and not reported as a failure either."""
         mgr, _ = _mgr()
         replacement = _pr(number=107)
-        mgr._get_failure_summary = AsyncMock(return_value="blocked")  # type: ignore[method-assign]
+        mgr._get_failure_summary = AsyncMock(return_value=("blocked", True))  # type: ignore[method-assign]
         mgr._external_closure_result = AsyncMock(return_value=None)  # type: ignore[method-assign]
         mgr._behind_auto_merge_result = lambda flow: None  # type: ignore[method-assign]
         mgr._maybe_recreate_dependabot_pr = AsyncMock(  # type: ignore[method-assign]

@@ -59,7 +59,7 @@ def _print_final_merge_summary(real_results: list[MergeResult]) -> None:
     if final_unsettled > 0:
         console.print(
             f"⏱️ Unsettled {final_unsettled} PRs "
-            "(judged before their checks finished; re-run to merge)"
+            "(the refusal no longer applies; re-run to merge)"
         )
     if final_closed > 0:
         console.print(f"🚪 Closed without merging: {final_closed} PRs")
@@ -182,7 +182,7 @@ def _display_merge_results(
     if unsettled_count > 0:
         console.print(
             f"⏱️ Unsettled {unsettled_count} PRs "
-            "(judged before their checks finished; re-run to merge)"
+            "(the refusal no longer applies; re-run to merge)"
         )
     if closed_count > 0:
         console.print(f"🚪 Closed without merging: {closed_count} PRs")

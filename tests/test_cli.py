@@ -1596,6 +1596,23 @@ class TestFormatFailureReason:
         reason = "Repository rule violations found"
         assert _format_failure_reason(reason) == [reason]
 
+    def test_a_quote_inside_a_workflow_name_is_not_a_status_check(self):
+        # Status-check names are quoted individually, so reading them
+        # from the whole string also picks up any double quote a
+        # *workflow* name happens to contain -- inventing a context
+        # called 'Fast', and handing DCO the workflows' verb.  Each
+        # clause is read only within its own span.
+        reason = (
+            "Repository rule violations found Required status check "
+            '"DCO" is expected. Required workflows \'Build "Fast"\' failed'
+        )
+        assert _format_failure_reason(reason) == [
+            "Repository rule violations found / Required workflows failed"
+            " / Required status checks not satisfied",
+            '• Required workflow: Build "Fast"',
+            "• Required status check: DCO",
+        ]
+
 
 def _make_merge_context(show_progress: bool) -> _MergeContext:
     """Build a minimal ``_MergeContext`` for tracker-lifecycle tests."""

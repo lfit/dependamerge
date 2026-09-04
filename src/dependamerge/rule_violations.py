@@ -136,13 +136,12 @@ def _verb_clause(reason: str) -> str:
     workflow = _split_workflow_names(reason)
     if workflow is not None:
         return workflow[1].split(_STATUS_CHECK_MARKER, 1)[0]
-    if _STATUS_CHECK_MARKER in reason:
+    clause = _status_check_clause(reason)
+    if clause:
         # ``Required status check "X" is failing.`` --- take everything
         # after the last quoted name.
-        idx = reason.rfind('"')
-        if idx != -1:
-            return reason[idx + 1 :]
-        return reason[reason.find(_STATUS_CHECK_MARKER) :]
+        idx = clause.rfind('"')
+        return clause[idx + 1 :] if idx != -1 else clause
     return reason
 
 
@@ -174,11 +173,37 @@ def required_workflow_names(reason: str) -> list[str]:
     return list(dict.fromkeys(workflow_name_fragments(reason)))
 
 
+def _status_check_clause(reason: str) -> str:
+    """The span of *reason* that belongs to the status-check rule.
+
+    Status-check names are quoted individually, so reading them from the
+    whole string also reads any double quote a *workflow* name happens
+    to contain, and the verb would be taken from whichever clause ended
+    last.  Cutting the clause at the other rule's marker keeps each
+    reading inside its own sentence.  Either rule may come first, so the
+    cut is made relative to the marker rather than at a fixed position.
+
+    This assumes a rule name does not itself contain the other clause's
+    marker.  Names are arbitrary text, so that is an assumption rather
+    than a guarantee --- but GitHub escapes neither delimiter, so a name
+    carrying one is not reliably parseable by any rule, and the failure
+    is confined to how a reason renders.  The *cause* a blocked PR
+    reports is read from live API state, not from this string.
+    """
+    start = reason.find(_STATUS_CHECK_MARKER)
+    if start == -1:
+        return ""
+    clause = reason[start:]
+    end = clause.find(_WORKFLOW_MARKER)
+    return clause if end == -1 else clause[:end]
+
+
 def required_status_check_names(reason: str) -> list[str]:
     """Context names quoted in a ``Required status check \"…\"`` clause."""
-    if not reason or _STATUS_CHECK_MARKER not in reason:
+    clause = _status_check_clause(reason)
+    if not clause:
         return []
-    names = [c.strip() for c in re.findall(r'"([^"]+)"', reason) if c.strip()]
+    names = [c.strip() for c in re.findall(r'"([^"]+)"', clause) if c.strip()]
     return list(dict.fromkeys(names))
 
 
@@ -191,20 +216,10 @@ def status_check_violation_verb(reason: str) -> str:
     status checks is wrong whenever the two differ, which is the usual
     case: workflows that have not finished sit alongside a status
     context that has already failed.
-
-    Status-check names are wrapped in double quotes and workflow names
-    in single ones, so the last double quote closes the final context
-    name.  The clause is cut at the workflow marker for the same reason
-    :func:`_verb_clause` cuts at the status-check one --- either clause
-    may come first, and neither may borrow the other's outcome.
     """
-    if not reason or _STATUS_CHECK_MARKER not in reason:
+    clause = _status_check_clause(reason)
+    if not clause:
         return "not satisfied"
-    closing = reason.rfind('"')
-    clause = (
-        reason[closing + 1 :]
-        if closing != -1
-        else reason[reason.find(_STATUS_CHECK_MARKER) :]
-    )
-    clause = clause.split(_WORKFLOW_MARKER, 1)[0]
-    return "failed" if "fail" in clause.lower() else "not satisfied"
+    closing = clause.rfind('"')
+    tail = clause[closing + 1 :] if closing != -1 else clause
+    return "failed" if "fail" in tail.lower() else "not satisfied"
