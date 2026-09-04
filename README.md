@@ -783,6 +783,39 @@ Enter the string above to continue (or press Enter to cancel):
 🚀 Final Results: 2 merged, 0 failed
 ```
 
+### Run Outcomes
+
+Every pull request a run touches ends in a single category. Each
+category keeps its own counter, because each calls for a different
+response:
+
+<!-- markdownlint-disable MD013 MD060 -->
+
+| Outcome               | Meaning                                                     | What to do                    |
+| --------------------- | ----------------------------------------------------------- | ----------------------------- |
+| ✅ Merged             | The run merged it                                           | Nothing                       |
+| ⏳ Auto-merge pending | Armed; GitHub completes the merge once required checks pass | Nothing                       |
+| ⏱️ Unsettled          | Judged before its checks finished, and mergeable now        | Re-run to merge it            |
+| ❌ Failed             | A condition the run could not clear is blocking it          | Investigate the named blocker |
+| 🛑 Blocked            | Will not merge without human help                           | Investigate                   |
+| ⏭️ Skipped            | Already merged externally, or out of scope                  | Nothing                       |
+| 🚪 Closed             | Closed without merging during the run                       | Nothing                       |
+
+<!-- markdownlint-enable MD013 MD060 -->
+
+**Unsettled is not a failure.** GitHub's merge rejection describes the
+state at the instant of the attempt, which routinely names required
+checks that had not yet finished. The run re-reads every failure before
+it prints the summary, and records a pull request that has since become
+mergeable as unsettled rather than failed. The failure count then holds
+work that genuinely needs attention.
+
+A failure names the condition blocking the merge, which the run derives
+from live check runs **and** commit status contexts. The two do not
+overlap: Actions workflows report as check runs, while pre-commit.ci,
+DCO and similar integrations report as status contexts. Reading either
+alone shows half the picture.
+
 ### Dry Run Mode
 
 Use `--dry-run` to perform a complete analysis and preview without making any
