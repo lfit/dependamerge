@@ -119,10 +119,17 @@ class TestTriggerPostsComment:
 # 2. Status already reported -> no comment
 # ---------------------------------------------------------------------------
 class TestStatusAlreadyReported:
-    """When pre-commit.ci has already reported a status (any state)."""
+    """When pre-commit.ci has reported an answer, leave it alone.
+
+    ``error`` is deliberately absent from this list.  The commit status
+    API separates "the check failed" from "the checker failed", and
+    pre-commit.ci uses that separation: ``failure`` is the hooks
+    reporting a genuine problem, ``error`` is a run that never completed.
+    Only the first is an answer.  See ``TestInfrastructureErrorRetrigger``.
+    """
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("state", ["success", "pending", "failure", "error"])
+    @pytest.mark.parametrize("state", ["success", "pending", "failure"])
     async def test_no_comment_when_status_exists(self, state):
         mgr, client = _make_manager()  # typed mock client pattern (see conftest.py)
         pr = _make_pr_info()
@@ -135,6 +142,95 @@ class TestStatusAlreadyReported:
                 "statuses": [{"context": "pre-commit.ci - pr", "state": state}]
             }
         )
+        client.post_issue_comment = AsyncMock()
+
+        result = await mgr._trigger_stale_precommit_ci(pr)
+
+        assert result is False
+        client.post_issue_comment.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 2a. Status reported as ``error`` -> retrigger
+# ---------------------------------------------------------------------------
+class TestInfrastructureErrorRetrigger:
+    """An ``error`` is pre-commit.ci failing, not the change failing.
+
+    Uploads that 5xx and containers that die leave the context in
+    ``error``, which is terminal: nothing further will report, and the
+    PR stays blocked on a verdict nobody reached.  Re-running clears it,
+    where re-running a genuine hook ``failure`` only reproduces it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_an_error_state_is_retriggered(self):
+        mgr, client = _make_manager()
+        pr = _make_pr_info()
+
+        client.get_required_status_checks = AsyncMock(
+            return_value=[{"context": "pre-commit.ci - pr"}]
+        )
+        error = {"statuses": [{"context": "pre-commit.ci - pr", "state": "error"}]}
+        success = {"statuses": [{"context": "pre-commit.ci - pr", "state": "success"}]}
+        client.get.side_effect = [
+            error,  # step 2: status check (errored)
+            [],  # step 3: duplicate-comment check
+            success,  # first poll iteration
+        ]
+        client.post_issue_comment = AsyncMock()
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await mgr._trigger_stale_precommit_ci(pr)
+
+        assert result is True
+        client.post_issue_comment.assert_called_once_with(
+            "owner", "repo", 42, "pre-commit.ci run"
+        )
+
+    def test_an_error_needs_no_age_to_qualify(self):
+        """A terminal state does not become more stuck with time.
+
+        The pending threshold exists to let a slow-but-normal run
+        finish.  There is nothing here left to finish.
+        """
+        mgr, _client = _make_manager()
+        now = datetime.now(timezone.utc)
+        just_now = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        assert (
+            mgr._precommit_run_is_stuck(
+                {"state": "error", "updated_at": just_now}, now, _make_pr_info()
+            )
+            is True
+        )
+
+    def test_a_genuine_hook_failure_is_left_alone(self):
+        """The control that keeps the distinction meaningful.
+
+        Re-running a failing hook posts a comment and then waits five
+        minutes to be told the same thing.
+        """
+        mgr, _client = _make_manager()
+        now = datetime.now(timezone.utc)
+
+        assert (
+            mgr._precommit_run_is_stuck({"state": "failure"}, now, _make_pr_info())
+            is False
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_existing_trigger_comment_stops_a_second(self):
+        """One nudge per PR, however many runs observe the error."""
+        mgr, client = _make_manager()
+        pr = _make_pr_info()
+
+        client.get_required_status_checks = AsyncMock(
+            return_value=[{"context": "pre-commit.ci - pr"}]
+        )
+        client.get.side_effect = [
+            {"statuses": [{"context": "pre-commit.ci - pr", "state": "error"}]},
+            [{"body": "pre-commit.ci run"}],
+        ]
         client.post_issue_comment = AsyncMock()
 
         result = await mgr._trigger_stale_precommit_ci(pr)
@@ -883,3 +979,78 @@ class TestPostWaitRetrigger:
         # block reason: the run defers to auto-merge.
         assert result.status == MergeStatus.AUTO_MERGE_PENDING
         merge_retry.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 9. The repair gate reaches PRs whose state GitHub has not settled
+# ---------------------------------------------------------------------------
+class TestTheRepairGateReachesUnsettledPrs:
+    """``unknown`` is the window a freshly pushed PR sits in.
+
+    GitHub computes mergeability in the background, so a PR whose checks
+    have not settled reports ``unknown`` rather than ``blocked`` --- and
+    those are exactly the PRs a stalled pre-commit.ci repair exists for.
+    Gating the repair on ``blocked`` alone skipped them.
+    """
+
+    @staticmethod
+    def _flow(pr):
+        from dependamerge.merge_manager import MergeResult
+        from dependamerge.merge_manager._single_pr_context import _MergeFlow
+
+        return _MergeFlow(
+            pr_info=pr,
+            repo_owner="owner",
+            repo_name="repo",
+            result=MergeResult(pr_info=pr, status=MergeStatus.PENDING),
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", ["blocked", "unknown"])
+    async def test_the_repair_runs(self, state):
+        mgr, _client = _make_manager()
+        pr = _make_pr_info(mergeable_state=state)
+
+        trigger = AsyncMock(return_value=False)
+        with (
+            patch.object(mgr, "_trigger_stale_precommit_ci", trigger),
+            patch.object(mgr, "_align_semantic_title", AsyncMock()),
+        ):
+            await mgr._repair_blocked_pr(self._flow(pr))
+
+        trigger.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", ["clean", "dirty", "behind", "draft"])
+    async def test_a_state_with_its_own_cause_is_left_alone(self, state):
+        """The control: these describe themselves, and none is repairable.
+
+        A conflicted or stale branch needs a rebase, not a nudged check,
+        so spending requests there would buy nothing.
+        """
+        mgr, _client = _make_manager()
+        pr = _make_pr_info(mergeable_state=state)
+
+        trigger = AsyncMock(return_value=False)
+        with (
+            patch.object(mgr, "_trigger_stale_precommit_ci", trigger),
+            patch.object(mgr, "_align_semantic_title", AsyncMock()),
+        ):
+            await mgr._repair_blocked_pr(self._flow(pr))
+
+        trigger.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_preview_mode_still_triggers_nothing(self):
+        """Widening the gate must not widen preview's side effects."""
+        mgr, _client = _make_manager(preview_mode=True)
+        pr = _make_pr_info(mergeable_state="unknown")
+
+        trigger = AsyncMock(return_value=False)
+        with (
+            patch.object(mgr, "_trigger_stale_precommit_ci", trigger),
+            patch.object(mgr, "_align_semantic_title", AsyncMock()),
+        ):
+            await mgr._repair_blocked_pr(self._flow(pr))
+
+        trigger.assert_not_called()

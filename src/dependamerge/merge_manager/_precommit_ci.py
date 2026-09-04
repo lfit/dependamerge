@@ -97,7 +97,9 @@ class _PrecommitCiMixin(_MergeManagerBase):
         run.
 
         A run is treated as stuck when the status is missing entirely,
-        or when it has been ``pending`` for longer than
+        when pre-commit.ci reported ``error`` (it could not complete a
+        run, as distinct from the hooks failing), or when it has been
+        ``pending`` for longer than
         :data:`PRECOMMIT_CI_STUCK_PENDING_SECONDS` (a slow-but-normal
         run within that window is left alone).
 
@@ -118,9 +120,10 @@ class _PrecommitCiMixin(_MergeManagerBase):
             return False
 
         # 2. Inspect the existing pre-commit.ci status.  Retrigger when
-        #    it is missing entirely or has been ``pending`` past the
-        #    stuck threshold; leave any other state (success / failure
-        #    / error, or a pending run still within its normal window).
+        #    it is missing entirely, when pre-commit.ci reported an
+        #    ``error``, or when it has been ``pending`` past the stuck
+        #    threshold; leave a reported ``success`` / ``failure``, and
+        #    a pending run still within its normal window.
         now = datetime.now(timezone.utc)
         fetched, precommit_status = await self._precommit_status(
             repo_owner, repo_name, pr_info
@@ -215,9 +218,29 @@ class _PrecommitCiMixin(_MergeManagerBase):
         from dependamerge import merge_manager as _mm
 
         state = precommit_status.get("state")
+        if state == "error":
+            # The two terminal states mean different things, the way the
+            # commit status API intends: ``failure`` is the hooks
+            # reporting a genuine problem with the change, ``error`` is
+            # pre-commit.ci failing to complete a run at all --- an
+            # upload that 5xx'd, a container that died.  The first
+            # reports the same result however often it is re-run; the
+            # second routinely clears on the next attempt, and until it
+            # does the PR stays blocked on a verdict nobody reached.
+            #
+            # Age is not consulted.  A terminal state does not become
+            # more stuck with time, and there is nothing left to await.
+            self.log.info(
+                "pre-commit.ci on %s#%s reported an infrastructure error; "
+                "treating as stuck.",
+                pr_info.repository_full_name,
+                pr_info.number,
+            )
+            return True
         if state != "pending":
-            # A reported, non-pending result (success / failure /
-            # error) is not stale — nothing to retrigger.
+            # ``success`` or ``failure`` is an answer, not a stall.
+            # Re-running a genuine hook failure would post a comment and
+            # then wait five minutes to be told the same thing.
             return False
         # Pending: only stuck once it has been pending longer than
         # the threshold.
