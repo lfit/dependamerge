@@ -781,7 +781,7 @@ class TestMergeSinglePrRecreateIntegration:
             patch.object(
                 mgr,
                 "_get_failure_summary",
-                return_value="branch protection rules prevent merge",
+                return_value=("branch protection rules prevent merge", True),
             ),
         ):
             # Make the new PR merge succeed
@@ -914,7 +914,7 @@ class TestMergeSinglePrRecreateIntegration:
             patch.object(
                 mgr,
                 "_get_failure_summary",
-                return_value="branch protection rules prevent merge",
+                return_value=("branch protection rules prevent merge", True),
             ),
         ):
             result = await mgr._merge_single_pr(pr)
@@ -972,7 +972,7 @@ class TestMergeSinglePrRecreateIntegration:
             patch.object(
                 mgr,
                 "_get_failure_summary",
-                return_value="branch protection rules prevent merge",
+                return_value=("branch protection rules prevent merge", True),
             ),
         ):
             result = await mgr._merge_single_pr(pr)

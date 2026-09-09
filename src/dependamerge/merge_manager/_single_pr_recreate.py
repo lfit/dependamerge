@@ -128,6 +128,13 @@ class _SinglePrRecreateMixin(_MergeManagerBase):
         #
         # So confirm against the **replacement** before reporting.
         result.status = MergeStatus.FAILED
+        # Deliberately not marked as a refusal.  ``_dispatch_recreated_merge``
+        # converts every exception to ``False`` --- an unusable client, a
+        # permission error, a transport failure --- so this ``False``
+        # does not distinguish GitHub declining the merge from the run
+        # failing to ask.  Marking it would let a replacement that reads
+        # ``clean`` be reported as merely unsettled, losing whichever of
+        # those actually happened.
         result.pr_info = recreated_pr
         result.error = (
             f"Dependabot recreated PR #{recreated_pr.number} but merge still failed"

@@ -17,6 +17,7 @@ from typing import (
 )
 from urllib.parse import quote
 
+from ..check_runs import FAILING_CONCLUSIONS, latest_check_run_per_name
 from ._base import _GitHubAsyncBase
 
 
@@ -31,14 +32,71 @@ class _ChecksMixin(_GitHubAsyncBase):
         Returns the raw runs, including superseded duplicates: deciding
         which run is authoritative for a given name belongs to
         :mod:`dependamerge.check_runs`, not here.
+
+        Paginated.  A busy commit carries more than one page, and every
+        caller reasons about *absence* --- "nothing is failing", "only
+        semantic checks are failing" --- so a truncated page reads as an
+        all-clear for whatever sat on page two.
         """
-        data = await self.get(
-            f"/repos/{owner}/{repo}/commits/{ref}/check-runs",
-            params={"per_page": 100},
-        )
-        if not isinstance(data, dict):
-            return []
-        return [run for run in (data.get("check_runs") or []) if isinstance(run, dict)]
+        runs: list[dict[str, Any]] = []
+        async for page in self.get_paginated(
+            f"/repos/{owner}/{repo}/commits/{ref}/check-runs", per_page=100
+        ):
+            if not isinstance(page, dict):
+                continue
+            batch = page.get("check_runs")
+            if not batch:
+                break
+            runs.extend(run for run in batch if isinstance(run, dict))
+        return runs
+
+    async def get_failing_workflow_run_names_for_sha(
+        self, owner: str, repo: str, head_sha: str
+    ) -> list[str]:
+        """Names of Actions workflow runs for *head_sha* that did not pass.
+
+        Reported in the **workflow** namespace, which is the one a
+        ruleset rejection quotes.  A check run carries its *job* name
+        instead --- ``.github/workflows/codeql.yml`` declares the workflow
+        ``CodeQL`` and the job ``Audit Repository`` --- so matching a
+        rejection against check-run names compares two different
+        vocabularies and misses whenever they differ.
+
+        A workflow can have several runs on one commit: a re-run, or a
+        dispatch the concurrency group cancelled.  Runs are collapsed to
+        the latest per name before their conclusion is read, so a
+        superseded failure beside a newer success does not read as
+        failing --- the stale-snapshot mistake this whole reading exists
+        to avoid, arriving by another route.  The rule is
+        :func:`check_runs.latest_check_run_per_name`, shared rather than
+        restated.
+
+        Only completed runs count.  A queued or in-progress run has no
+        conclusion and has not failed at anything yet.
+        """
+        collected: list[dict[str, Any]] = []
+        async for page in self.get_paginated(
+            f"/repos/{owner}/{repo}/actions/runs",
+            params={"head_sha": head_sha},
+            per_page=100,
+        ):
+            if not isinstance(page, dict):
+                continue
+            runs = page.get("workflow_runs")
+            if not runs:
+                break
+            collected.extend(run for run in runs if isinstance(run, dict))
+
+        latest = latest_check_run_per_name(collected)
+        failing: list[str] = []
+        for run in collected:
+            name = (run.get("name") or "").strip()
+            if not name or name in failing:
+                continue
+            conclusion = (latest[name].get("conclusion") or "").strip().lower()
+            if conclusion in FAILING_CONCLUSIONS:
+                failing.append(name)
+        return failing
 
     async def get_workflow_run_names_for_sha(
         self, owner: str, repo: str, head_sha: str
@@ -95,18 +153,28 @@ class _ChecksMixin(_GitHubAsyncBase):
 
         GitHub's combined-status endpoint already collapses each context
         to its latest state, so no deduplication is needed here.
+
+        Paginated: the endpoint defaults to 30 statuses a page, which a
+        repository with a moderate integration set exceeds --- and the
+        required context that is actually blocking has no reason to be
+        among the first thirty.
         """
-        data = await self.get(f"/repos/{owner}/{repo}/commits/{ref}/status")
-        if not isinstance(data, dict):
-            return []
         failing: list[str] = []
-        for entry in data.get("statuses") or []:
-            if not isinstance(entry, dict):
+        async for page in self.get_paginated(
+            f"/repos/{owner}/{repo}/commits/{ref}/status", per_page=100
+        ):
+            if not isinstance(page, dict):
                 continue
-            if entry.get("state") in ("failure", "error"):
-                context = entry.get("context")
-                if isinstance(context, str) and context and context not in failing:
-                    failing.append(context)
+            statuses = page.get("statuses")
+            if not statuses:
+                break
+            for entry in statuses:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("state") in ("failure", "error"):
+                    context = entry.get("context")
+                    if isinstance(context, str) and context and context not in failing:
+                        failing.append(context)
         return failing
 
     async def get_behind_by(

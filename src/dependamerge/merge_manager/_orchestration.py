@@ -146,6 +146,10 @@ class _OrchestrationMixin(_MergeManagerBase):
                     exc_info=True,
                 )
 
+        # Every PR has finished, so a failure recorded early in the run
+        # gets one last look before it reaches the operator.
+        final_results = await self._reconcile_reported_failures(final_results)
+
         self._results = final_results
         return final_results
 

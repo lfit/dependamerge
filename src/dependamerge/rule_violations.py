@@ -30,6 +30,7 @@ __all__ = [
     "is_rule_violation",
     "required_workflow_names",
     "required_status_check_names",
+    "status_check_violation_verb",
     "violation_verb",
     "workflow_name_fragments",
 ]
@@ -122,19 +123,25 @@ def _verb_clause(reason: str) -> str:
     be mistaken for it.  For a status-check violation the names are
     individually quoted, so the text after the final quote is used.
     Falls back to the whole string when neither shape is recognised.
+
+    One rejection can name *both* kinds, in which case the workflow
+    clause runs on into the status-check one.  The tail is therefore cut
+    at the status-check marker, so a status context that has already
+    failed cannot report the workflows as failed when they are merely
+    unfinished --- the exact pair that arises while required workflows
+    are still queued.
     """
     if not reason:
         return ""
     workflow = _split_workflow_names(reason)
     if workflow is not None:
-        return workflow[1]
-    if _STATUS_CHECK_MARKER in reason:
+        return workflow[1].split(_STATUS_CHECK_MARKER, 1)[0]
+    clause = _status_check_clause(reason)
+    if clause:
         # ``Required status check "X" is failing.`` --- take everything
         # after the last quoted name.
-        idx = reason.rfind('"')
-        if idx != -1:
-            return reason[idx + 1 :]
-        return reason[reason.find(_STATUS_CHECK_MARKER) :]
+        idx = clause.rfind('"')
+        return clause[idx + 1 :] if idx != -1 else clause
     return reason
 
 
@@ -166,9 +173,53 @@ def required_workflow_names(reason: str) -> list[str]:
     return list(dict.fromkeys(workflow_name_fragments(reason)))
 
 
+def _status_check_clause(reason: str) -> str:
+    """The span of *reason* that belongs to the status-check rule.
+
+    Status-check names are quoted individually, so reading them from the
+    whole string also reads any double quote a *workflow* name happens
+    to contain, and the verb would be taken from whichever clause ended
+    last.  Cutting the clause at the other rule's marker keeps each
+    reading inside its own sentence.  Either rule may come first, so the
+    cut is made relative to the marker rather than at a fixed position.
+
+    This assumes a rule name does not itself contain the other clause's
+    marker.  Names are arbitrary text, so that is an assumption rather
+    than a guarantee --- but GitHub escapes neither delimiter, so a name
+    carrying one is not reliably parseable by any rule, and the failure
+    is confined to how a reason renders.  The *cause* a blocked PR
+    reports is read from live API state, not from this string.
+    """
+    start = reason.find(_STATUS_CHECK_MARKER)
+    if start == -1:
+        return ""
+    clause = reason[start:]
+    end = clause.find(_WORKFLOW_MARKER)
+    return clause if end == -1 else clause[:end]
+
+
 def required_status_check_names(reason: str) -> list[str]:
     """Context names quoted in a ``Required status check \"…\"`` clause."""
-    if not reason or _STATUS_CHECK_MARKER not in reason:
+    clause = _status_check_clause(reason)
+    if not clause:
         return []
-    names = [c.strip() for c in re.findall(r'"([^"]+)"', reason) if c.strip()]
+    names = [c.strip() for c in re.findall(r'"([^"]+)"', clause) if c.strip()]
     return list(dict.fromkeys(names))
+
+
+def status_check_violation_verb(reason: str) -> str:
+    """The outcome stated for the ``Required status check`` clause.
+
+    :func:`violation_verb` answers for the rejection as a whole and
+    resolves a *workflow* clause in preference, so on a rejection naming
+    both kinds it reports the workflows' outcome.  Applying that to the
+    status checks is wrong whenever the two differ, which is the usual
+    case: workflows that have not finished sit alongside a status
+    context that has already failed.
+    """
+    clause = _status_check_clause(reason)
+    if not clause:
+        return "not satisfied"
+    closing = clause.rfind('"')
+    tail = clause[closing + 1 :] if closing != -1 else clause
+    return "failed" if "fail" in tail.lower() else "not satisfied"

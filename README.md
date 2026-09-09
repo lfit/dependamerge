@@ -783,6 +783,64 @@ Enter the string above to continue (or press Enter to cancel):
 🚀 Final Results: 2 merged, 0 failed
 ```
 
+### Run Outcomes
+
+Every pull request a run touches ends in a single category. Each
+category keeps its own counter, because each calls for a different
+response:
+
+<!-- markdownlint-disable MD013 MD060 -->
+
+| Outcome               | Meaning                                                     | What to do                      |
+| --------------------- | ----------------------------------------------------------- | ------------------------------- |
+| ✅ Merged             | The run merged it                                           | Nothing                         |
+| ⏳ Auto-merge pending | Armed; GitHub completes the merge once required checks pass | Nothing                         |
+| ⏱️ Unsettled          | The earlier refusal no longer applies                       | Re-run to merge it              |
+| ❌ Failed             | A blocker remains, or the run hit an error                  | Investigate the reported reason |
+| 🛑 Blocked            | Will not merge without human help                           | Investigate                     |
+| ⏭️ Skipped            | Already merged externally, or out of scope                  | Nothing                         |
+| 🚪 Closed             | Closed without merging during the run                       | Nothing                         |
+
+<!-- markdownlint-enable MD013 MD060 -->
+
+**Unsettled is not a failure.** GitHub's merge rejection describes the
+state at the instant of the attempt. That state can stop holding: a
+required check finishes, a rebase lands, a base branch settles. The run
+re-reads every failure before it prints the summary, and records a pull
+request whose refusal no longer applies as unsettled rather than
+failed. The failure count then holds work that genuinely needs
+attention.
+
+A refusal GitHub made *about the pull request* is the one kind that
+clears this way. A failure the run itself hit — a missing token scope,
+a 502, a rebase that did not complete — stays reported, because a
+mergeable-looking PR says nothing about whether that will happen again.
+
+A failure names the condition blocking the merge, which the run derives
+from live state rather than from the refusal's wording. Three sources
+feed it, and they carry different weight:
+
+<!-- markdownlint-disable MD013 MD060 -->
+
+| Source                 | Carries          | Reported as                                                       |
+| ---------------------- | ---------------- | ----------------------------------------------------------------- |
+| commit status contexts | context name     | `blocked by required status check:` when the branch requires it   |
+| Actions workflow runs  | workflow `name:` | `blocked by required workflow:` when the refusal named it         |
+| check runs             | *job* name       | `also failing:` — nothing here shows which jobs a branch requires |
+
+<!-- markdownlint-enable MD013 MD060 -->
+
+That distinction keeps an advisory integration clear of blame for a
+merge it never blocked. Anything under `also failing` (or `failing
+checks`, when the run proved nothing) is genuinely failing but carries
+no evidence that the branch requires it — worth reading, though perhaps
+not the cause.
+
+The three do not overlap. pre-commit.ci and DCO report as status
+contexts and stay invisible to check runs, while a workflow and its
+jobs have different names: `codeql.yml` declares the workflow `CodeQL`
+and the job `Audit Repository`, and a refusal quotes the first alone.
+
 ### Dry Run Mode
 
 Use `--dry-run` to perform a complete analysis and preview without making any

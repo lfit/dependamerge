@@ -35,6 +35,19 @@ class MergeStatus(Enum):
     # superseded, or a human closed it mid-run).  Distinct from FAILED
     # because there is nothing for the operator to follow up on.
     CLOSED = "closed"
+    # Terminal: the run did not merge the PR, and nothing about it needs
+    # a human either.  Whatever GitHub refused the merge over has since
+    # stopped holding --- a required check finished, a rebase landed, a
+    # base branch settled --- so re-running is expected to merge it.
+    #
+    # Deliberately not ``PENDING``, which is the *initial* non-terminal
+    # state every result starts in, nor ``AUTO_MERGE_PENDING``, where
+    # GitHub finishes the merge server-side without another run.  The
+    # distinction this carries is the one the counts were missing:
+    # "could not merge" and "had not finished yet" call for different
+    # responses, and reporting both as FAILED sent operators looking for
+    # a cause on PRs that had none.
+    UNSETTLED = "unsettled"
 
 
 @dataclass
@@ -51,6 +64,18 @@ class MergeResult:
     warning: str | None = None
     attempts: int = 0
     duration: float = 0.0
+    # Whether ``error`` records GitHub *refusing the merge*, as opposed
+    # to the run itself failing --- an unhandled exception, a rebase that
+    # did not complete, a token without the rights.
+    #
+    # Only a refusal's stated cause is a snapshot that can expire, so
+    # only a refusal may be withdrawn on a later reading of the PR.  A
+    # run-side failure says nothing about mergeability, and rewriting one
+    # because the PR happens to look clean would bury the actionable
+    # error and tell the operator to re-run something that will fail the
+    # same way.  Defaults to False so a new failure path is excluded
+    # until it opts in, rather than silently inheriting the correction.
+    merge_refused: bool = False
 
 
 class RecreateCause(Enum):

@@ -66,8 +66,10 @@ class _SinglePrOutcomeMixin(_SinglePrRecreateMixin):
             return early
 
         # Compute failure summary once — used for both the recreate
-        # decision and the final error reporting.
-        failure_reason = await self._get_failure_summary(flow.pr_info)
+        # decision and the final error reporting.  ``refused`` says
+        # whether GitHub declined on the PR's state, which is the only
+        # kind of reason a later reading may withdraw.
+        failure_reason, refused = await self._get_failure_summary(flow.pr_info)
 
         recreate = await self._maybe_recreate_dependabot_pr(flow, failure_reason)
         if recreate.outcome is RecreateOutcome.READY and recreate.pr_info is not None:
@@ -97,6 +99,7 @@ class _SinglePrOutcomeMixin(_SinglePrRecreateMixin):
                 flow.repo_name,
                 flow.result,
                 failure_reason,
+                refused,
             )
         return None
 

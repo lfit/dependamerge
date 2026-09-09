@@ -36,6 +36,7 @@ class _MergeCounters(NamedTuple):
     prs_failed: int
     prs_skipped: int
     prs_blocked: int
+    prs_unsettled: int
     rebases_triggered: int
     retriggers_issued: int
     pr_states: list[str]
@@ -60,6 +61,7 @@ def _snapshot_counters(tracker: MergeProgressTracker) -> _MergeCounters:
             prs_failed=tracker.prs_failed,
             prs_skipped=tracker.prs_skipped,
             prs_blocked=tracker.prs_blocked,
+            prs_unsettled=tracker.prs_unsettled,
             rebases_triggered=tracker.rebases_triggered,
             retriggers_issued=tracker.retriggers_issued,
             pr_states=list(tracker._pr_states.values()),
@@ -159,6 +161,8 @@ def _build_stats_parts(
         stats_parts.append(f"⏭️ Skipped: {counters.prs_skipped}")
     if counters.prs_blocked > 0:
         stats_parts.append(f"🛑 Blocked: {counters.prs_blocked}")
+    if counters.prs_unsettled > 0:
+        stats_parts.append(f"⏱️ Unsettled: {counters.prs_unsettled}")
     return stats_parts
 
 

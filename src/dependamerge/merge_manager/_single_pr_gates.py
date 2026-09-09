@@ -17,6 +17,12 @@ from ._base import _MergeManagerBase
 from ._single_pr_context import _MergeFlow
 from ._types import MergeResult, MergeStatus
 
+#: Mergeable states worth attempting a self-inflicted-block repair on.
+#: ``blocked`` is the reported cause; ``unknown`` is what GitHub returns
+#: while it is still working the answer out, which is precisely when a
+#: PR's checks have not settled.
+_REPAIRABLE_STATES = frozenset({"blocked", "unknown"})
+
 
 class _SinglePrGatesMixin(_MergeManagerBase):
     """The pre-merge screening steps of the single-PR sequence."""
@@ -170,16 +176,40 @@ class _SinglePrGatesMixin(_MergeManagerBase):
         title/commit-subject mismatch (which fails the semantic check
         permanently, so waiting out the merge timeout would only delay
         discovering it).  Avoids triggering side effects in preview.
+
+        ``unknown`` is repaired alongside ``blocked``.  GitHub computes
+        mergeability in the background and reports ``unknown`` until it
+        has, which is the window a freshly pushed pull request sits in
+        --- so the PRs whose checks were still settling, the ones this
+        repair exists for, were the ones it skipped.  Acting there is
+        safe because the repair's own preconditions do not consult the
+        mergeable state: it fires only when pre-commit.ci is a required
+        check and its status is missing or stalled, and the title repair
+        only when the subject genuinely disagrees with the title.
+
+        One precondition does have to weaken for ``unknown``.  A status
+        pre-commit.ci has not reported at all normally counts as stuck,
+        but on a PR GitHub has not settled it is indistinguishable from
+        one that has not propagated yet --- so treating it as stalled
+        would post ``pre-commit.ci run`` during an ordinary propagation
+        window, and then wait five minutes for a run nothing was wrong
+        with.  A missing status is therefore only stuck once GitHub has
+        settled the PR and still reports it ``blocked``; ``error`` and
+        aged-``pending`` remain stuck in both states, because each is a
+        reading rather than an absence.
         """
         pr_info = flow.pr_info
         if not (
             not self.preview_mode
-            and pr_info.mergeable_state == "blocked"
+            and pr_info.mergeable_state in _REPAIRABLE_STATES
             and self._github_client
         ):
             return
 
-        precommit_fixed = await self._trigger_stale_precommit_ci(pr_info)
+        precommit_fixed = await self._trigger_stale_precommit_ci(
+            pr_info,
+            treat_missing_as_stuck=pr_info.mergeable_state == "blocked",
+        )
         if precommit_fixed:
             # Re-fetch PR state now that pre-commit.ci has passed
             try:

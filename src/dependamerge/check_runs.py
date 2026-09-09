@@ -36,7 +36,26 @@ __all__ = [
 # is included because a genuinely cancelled *latest* run should block;
 # it is only harmless when superseded, which the deduplication below
 # resolves before this set is consulted.
-FAILING_CONCLUSIONS = frozenset({"failure", "cancelled", "timed_out"})
+#
+# ``action_required`` and ``startup_failure`` are terminal and blocking
+# in the same way: the first is a check waiting on a human, the second a
+# workflow that never started (invalid YAML, an unresolvable reusable
+# reference).  Neither will report anything further, and a required
+# check in either state holds the merge exactly as a failure does.
+#
+# ``stale`` is deliberately excluded.  GitHub applies it to a run that a
+# later push made irrelevant, which says the result no longer describes
+# the head --- not that the head is broken.  Reading it as a failure
+# would let a superseded run block a commit it never examined.
+FAILING_CONCLUSIONS = frozenset(
+    {
+        "failure",
+        "cancelled",
+        "timed_out",
+        "action_required",
+        "startup_failure",
+    }
+)
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
@@ -64,8 +83,20 @@ def _run_timestamp(run: Mapping[str, Any]) -> datetime | None:
     Prefers completion over start: two runs may start in the same second
     while their completion times still order them correctly.  Accepts
     both REST (``completed_at``) and GraphQL (``completedAt``) spellings.
+
+    ``updated_at`` and ``run_started_at`` are the Actions *workflow run*
+    spellings, which carry no ``completed_at``.  Including them lets the
+    same "which run is authoritative" rule serve both shapes rather than
+    each growing its own.
     """
-    for key in ("completed_at", "completedAt", "started_at", "startedAt"):
+    for key in (
+        "completed_at",
+        "completedAt",
+        "updated_at",
+        "started_at",
+        "startedAt",
+        "run_started_at",
+    ):
         parsed = _parse_timestamp(run.get(key))
         if parsed is not None:
             return parsed

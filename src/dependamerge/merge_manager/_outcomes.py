@@ -74,7 +74,7 @@ class _OutcomeTrackingMixin(_MergeManagerBase):
 
         This is the **single** place terminal outcomes reach the
         tracker: every PR ends in exactly one counter (merged /
-        failed / skipped / blocked / closed / pending), its
+        failed / skipped / blocked / closed / pending / unsettled), its
         transitory
         display state (rebasing, waiting, …) is cleared, and the
         PR-level completion percentage advances.  Centralising the
@@ -97,6 +97,8 @@ class _OutcomeTrackingMixin(_MergeManagerBase):
             tracker.increment_closed(pr_key)
         elif status == MergeStatus.AUTO_MERGE_PENDING:
             tracker.merge_pending(pr_key)
+        elif status == MergeStatus.UNSETTLED:
+            tracker.merge_unsettled(pr_key)
         else:
             # Defensive: an unexpected terminal status still counts
             # toward completion so the percentage reaches 100%.  Clear
@@ -106,6 +108,37 @@ class _OutcomeTrackingMixin(_MergeManagerBase):
             # mapping here.
             tracker.track_pr_state(pr_key, None)
             tracker.pr_completed()
+
+    async def _reconcile_reported_failures(
+        self, results: list[MergeResult]
+    ) -> list[MergeResult]:
+        """Re-judge failures once more, after every PR has finished.
+
+        The per-PR confirmation runs the moment a PR's task completes,
+        which for an owner-wide run is long before the summary prints.
+        A pull request refused at minute two can go green at minute ten
+        while its siblings are still being merged, and nothing looked
+        again --- so it was reported as failed despite being mergeable by
+        the time the operator read the line.  That is the case this whole
+        change exists to remove, and the earlier confirmation alone does
+        not remove it.
+
+        Costs one GET per PR still reported as failed --- seventeen, in
+        the run that prompted this --- and only for those, since
+        :meth:`_confirm_failure` returns early for any other status.
+
+        The tracker is corrected alongside the result, so the live counts
+        and the closing summary cannot disagree about the same run.
+        """
+        for result in results:
+            if result.status is not MergeStatus.FAILED:
+                continue
+            before = result.status.value
+            await self._confirm_failure(result.pr_info, result)
+            after = result.status.value
+            if after != before and self.progress_tracker:
+                self.progress_tracker.reclassify_outcome(before, after)
+        return results
 
     def _track_pr_state(self, pr_info: PullRequestInfo, state: str | None) -> None:
         """Move a PR between transitory tracker states (or clear)."""
@@ -170,6 +203,7 @@ class _OutcomeTrackingMixin(_MergeManagerBase):
                 "merged": 0,
                 "auto_merge_pending": 0,
                 "failed": 0,
+                "unsettled": 0,
                 "skipped": 0,
                 "success_rate": 0.0,
                 "average_duration": 0.0,
@@ -181,6 +215,12 @@ class _OutcomeTrackingMixin(_MergeManagerBase):
             1 for r in self._results if r.status == MergeStatus.AUTO_MERGE_PENDING
         )
         failed = sum(1 for r in self._results if r.status == MergeStatus.FAILED)
+        # Reported apart from ``failed`` for the same reason the console
+        # summary separates them: a programmatic consumer counting
+        # failures would otherwise either miss these PRs entirely or,
+        # seeing them only in ``total``, have no way to tell that they
+        # need a re-run rather than a person.
+        unsettled = sum(1 for r in self._results if r.status == MergeStatus.UNSETTLED)
         skipped = sum(1 for r in self._results if r.status == MergeStatus.SKIPPED)
 
         success_rate = (merged / total) * 100 if total > 0 else 0.0
@@ -193,6 +233,7 @@ class _OutcomeTrackingMixin(_MergeManagerBase):
             "merged": merged,
             "auto_merge_pending": auto_merge_pending,
             "failed": failed,
+            "unsettled": unsettled,
             "skipped": skipped,
             "success_rate": success_rate,
             "average_duration": average_duration,
